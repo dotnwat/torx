@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // Params are the configuration values for one job variant (its parametrization).
@@ -190,7 +191,7 @@ func (jc *JobContext) Bind(nodes []*Node) {
 // Log emits a log event to the job's event sink.
 func (jc *JobContext) Log(level, message string) {
 	if jc.sink != nil {
-		jc.sink.Emit(Event{Kind: EventLog, Level: level, Message: message})
+		jc.sink.Emit(Event{Kind: EventLog, Level: level, Message: message, Time: time.Now()})
 	}
 }
 

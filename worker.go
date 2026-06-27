@@ -41,8 +41,21 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 	// Results and events carry the variant id (base id plus parameters); the
 	// factory is still looked up under the base id.
 	id := variantID(a.JobID, a.Params)
+
+	// When the run persists results, give the job its own directory and tee its
+	// event stream into the on-disk trace alongside the caller's sink.
+	jobDir := jobResultsDir(a.Session.ResultsDir, id)
+	if jobDir != "" {
+		if trace, err := newTraceSink(jobDir); err == nil {
+			defer trace.Close()
+			sink = teeSink{sinks: []EventSink{sink, trace}}
+		}
+	}
+
 	fail := func(err error) JobResult {
-		return JobResult{ID: id, Status: StatusFail, Start: start, Stop: time.Now(), Error: errorInfo(err)}
+		res := JobResult{ID: id, Status: StatusFail, Start: start, Stop: time.Now(), Error: errorInfo(err)}
+		writeResultJSON(jobDir, res)
+		return res
 	}
 
 	factory, ok := lookupJob(a.JobID)
@@ -50,6 +63,7 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 		return fail(fmt.Errorf("worker: unknown job %q", a.JobID))
 	}
 	jc := NewJobContext(a.Params, sink)
+	jc.resultsDir = jobDir
 	job := factory()
 	job.Declare(jc)
 
@@ -62,7 +76,9 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 	}
 	jc.Bind(nodes)
 
-	return runJob(ctx, start, id, job, jc, sink)
+	res := runJob(ctx, start, id, job, jc, sink)
+	writeResultJSON(jobDir, res)
+	return res
 }
 
 func runJob(ctx context.Context, start time.Time, id string, job Job, jc *JobContext, sink EventSink) JobResult {
@@ -74,6 +90,9 @@ func runJob(ctx context.Context, start time.Time, id string, job Job, jc *JobCon
 	} else {
 		runErr = recovered(func() error { return job.Run(ctx, jc) })
 	}
+	// Record the outcome before teardown so artifact collection can use it (a
+	// failure gathers all artifacts; a pass gathers only the collect-on-pass set).
+	jc.passed = runErr == nil
 	// Teardown runs even when the context was cancelled, so detach from it.
 	tdErr := recovered(func() error { return job.Teardown(context.WithoutCancel(ctx), jc) })
 
@@ -88,6 +107,7 @@ func runJob(ctx context.Context, start time.Time, id string, job Job, jc *JobCon
 	default:
 		res.Status = StatusPass
 	}
+	sink.Emit(Event{Kind: EventFinished, Source: id, Time: time.Now(), Message: string(res.Status)})
 	return res
 }
 

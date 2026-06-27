@@ -75,6 +75,19 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 		opts.MaxParallel = 1
 	}
 
+	// Persist the run when a results root is configured: a timestamped run
+	// directory (with a "latest" symlink) whose path workers fill in per job.
+	runDir := ""
+	if opts.ResultsDir != "" {
+		stamp := time.Now().UTC().Format("2006-01-02T15-04-05Z")
+		if d, err := makeRunDir(opts.ResultsDir, stamp); err == nil {
+			runDir = d
+			opts.ResultsDir = runDir
+		} else {
+			opts.ResultsDir = "" // cannot create the tree; do not ask workers to persist
+		}
+	}
+
 	type plan struct {
 		req  JobRequest
 		spec PoolSpec
@@ -146,6 +159,9 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 	}
 
 	suite := SuiteResult{Jobs: results}
+	if runDir != "" {
+		writeRunJSON(runDir, suite)
+	}
 	for _, rep := range opts.Reporters {
 		rep.Finish(suite)
 	}

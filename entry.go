@@ -52,6 +52,7 @@ func driverMain(args []string) int {
 	nodes := fs.Int("nodes", 0, "local nodes in the pool (0 sizes to the largest job)")
 	parallel := fs.Int("parallel", 1, "maximum concurrent jobs")
 	resultsPath := fs.String("results", "", "write newline-delimited JSON results to this file")
+	resultsDir := fs.String("results-dir", "results", "write the per-run results tree under this directory (empty to disable)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -85,7 +86,7 @@ func driverMain(args []string) int {
 	}
 
 	res := Run(context.Background(), localPool(size), SelfExecLauncher{}, requests,
-		RunOptions{MaxParallel: *parallel, Reporters: reporters})
+		RunOptions{MaxParallel: *parallel, Reporters: reporters, ResultsDir: *resultsDir})
 	if !res.Ok() {
 		return 1
 	}
