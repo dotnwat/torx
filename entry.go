@@ -12,8 +12,9 @@ import (
 
 // Main is the entry point a suite binary calls. With a "worker" first argument it
 // runs a single job from its pipes and exits; otherwise it runs as the driver,
-// scheduling every registered job onto a local pool, printing the summary, and
-// exiting non-zero if any job failed.
+// discovering the matching jobs (positional arguments select by id), scheduling
+// them onto a local pool, printing the summary, and exiting non-zero if any job
+// failed.
 //
 // A suite's main is just:
 //
@@ -54,12 +55,15 @@ func driverMain(args []string) int {
 		return 2
 	}
 
-	var requests []JobRequest
-	for _, id := range RegisteredJobs() {
-		requests = append(requests, JobRequest{ID: id})
+	// Positional arguments select jobs by id (regular expressions); with none,
+	// every registered job runs.
+	requests, err := Discover(fs.Args()...)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "torx:", err)
+		return 2
 	}
 	if len(requests) == 0 {
-		fmt.Fprintln(os.Stderr, "torx: no jobs registered")
+		fmt.Fprintln(os.Stderr, "torx: no jobs matched")
 		return 1
 	}
 

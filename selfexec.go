@@ -97,7 +97,7 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 
 	waitErr := cmd.Wait()
 	if !haveResult {
-		return failResult(a.JobID, fmt.Errorf("driver: worker produced no result: %v", waitErr)), nil
+		return failResult(variantID(a.JobID, a.Params), fmt.Errorf("driver: worker produced no result: %v", waitErr)), nil
 	}
 	return result, nil
 }

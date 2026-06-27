@@ -84,11 +84,11 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 	for _, req := range requests {
 		spec, err := sizeJob(req)
 		if err != nil {
-			results = append(results, failResult(req.ID, err))
+			results = append(results, failResult(variantID(req.ID, req.Params), err))
 			continue
 		}
 		if !pool.CanEverFit(spec) {
-			results = append(results, failResult(req.ID,
+			results = append(results, failResult(variantID(req.ID, req.Params),
 				fmt.Errorf("driver: job needs %d node(s), pool cannot satisfy it", spec.Size())))
 			continue
 		}
@@ -117,7 +117,7 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 			pending = append(pending[:idx], pending[idx+1:]...)
 			sub, err := pool.Allocate(p.spec)
 			if err != nil {
-				results = append(results, failResult(p.req.ID, err))
+				results = append(results, failResult(variantID(p.req.ID, p.req.Params), err))
 				continue
 			}
 			active++
@@ -144,14 +144,15 @@ func runOne(ctx context.Context, pool *Pool, launcher WorkerLauncher, req JobReq
 		defer cancel()
 	}
 
+	id := variantID(req.ID, req.Params)
 	var sink EventSink = discardSink{}
 	if opts.Sink != nil {
-		sink = sourceSink{source: req.ID, inner: opts.Sink}
+		sink = sourceSink{source: id, inner: opts.Sink}
 	}
 
 	res, err := launcher.Launch(jobCtx, buildAssignment(req, sub, opts), sink)
 	if err != nil {
-		res = failResult(req.ID, err)
+		res = failResult(id, err)
 	}
 	pool.Free(sub)
 	done <- res

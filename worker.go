@@ -38,8 +38,11 @@ func RunWorker(ctx context.Context, in io.Reader, out io.Writer) error {
 
 func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 	start := time.Now()
+	// Results and events carry the variant id (base id plus parameters); the
+	// factory is still looked up under the base id.
+	id := variantID(a.JobID, a.Params)
 	fail := func(err error) JobResult {
-		return JobResult{ID: a.JobID, Status: StatusFail, Start: start, Stop: time.Now(), Error: errorInfo(err)}
+		return JobResult{ID: id, Status: StatusFail, Start: start, Stop: time.Now(), Error: errorInfo(err)}
 	}
 
 	factory, ok := lookupJob(a.JobID)
@@ -59,7 +62,7 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 	}
 	jc.Bind(nodes)
 
-	return runJob(ctx, start, a.JobID, job, jc, sink)
+	return runJob(ctx, start, id, job, jc, sink)
 }
 
 func runJob(ctx context.Context, start time.Time, id string, job Job, jc *JobContext, sink EventSink) JobResult {
