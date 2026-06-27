@@ -170,10 +170,17 @@ func (s SuiteResult) Render() string {
 		b.WriteString(j.Render())
 		b.WriteByte('\n')
 	}
-	c := s.Counts()
-	fmt.Fprintf(&b, "\n%d jobs: %d passed, %d failed, %d flaky, %d ignored",
-		len(s.Jobs), c[StatusPass], c[StatusFail], c[StatusFlaky], c[StatusIgnore])
+	b.WriteByte('\n')
+	b.WriteString(s.summaryLine())
 	return b.String()
+}
+
+// summaryLine is the one-line tally of job outcomes shared by Render and
+// ConsoleReporter.
+func (s SuiteResult) summaryLine() string {
+	c := s.Counts()
+	return fmt.Sprintf("%d jobs: %d passed, %d failed, %d flaky, %d ignored",
+		len(s.Jobs), c[StatusPass], c[StatusFail], c[StatusFlaky], c[StatusIgnore])
 }
 
 // JSON marshals the suite result as indented JSON, the machine-readable

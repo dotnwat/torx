@@ -32,6 +32,7 @@ type RunOptions struct {
 	ExitFirst   bool          // stop scheduling after the first failure
 	ResultsDir  string        // results root passed to each worker
 	Sink        EventSink     // receives every job's events; must be concurrency-safe
+	Reporters   []Reporter    // consume each result as it lands, then the aggregate
 }
 
 // WorkerLauncher runs one job described by an Assignment, forwarding its events
@@ -80,15 +81,25 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 	}
 
 	var results []JobResult
+	// record keeps the aggregate and feeds each result to the reporters as it
+	// lands; the driver records from a single goroutine, so reporters see results
+	// one at a time and in completion order.
+	record := func(res JobResult) {
+		results = append(results, res)
+		for _, rep := range opts.Reporters {
+			rep.Report(res)
+		}
+	}
+
 	var pending []plan
 	for _, req := range requests {
 		spec, err := sizeJob(req)
 		if err != nil {
-			results = append(results, failResult(variantID(req.ID, req.Params), err))
+			record(failResult(variantID(req.ID, req.Params), err))
 			continue
 		}
 		if !pool.CanEverFit(spec) {
-			results = append(results, failResult(variantID(req.ID, req.Params),
+			record(failResult(variantID(req.ID, req.Params),
 				fmt.Errorf("driver: job needs %d node(s), pool cannot satisfy it", spec.Size())))
 			continue
 		}
@@ -117,7 +128,7 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 			pending = append(pending[:idx], pending[idx+1:]...)
 			sub, err := pool.Allocate(p.spec)
 			if err != nil {
-				results = append(results, failResult(variantID(p.req.ID, p.req.Params), err))
+				record(failResult(variantID(p.req.ID, p.req.Params), err))
 				continue
 			}
 			active++
@@ -128,12 +139,17 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 		}
 		res := <-done
 		active--
-		results = append(results, res)
+		record(res)
 		if (opts.ExitFirst && res.Status == StatusFail) || ctx.Err() != nil {
 			stop = true
 		}
 	}
-	return SuiteResult{Jobs: results}
+
+	suite := SuiteResult{Jobs: results}
+	for _, rep := range opts.Reporters {
+		rep.Finish(suite)
+	}
+	return suite
 }
 
 func runOne(ctx context.Context, pool *Pool, launcher WorkerLauncher, req JobRequest, sub *SubPool, opts RunOptions, done chan<- JobResult) {

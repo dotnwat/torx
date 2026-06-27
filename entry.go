@@ -51,6 +51,7 @@ func driverMain(args []string) int {
 	fs := flag.NewFlagSet("torx", flag.ContinueOnError)
 	nodes := fs.Int("nodes", 0, "local nodes in the pool (0 sizes to the largest job)")
 	parallel := fs.Int("parallel", 1, "maximum concurrent jobs")
+	resultsPath := fs.String("results", "", "write newline-delimited JSON results to this file")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -72,8 +73,19 @@ func driverMain(args []string) int {
 		size = maxDemand(requests)
 	}
 
-	res := Run(context.Background(), localPool(size), SelfExecLauncher{}, requests, RunOptions{MaxParallel: *parallel})
-	fmt.Println(res.Render())
+	reporters := []Reporter{ConsoleReporter{W: os.Stdout}}
+	if *resultsPath != "" {
+		f, err := os.Create(*resultsPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "torx:", err)
+			return 2
+		}
+		defer f.Close()
+		reporters = append(reporters, NewJSONReporter(f))
+	}
+
+	res := Run(context.Background(), localPool(size), SelfExecLauncher{}, requests,
+		RunOptions{MaxParallel: *parallel, Reporters: reporters})
 	if !res.Ok() {
 		return 1
 	}
