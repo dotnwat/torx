@@ -42,6 +42,8 @@ func echoServerMain(args []string) int {
 		return 1
 	}
 	defer ln.Close()
+	// Logged to stdout, which StartCaptured collects into the results tree.
+	fmt.Printf("echo server listening on %s\n", net.JoinHostPort(echoHost, args[0]))
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -99,7 +101,9 @@ func (s *EchoService) StartNode(ctx context.Context, n *torx.Node) error {
 	if err != nil {
 		return err
 	}
-	server, err := n.Stream(ctx, torx.Command(exe, "echo-server", strconv.Itoa(port)))
+	// StartCaptured redirects the server's output to a node-local file and
+	// registers it for collection after the job.
+	server, err := s.StartCaptured(ctx, n, torx.Command(exe, "echo-server", strconv.Itoa(port)))
 	if err != nil {
 		return err
 	}

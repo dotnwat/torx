@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dotnwat/torx"
@@ -37,12 +39,28 @@ func TestEchoEndToEnd(t *testing.T) {
 	// SelfExecLauncher re-executes this test binary in worker mode, which then
 	// launches the echo server as a third process, so the run goes through the
 	// full driver/worker/service path.
-	res := torx.Run(context.Background(), demoPool(t, 1), torx.SelfExecLauncher{}, reqs, torx.RunOptions{})
+	root := t.TempDir()
+	res := torx.Run(context.Background(), demoPool(t, 1), torx.SelfExecLauncher{}, reqs,
+		torx.RunOptions{ResultsDir: root})
 	if !res.Ok() {
 		t.Fatalf("echo suite failed:\n%s", res.Render())
 	}
 	if res.Jobs[0].Summary == "" {
 		t.Errorf("expected a result summary from the echo job, got none")
+	}
+
+	// The echo server's captured output is collected into the results tree.
+	target, err := os.Readlink(filepath.Join(root, "latest"))
+	if err != nil {
+		t.Fatalf("latest symlink: %v", err)
+	}
+	logPath := filepath.Join(root, target, "demo.echo", "echo", "node-0", "stdout.log")
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("collected echo log missing at %s: %v", logPath, err)
+	}
+	if !strings.Contains(string(log), "echo server listening") {
+		t.Errorf("collected echo log lacks the server's startup output:\n%s", log)
 	}
 }
 
