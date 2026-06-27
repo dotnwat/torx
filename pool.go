@@ -88,6 +88,21 @@ func (p *Pool) CanAllocate(spec PoolSpec) bool {
 	return ok
 }
 
+// CanEverFit reports whether spec could be satisfied by the pool's nodes if all
+// were free -- so the scheduler can fail a job that can never run instead of
+// waiting for it forever.
+func (p *Pool) CanEverFit(spec PoolSpec) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	all := make([]*Node, 0, p.total)
+	all = append(all, p.free...)
+	for n := range p.inUse {
+		all = append(all, n)
+	}
+	_, ok := matchSpecs(all, spec.Nodes)
+	return ok
+}
+
 // Free returns a SubPool's nodes to the pool. It is idempotent.
 func (p *Pool) Free(sub *SubPool) {
 	if sub == nil {
