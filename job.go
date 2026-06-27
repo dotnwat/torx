@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sync"
 )
 
@@ -91,12 +92,17 @@ func (JobBase) Setup(ctx context.Context, jc *JobContext) error {
 	return nil
 }
 
-// Teardown tears the job's services down (stop then clean, in reverse order) and
-// runs its finalizers, aggregating all errors so none is masked. Override to
-// customize.
+// Teardown stops the job's services, collects their artifacts, cleans them, and
+// runs its finalizers -- in that order, all in reverse registration order,
+// aggregating every error so none is masked. Collection happens after stop so
+// logs are complete and before clean so they are not deleted first. Override to
+// customize, calling jc.CollectArtifacts between stopping and cleaning to keep the
+// services' logs.
 func (JobBase) Teardown(ctx context.Context, jc *JobContext) error {
 	var errs MultiError
-	errs.Append(jc.registry.Teardown(ctx))
+	errs.Append(jc.registry.StopAll(ctx))
+	errs.Append(jc.CollectArtifacts(ctx))
+	errs.Append(jc.registry.CleanAll(ctx))
 	errs.Append(jc.finalizers.Run(ctx))
 	return errs.Err()
 }
@@ -110,6 +116,13 @@ type JobContext struct {
 	registry   ServiceRegistry
 	finalizers Finalizers
 	sink       EventSink
+
+	// resultsDir is the job's directory in the results tree, or "" when the run
+	// is not persisting results. passed records the job outcome for collection
+	// (a failure gathers all artifacts; a pass gathers only CollectOnPass ones).
+	// Both are set by the worker before teardown.
+	resultsDir string
+	passed     bool
 
 	mu      sync.Mutex
 	data    json.RawMessage
@@ -127,6 +140,29 @@ func (jc *JobContext) Register(svc Service) { jc.registry.Add(svc) }
 
 // Services returns the declared services in registration order.
 func (jc *JobContext) Services() []Service { return jc.registry.Services() }
+
+// CollectArtifacts gathers each declared service's artifacts into the job's
+// results directory, under <service>/<node>/. It is a no-op when the run is not
+// persisting results. JobBase.Teardown calls it between stopping and cleaning
+// services; a job overriding Teardown should call it there too to keep its
+// services' logs.
+func (jc *JobContext) CollectArtifacts(ctx context.Context) error {
+	if jc.resultsDir == "" {
+		return nil
+	}
+	var errs MultiError
+	for _, svc := range jc.registry.Services() {
+		arch, ok := svc.(Archiver)
+		if !ok {
+			continue
+		}
+		for _, n := range svc.Nodes() {
+			dest := filepath.Join(jc.resultsDir, svc.Name(), n.Name())
+			errs.Append(Collect(ctx, n, arch.Artifacts(n), jc.passed, dest))
+		}
+	}
+	return errs.Err()
+}
 
 // PoolSpec is the job's total node demand: the concatenation of its services'
 // specs in registration order.

@@ -22,6 +22,15 @@ type Artifact struct {
 	CollectOnPass bool   // gather even when the job passed; a failure gathers all
 }
 
+// Archiver is implemented by a service that exposes artifacts to collect after a
+// job runs: log files, captured console output, data dumps -- anything on its
+// nodes. ServiceBase implements it from the artifacts registered with AddArtifact
+// (including any captured by StartCaptured); a service may override Artifacts to
+// compute the set however it needs.
+type Archiver interface {
+	Artifacts(n *Node) []Artifact
+}
+
 // ShouldCollect reports whether a should be gathered given the job outcome.
 func ShouldCollect(a Artifact, passed bool) bool {
 	return !passed || a.CollectOnPass

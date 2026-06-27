@@ -60,6 +60,9 @@ type ServiceBase struct {
 	spec  PoolSpec
 	hooks PerNode
 	nodes []*Node
+
+	mu        sync.Mutex
+	artifacts map[string][]Artifact // node name -> artifacts to collect
 }
 
 // NewServiceBase builds a ServiceBase. hooks is the concrete service, driven by
@@ -80,6 +83,27 @@ func (b *ServiceBase) Nodes() []*Node { return b.nodes }
 
 // Bind gives the service its allocated nodes.
 func (b *ServiceBase) Bind(nodes []*Node) { b.nodes = nodes }
+
+// AddArtifact registers a node-local file to collect after the job, placed under
+// the service's directory in the results tree. Use it for outputs the framework
+// does not capture automatically -- a --log-file target, a data dump, a metrics
+// file. StartCaptured uses it to register captured console output.
+func (b *ServiceBase) AddArtifact(n *Node, a Artifact) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.artifacts == nil {
+		b.artifacts = make(map[string][]Artifact)
+	}
+	b.artifacts[n.Name()] = append(b.artifacts[n.Name()], a)
+}
+
+// Artifacts returns the artifacts registered for n, implementing Archiver. A
+// service may override this to compute its artifacts dynamically instead.
+func (b *ServiceBase) Artifacts(n *Node) []Artifact {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]Artifact(nil), b.artifacts[n.Name()]...)
+}
 
 // Start stops, cleans, and starts each node so the service begins from a known
 // state, returning on the first StartNode error and leaving teardown to stop
