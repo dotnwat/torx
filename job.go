@@ -138,11 +138,11 @@ func (jc *JobContext) PoolSpec() PoolSpec {
 	return PoolSpec{Nodes: nodes}
 }
 
-// Bind distributes a sub-pool's nodes across the declared services in
-// registration order; each service receives as many nodes as its spec requested.
-// The sub-pool must have been allocated for PoolSpec.
-func (jc *JobContext) Bind(sub *SubPool) {
-	nodes := sub.Nodes()
+// Bind distributes nodes across the declared services in registration order;
+// each service receives as many nodes as its spec requested. Pass the nodes
+// allocated for PoolSpec, in that order -- a sub-pool's Nodes in the driver, or
+// the nodes rebuilt from the assignment in the worker.
+func (jc *JobContext) Bind(nodes []*Node) {
 	i := 0
 	for _, svc := range jc.registry.Services() {
 		n := svc.Spec().Size()

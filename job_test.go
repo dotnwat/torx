@@ -85,7 +85,7 @@ func TestJobContextBind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Allocate: %v", err)
 	}
-	jc.Bind(sub)
+	jc.Bind(sub.Nodes())
 
 	if len(a.Nodes()) != 2 {
 		t.Errorf("a got %d nodes, want 2", len(a.Nodes()))
