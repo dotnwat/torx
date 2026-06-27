@@ -1,0 +1,196 @@
+// Job: one test or benchmark.
+//
+// A job Declares the services it needs (pure: it constructs and configures them
+// and registers them, with no allocation), then runs through Setup, Run, and
+// Teardown. Run returns nil to pass and non-nil to fail; a benchmark additionally
+// records an opaque result payload and a one-line summary. The framework drives a
+// job only through the Job interface, so JobBase's default Setup (start every
+// declared service) and Teardown (tear the services down and run finalizers) are
+// just defaults: a job overrides either to take control, and the override is what
+// the framework calls. There is no separate test/benchmark mode -- a job is a
+// benchmark precisely when it records data.
+package torx
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sync"
+)
+
+// Params are the configuration values for one job variant (its parametrization).
+// Values arrive as JSON, so numbers may be float64; the typed getters account
+// for that and fall back to a default when a key is absent or mistyped.
+type Params map[string]any
+
+// Int returns the value at key as an int, or def if absent or not numeric.
+func (p Params) Int(key string, def int) int {
+	switch v := p[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	default:
+		return def
+	}
+}
+
+// String returns the value at key as a string, or def if absent or not a string.
+func (p Params) String(key, def string) string {
+	if v, ok := p[key].(string); ok {
+		return v
+	}
+	return def
+}
+
+// Bool returns the value at key as a bool, or def if absent or not a bool.
+func (p Params) Bool(key string, def bool) bool {
+	if v, ok := p[key].(bool); ok {
+		return v
+	}
+	return def
+}
+
+// Job is one test or benchmark. A concrete job embeds JobBase, implements
+// Declare and Run, and may override Setup or Teardown.
+type Job interface {
+	// Declare registers and configures the services the job needs. It must be
+	// pure: no allocation, no side effects beyond registering services, so the
+	// framework can call it to size the job and the worker can call it to
+	// reconstruct the job identically.
+	Declare(jc *JobContext)
+	// Setup prepares the job to run, typically by starting its services.
+	Setup(ctx context.Context, jc *JobContext) error
+	// Run is the test or benchmark body; nil passes, non-nil fails.
+	Run(ctx context.Context, jc *JobContext) error
+	// Teardown releases what the job set up.
+	Teardown(ctx context.Context, jc *JobContext) error
+}
+
+// JobBase supplies default Setup and Teardown. A concrete job embeds it and
+// implements Declare and Run; overriding Setup or Teardown shadows the default.
+type JobBase struct{}
+
+// Setup starts every declared service and then waits for each to be ready, in
+// registration order, returning on the first failure. Override to control start
+// order, start services lazily, or skip auto-start.
+func (JobBase) Setup(ctx context.Context, jc *JobContext) error {
+	services := jc.Services()
+	for _, svc := range services {
+		if err := svc.Start(ctx); err != nil {
+			return err
+		}
+	}
+	for _, svc := range services {
+		if err := svc.Wait(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Teardown tears the job's services down (stop then clean, in reverse order) and
+// runs its finalizers, aggregating all errors so none is masked. Override to
+// customize.
+func (JobBase) Teardown(ctx context.Context, jc *JobContext) error {
+	var errs MultiError
+	errs.Append(jc.registry.Teardown(ctx))
+	errs.Append(jc.finalizers.Run(ctx))
+	return errs.Err()
+}
+
+// JobContext is the framework handle a job uses across its lifecycle: it holds
+// the job's parameters, the services it declares, the event sink it logs to, and
+// the result payload it records. It is safe for concurrent use.
+type JobContext struct {
+	Params Params
+
+	registry   ServiceRegistry
+	finalizers Finalizers
+	sink       EventSink
+
+	mu      sync.Mutex
+	data    json.RawMessage
+	summary string
+}
+
+// NewJobContext returns a JobContext for the given params and event sink; sink
+// may be nil (logging becomes a no-op).
+func NewJobContext(params Params, sink EventSink) *JobContext {
+	return &JobContext{Params: params, sink: sink}
+}
+
+// Register declares a service the job needs.
+func (jc *JobContext) Register(svc Service) { jc.registry.Add(svc) }
+
+// Services returns the declared services in registration order.
+func (jc *JobContext) Services() []Service { return jc.registry.Services() }
+
+// PoolSpec is the job's total node demand: the concatenation of its services'
+// specs in registration order.
+func (jc *JobContext) PoolSpec() PoolSpec {
+	var nodes []NodeSpec
+	for _, svc := range jc.registry.Services() {
+		nodes = append(nodes, svc.Spec().Nodes...)
+	}
+	return PoolSpec{Nodes: nodes}
+}
+
+// Bind distributes a sub-pool's nodes across the declared services in
+// registration order; each service receives as many nodes as its spec requested.
+// The sub-pool must have been allocated for PoolSpec.
+func (jc *JobContext) Bind(sub *SubPool) {
+	nodes := sub.Nodes()
+	i := 0
+	for _, svc := range jc.registry.Services() {
+		n := svc.Spec().Size()
+		svc.Bind(nodes[i : i+n])
+		i += n
+	}
+}
+
+// Log emits a log event to the job's event sink.
+func (jc *JobContext) Log(level, message string) {
+	if jc.sink != nil {
+		jc.sink.Emit(Event{Kind: EventLog, Level: level, Message: message})
+	}
+}
+
+// Record stores v, marshaled to JSON, as the job's opaque result Data. torx does
+// not interpret it (see JobResult); a benchmark records whatever it measured.
+func (jc *JobContext) Record(v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("job: record: %w", err)
+	}
+	jc.mu.Lock()
+	jc.data = b
+	jc.mu.Unlock()
+	return nil
+}
+
+// SetSummary sets the job's one-line human-readable result summary.
+func (jc *JobContext) SetSummary(s string) {
+	jc.mu.Lock()
+	jc.summary = s
+	jc.mu.Unlock()
+}
+
+// Defer registers a cleanup callback run during teardown, in reverse order.
+func (jc *JobContext) Defer(fn func(context.Context) error) { jc.finalizers.Add(fn) }
+
+// Data returns the recorded result payload, or nil.
+func (jc *JobContext) Data() json.RawMessage {
+	jc.mu.Lock()
+	defer jc.mu.Unlock()
+	return jc.data
+}
+
+// Summary returns the recorded result summary, or "".
+func (jc *JobContext) Summary() string {
+	jc.mu.Lock()
+	defer jc.mu.Unlock()
+	return jc.summary
+}
