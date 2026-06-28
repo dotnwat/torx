@@ -62,8 +62,8 @@ func (*captureJob) Run(_ context.Context, _ *JobContext) error { return nil }
 
 func TestRenderEvent(t *testing.T) {
 	at := time.Date(2026, 6, 27, 12, 30, 5, 0, time.UTC)
-	log := renderEvent(Event{Kind: EventLog, Level: "warn", Message: "careful", Time: at, Site: &Site{File: "svc.go", Line: 42}})
-	for _, want := range []string{"WARN", "careful", "svc.go:42"} {
+	log := renderEvent(Event{Kind: EventLog, Level: "warn", Component: "redis", Message: "careful", Time: at, Site: &Site{File: "svc.go", Line: 42}})
+	for _, want := range []string{"[redis]", "WARN", "careful", "svc.go:42"} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log render %q missing %q", log, want)
 		}
@@ -151,15 +151,18 @@ func TestRunTraceHasLifecycle(t *testing.T) {
 		t.Fatalf("test_log: %v", err)
 	}
 	// The trace narrates the whole job: node binding, service start and the
-	// process launch, readiness, the job body's end, stop, and collection.
+	// process launch, readiness, the job body's end, stop, and collection. The
+	// service's lines carry its component tag instead of repeating its name.
 	for _, want := range []string{
+		"[worker]",
 		"RUNNING",
 		"bound 1 node",
-		"starting service cap",
+		"[cap]",
+		"starting",
 		"exec sh -c",
-		"service cap is ready",
-		"stopping service cap",
-		"collecting from cap on n0: stdout.log",
+		"ready",
+		"stopping",
+		"collecting from n0: stdout.log",
 		"FINISHED PASS",
 	} {
 		if !strings.Contains(string(log), want) {

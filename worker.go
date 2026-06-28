@@ -53,8 +53,9 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 		}
 	}
 	// Carry the sink on the context so lifecycle and service code can narrate
-	// into the trace.
-	ctx = WithSink(ctx, sink)
+	// into the trace; tag the worker's own lines, which services override with
+	// their own name as they act.
+	ctx = WithComponent(WithSink(ctx, sink), "worker")
 
 	fail := func(err error) JobResult {
 		res := JobResult{ID: id, Status: StatusFail, Start: start, Stop: time.Now(), Error: errorInfo(err)}

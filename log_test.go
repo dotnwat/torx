@@ -43,6 +43,17 @@ func TestEmitPreservesExplicitSite(t *testing.T) {
 	}
 }
 
+func TestComponentTagsEvents(t *testing.T) {
+	var sink InMemoryEventSink
+	ctx := WithComponent(WithSink(context.Background(), &sink), "redis")
+
+	Logf(ctx, "info", "starting")
+
+	if got := sink.Events()[0].Component; got != "redis" {
+		t.Errorf("component = %q, want redis", got)
+	}
+}
+
 func TestLogfNoSinkIsNoop(t *testing.T) {
 	// No sink on the context: must not panic.
 	Logf(context.Background(), "info", "ignored")

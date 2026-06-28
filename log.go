@@ -21,6 +21,8 @@ import (
 
 type sinkContextKey struct{}
 
+type componentContextKey struct{}
+
 // WithSink returns a context carrying sink, so code reachable from it can emit
 // events into the job's trace via Emit and Logf.
 func WithSink(ctx context.Context, sink EventSink) context.Context {
@@ -29,6 +31,19 @@ func WithSink(ctx context.Context, sink EventSink) context.Context {
 
 func sinkFrom(ctx context.Context) EventSink {
 	s, _ := ctx.Value(sinkContextKey{}).(EventSink)
+	return s
+}
+
+// WithComponent returns a context that tags events emitted through it with name,
+// the part of the system acting (e.g. a service name). Code downstream -- service
+// hooks, the commands they launch -- inherits the tag, so each message need not
+// repeat it. A nested WithComponent overrides it for that subtree.
+func WithComponent(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, componentContextKey{}, name)
+}
+
+func componentFrom(ctx context.Context) string {
+	s, _ := ctx.Value(componentContextKey{}).(string)
 	return s
 }
 
@@ -59,6 +74,9 @@ func emit(ctx context.Context, e Event) {
 	}
 	if e.Time.IsZero() {
 		e.Time = time.Now()
+	}
+	if e.Component == "" {
+		e.Component = componentFrom(ctx)
 	}
 	sink.Emit(e)
 }

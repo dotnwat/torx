@@ -39,15 +39,17 @@ const (
 
 // Event is one record in a job's timeline. Kind selects which fields are
 // meaningful: Log carries Message and Level, and the lifecycle kinds (Running,
-// Finished) carry only Kind, Time, and Source. Site, when set, is the source
-// location the event was emitted from.
+// Finished) carry only Kind, Time, and Source. Component, when set, names the
+// part of the system that emitted the event (e.g. a service name), so the message
+// need not repeat it. Site, when set, is the source location it was emitted from.
 type Event struct {
-	Kind    EventKind `json:"kind"`
-	Time    time.Time `json:"time"`
-	Source  string    `json:"source,omitempty"`
-	Message string    `json:"message,omitempty"`
-	Level   string    `json:"level,omitempty"`
-	Site    *Site     `json:"site,omitempty"`
+	Kind      EventKind `json:"kind"`
+	Time      time.Time `json:"time"`
+	Source    string    `json:"source,omitempty"`
+	Component string    `json:"component,omitempty"`
+	Message   string    `json:"message,omitempty"`
+	Level     string    `json:"level,omitempty"`
+	Site      *Site     `json:"site,omitempty"`
 }
 
 // Site is the source location an event was emitted from, captured at runtime by

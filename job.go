@@ -158,6 +158,7 @@ func (jc *JobContext) CollectArtifacts(ctx context.Context) error {
 		if !ok {
 			continue
 		}
+		cctx := WithComponent(ctx, svc.Name())
 		for _, n := range svc.Nodes() {
 			arts := arch.Artifacts(n)
 			if len(arts) == 0 {
@@ -167,9 +168,9 @@ func (jc *JobContext) CollectArtifacts(ctx context.Context) error {
 			for i, a := range arts {
 				names[i] = a.Name
 			}
-			Logf(ctx, "info", "collecting from %s on %s: %s", svc.Name(), n.Name(), strings.Join(names, ", "))
+			Logf(cctx, "info", "collecting from %s: %s", n.Name(), strings.Join(names, ", "))
 			dest := filepath.Join(jc.resultsDir, svc.Name(), n.Name())
-			errs.Append(Collect(ctx, n, arts, jc.passed, dest))
+			errs.Append(Collect(cctx, n, arts, jc.passed, dest))
 		}
 	}
 	return errs.Err()
