@@ -82,7 +82,7 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 	Emit(ctx, Event{Kind: EventRunning, Source: id})
 	Logf(ctx, "info", "bound %d node(s): %s", len(nodes), nodeList(nodes))
 
-	res := runJob(ctx, start, id, job, jc, sink)
+	res := runJob(ctx, start, id, job, jc)
 	writeResultJSON(jobDir, res)
 	return res
 }
@@ -99,7 +99,7 @@ func nodeList(nodes []*Node) string {
 	return strings.Join(names, ", ")
 }
 
-func runJob(ctx context.Context, start time.Time, id string, job Job, jc *JobContext, sink EventSink) JobResult {
+func runJob(ctx context.Context, start time.Time, id string, job Job, jc *JobContext) JobResult {
 	var runErr error
 	if err := recovered(func() error { return job.Setup(ctx, jc) }); err != nil {
 		runErr = err
@@ -123,7 +123,7 @@ func runJob(ctx context.Context, start time.Time, id string, job Job, jc *JobCon
 	default:
 		res.Status = StatusPass
 	}
-	sink.Emit(Event{Kind: EventFinished, Source: id, Time: time.Now(), Message: string(res.Status)})
+	Emit(ctx, Event{Kind: EventFinished, Source: id, Message: string(res.Status)})
 	return res
 }
 

@@ -70,22 +70,33 @@ func (s *traceSink) Close() error {
 	return err
 }
 
-// renderEvent formats an event as one human-readable test_log line.
+// renderEvent formats an event as one human-readable test_log line:
+// "<time> <file:line> <tag> <text>", where tag is the level (log events) or the
+// kind (lifecycle events).
 func renderEvent(e Event) string {
 	ts := e.Time.Format("15:04:05.000")
+	site := ""
+	if e.Site != nil {
+		site = fmt.Sprintf("%s:%d", e.Site.File, e.Site.Line)
+	}
+	tag, text := eventTagText(e)
+	return fmt.Sprintf("%s %-22s %-8s %s", ts, site, tag, text)
+}
+
+func eventTagText(e Event) (tag, text string) {
 	switch e.Kind {
 	case EventLog:
-		level := e.Level
-		if level == "" {
-			level = "info"
+		tag = strings.ToUpper(e.Level)
+		if tag == "" {
+			tag = "INFO"
 		}
-		return fmt.Sprintf("%s %-8s %s", ts, strings.ToUpper(level), e.Message)
+		return tag, e.Message
 	case EventRunning:
-		return fmt.Sprintf("%s RUNNING  %s", ts, e.Source)
+		return "RUNNING", e.Source
 	case EventFinished:
-		return fmt.Sprintf("%s FINISHED %s", ts, e.Message)
+		return "FINISHED", e.Message
 	default:
-		return fmt.Sprintf("%s %-8s %s", ts, string(e.Kind), e.Message)
+		return string(e.Kind), e.Message
 	}
 }
 

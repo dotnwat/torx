@@ -198,10 +198,11 @@ func (jc *JobContext) Bind(nodes []*Node) {
 	}
 }
 
-// Log emits a log event to the job's event sink.
+// Log emits a log event to the job's event sink, recording the caller's source
+// location.
 func (jc *JobContext) Log(level, message string) {
 	if jc.sink != nil {
-		jc.sink.Emit(Event{Kind: EventLog, Level: level, Message: message, Time: time.Now()})
+		jc.sink.Emit(Event{Kind: EventLog, Level: level, Message: message, Time: time.Now(), Site: callerSite(2)})
 	}
 }
 

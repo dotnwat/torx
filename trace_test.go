@@ -62,9 +62,11 @@ func (*captureJob) Run(_ context.Context, _ *JobContext) error { return nil }
 
 func TestRenderEvent(t *testing.T) {
 	at := time.Date(2026, 6, 27, 12, 30, 5, 0, time.UTC)
-	log := renderEvent(Event{Kind: EventLog, Level: "warn", Message: "careful", Time: at})
-	if !strings.Contains(log, "WARN") || !strings.Contains(log, "careful") {
-		t.Errorf("log render = %q", log)
+	log := renderEvent(Event{Kind: EventLog, Level: "warn", Message: "careful", Time: at, Site: &Site{File: "svc.go", Line: 42}})
+	for _, want := range []string{"WARN", "careful", "svc.go:42"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log render %q missing %q", log, want)
+		}
 	}
 	fin := renderEvent(Event{Kind: EventFinished, Message: "PASS", Time: at})
 	if !strings.Contains(fin, "FINISHED") || !strings.Contains(fin, "PASS") {

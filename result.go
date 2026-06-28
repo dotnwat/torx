@@ -39,13 +39,24 @@ const (
 
 // Event is one record in a job's timeline. Kind selects which fields are
 // meaningful: Log carries Message and Level, and the lifecycle kinds (Running,
-// Finished) carry only Kind, Time, and Source.
+// Finished) carry only Kind, Time, and Source. Site, when set, is the source
+// location the event was emitted from.
 type Event struct {
 	Kind    EventKind `json:"kind"`
 	Time    time.Time `json:"time"`
 	Source  string    `json:"source,omitempty"`
 	Message string    `json:"message,omitempty"`
 	Level   string    `json:"level,omitempty"`
+	Site    *Site     `json:"site,omitempty"`
+}
+
+// Site is the source location an event was emitted from, captured at runtime by
+// Emit, Logf, and JobContext.Log. File is the base file name; Func is the
+// shortened function name. Being captured at execution, it never goes stale.
+type Site struct {
+	File string `json:"file"`
+	Line int    `json:"line"`
+	Func string `json:"func,omitempty"`
 }
 
 // EventSink consumes events emitted by a running job. Emit is best-effort: an
