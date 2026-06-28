@@ -109,6 +109,7 @@ func (b *ServiceBase) Artifacts(n *Node) []Artifact {
 // state, returning on the first StartNode error and leaving teardown to stop
 // whatever already came up.
 func (b *ServiceBase) Start(ctx context.Context) error {
+	Logf(ctx, "info", "starting service %s", b.name)
 	for _, n := range b.nodes {
 		_ = b.hooks.StopNode(ctx, n)
 		_ = b.hooks.CleanNode(ctx, n)
@@ -121,6 +122,7 @@ func (b *ServiceBase) Start(ctx context.Context) error {
 
 // Stop stops every node, continuing past failures and aggregating the errors.
 func (b *ServiceBase) Stop(ctx context.Context) error {
+	Logf(ctx, "info", "stopping service %s", b.name)
 	var errs MultiError
 	for _, n := range b.nodes {
 		if err := b.hooks.StopNode(ctx, n); err != nil {
@@ -132,6 +134,7 @@ func (b *ServiceBase) Stop(ctx context.Context) error {
 
 // Clean cleans every node, continuing past failures.
 func (b *ServiceBase) Clean(ctx context.Context) error {
+	Logf(ctx, "info", "cleaning service %s", b.name)
 	var errs MultiError
 	for _, n := range b.nodes {
 		if err := b.hooks.CleanNode(ctx, n); err != nil {
@@ -143,11 +146,15 @@ func (b *ServiceBase) Clean(ctx context.Context) error {
 
 // Wait waits for every node, continuing past failures.
 func (b *ServiceBase) Wait(ctx context.Context) error {
+	Logf(ctx, "info", "waiting for service %s to be ready", b.name)
 	var errs MultiError
 	for _, n := range b.nodes {
 		if err := b.hooks.WaitNode(ctx, n); err != nil {
 			errs.Append(Wrap(ErrService, "service: wait "+b.name, err))
 		}
+	}
+	if errs.Err() == nil {
+		Logf(ctx, "info", "service %s is ready", b.name)
 	}
 	return errs.Err()
 }

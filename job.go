@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -158,8 +159,17 @@ func (jc *JobContext) CollectArtifacts(ctx context.Context) error {
 			continue
 		}
 		for _, n := range svc.Nodes() {
+			arts := arch.Artifacts(n)
+			if len(arts) == 0 {
+				continue
+			}
+			names := make([]string, len(arts))
+			for i, a := range arts {
+				names[i] = a.Name
+			}
+			Logf(ctx, "info", "collecting from %s on %s: %s", svc.Name(), n.Name(), strings.Join(names, ", "))
 			dest := filepath.Join(jc.resultsDir, svc.Name(), n.Name())
-			errs.Append(Collect(ctx, n, arch.Artifacts(n), jc.passed, dest))
+			errs.Append(Collect(ctx, n, arts, jc.passed, dest))
 		}
 	}
 	return errs.Err()

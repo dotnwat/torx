@@ -29,6 +29,8 @@ func (b *ServiceBase) StartCaptured(ctx context.Context, n *Node, cmd Cmd) (io.R
 	}
 	logPath := filepath.Join(dir, "stdout.log")
 
+	Logf(ctx, "info", "exec %s on %s", strings.Join(append([]string{cmd.Path}, cmd.Args...), " "), n.Name())
+
 	// exec so the shell is replaced by the service: signals reach it directly and
 	// no extra shell process lingers in the group.
 	script := "exec " + shJoin(cmd.Path, cmd.Args) + " > " + shQuote(logPath) + " 2>&1"

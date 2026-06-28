@@ -135,6 +135,37 @@ func TestRunWritesResultsTree(t *testing.T) {
 	}
 }
 
+func TestRunTraceHasLifecycle(t *testing.T) {
+	root := t.TempDir()
+	res := Run(context.Background(), testPool(1), InProcessLauncher{},
+		[]JobRequest{{ID: "ttest.capture"}}, RunOptions{ResultsDir: root})
+	if !res.Ok() {
+		t.Fatalf("run failed:\n%s", res.Render())
+	}
+
+	target, _ := os.Readlink(filepath.Join(root, "latest"))
+	log, err := os.ReadFile(filepath.Join(root, target, "ttest.capture", "test_log"))
+	if err != nil {
+		t.Fatalf("test_log: %v", err)
+	}
+	// The trace narrates the whole job: node binding, service start and the
+	// process launch, readiness, the job body's end, stop, and collection.
+	for _, want := range []string{
+		"RUNNING",
+		"bound 1 node",
+		"starting service cap",
+		"exec sh -c",
+		"service cap is ready",
+		"stopping service cap",
+		"collecting from cap on n0: stdout.log",
+		"FINISHED PASS",
+	} {
+		if !strings.Contains(string(log), want) {
+			t.Errorf("test_log missing %q:\n%s", want, log)
+		}
+	}
+}
+
 func TestRunCollectsServiceArtifacts(t *testing.T) {
 	root := t.TempDir()
 	res := Run(context.Background(), testPool(1), InProcessLauncher{},

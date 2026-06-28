@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 )
@@ -51,6 +52,9 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 			sink = teeSink{sinks: []EventSink{sink, trace}}
 		}
 	}
+	// Carry the sink on the context so lifecycle and service code can narrate
+	// into the trace.
+	ctx = WithSink(ctx, sink)
 
 	fail := func(err error) JobResult {
 		res := JobResult{ID: id, Status: StatusFail, Start: start, Stop: time.Now(), Error: errorInfo(err)}
@@ -75,15 +79,27 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 		return fail(fmt.Errorf("worker: assignment has %d nodes, job needs %d", got, want))
 	}
 	jc.Bind(nodes)
+	Emit(ctx, Event{Kind: EventRunning, Source: id})
+	Logf(ctx, "info", "bound %d node(s): %s", len(nodes), nodeList(nodes))
 
 	res := runJob(ctx, start, id, job, jc, sink)
 	writeResultJSON(jobDir, res)
 	return res
 }
 
-func runJob(ctx context.Context, start time.Time, id string, job Job, jc *JobContext, sink EventSink) JobResult {
-	sink.Emit(Event{Kind: EventRunning, Source: id, Time: time.Now()})
+// nodeList renders bound nodes as "name (role), name, ..." for the trace.
+func nodeList(nodes []*Node) string {
+	names := make([]string, len(nodes))
+	for i, n := range nodes {
+		names[i] = n.Name()
+		if n.Role() != "" {
+			names[i] += " (" + n.Role() + ")"
+		}
+	}
+	return strings.Join(names, ", ")
+}
 
+func runJob(ctx context.Context, start time.Time, id string, job Job, jc *JobContext, sink EventSink) JobResult {
 	var runErr error
 	if err := recovered(func() error { return job.Setup(ctx, jc) }); err != nil {
 		runErr = err
