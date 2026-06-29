@@ -20,10 +20,14 @@ import (
 const SchemaVersion = 1
 
 // BackendDescriptor names the transport for an assigned node and carries its
-// configuration. v1 uses only "local"; remote kinds add fields.
+// configuration. The core builds the "local" kind directly; any other kind is
+// constructed by a registered BackendBuilder that interprets Config. Host is the
+// common field most transports need; Config holds the kind-specific remainder
+// (for ssh: user, identity file, ...), opaque to the core.
 type BackendDescriptor struct {
-	Kind string `json:"kind"`
-	Host string `json:"host,omitempty"`
+	Kind   string          `json:"kind"`
+	Host   string          `json:"host,omitempty"`
+	Config json.RawMessage `json:"config,omitempty"`
 }
 
 // NodeDescriptor is the serializable description of a node assigned to a job; the

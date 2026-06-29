@@ -152,7 +152,10 @@ func buildBackend(d BackendDescriptor) (Backend, error) {
 	case "", "local":
 		return LocalBackend{}, nil
 	default:
-		return nil, fmt.Errorf("worker: unknown backend kind %q", d.Kind)
+		if build, ok := lookupBackend(d.Kind); ok {
+			return build(d)
+		}
+		return nil, fmt.Errorf("worker: unknown backend kind %q (is its package blank-imported?)", d.Kind)
 	}
 }
 
