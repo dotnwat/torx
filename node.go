@@ -19,6 +19,7 @@ type Node struct {
 
 	name       string
 	role       string
+	addr       string
 	resources  Resources
 	scratch    Scratch
 	ports      *PortAllocator
@@ -27,11 +28,14 @@ type Node struct {
 
 // NodeConfig describes how to build a Node. Backend is the live transport for
 // in-process use; Descriptor is the serializable recipe the driver hands a
-// worker so it can rebuild that transport (see descriptorOf). Ports is shared
-// across nodes co-located on the same host, so they never lease the same port.
+// worker so it can rebuild that transport (see descriptorOf). Addr is the node's
+// reachable address, defaulting to the backend host and then the loopback. Ports
+// is shared across nodes co-located on the same host, so they never lease the
+// same port.
 type NodeConfig struct {
 	Name       string
 	Role       string
+	Addr       string
 	Resources  Resources
 	Backend    Backend
 	Descriptor BackendDescriptor
@@ -45,6 +49,7 @@ func NewNode(cfg NodeConfig) *Node {
 		Backend:    cfg.Backend,
 		name:       cfg.Name,
 		role:       cfg.Role,
+		addr:       cfg.Addr,
 		resources:  cfg.Resources,
 		scratch:    cfg.Scratch,
 		ports:      cfg.Ports,
@@ -57,6 +62,24 @@ func (n *Node) Name() string { return n.name }
 
 // Role is the node's human-facing role, or "" if unset.
 func (n *Node) Role() string { return n.role }
+
+// defaultNodeAddr is the reachable address assumed when a node specifies none,
+// matching the single-host case where everything runs on the loopback.
+const defaultNodeAddr = "127.0.0.1"
+
+// Addr is the address at which the node is reachable -- what a service binds and
+// advertises to clients. It falls back to the backend's host and finally to the
+// loopback, so a single-host run needs no explicit address.
+func (n *Node) Addr() string {
+	switch {
+	case n.addr != "":
+		return n.addr
+	case n.descriptor.Host != "":
+		return n.descriptor.Host
+	default:
+		return defaultNodeAddr
+	}
+}
 
 // Resources is the node's capacity.
 func (n *Node) Resources() Resources { return n.resources }

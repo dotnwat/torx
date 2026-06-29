@@ -139,6 +139,7 @@ func buildNodes(descs []NodeDescriptor) ([]*Node, error) {
 		nodes[i] = NewNode(NodeConfig{
 			Name:       d.Name,
 			Role:       d.Role,
+			Addr:       d.Address,
 			Backend:    backend,
 			Descriptor: d.Backend,
 			Scratch:    Scratch{Root: d.Scratch},

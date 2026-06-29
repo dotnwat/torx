@@ -223,6 +223,7 @@ func descriptorOf(n *Node) NodeDescriptor {
 	return NodeDescriptor{
 		Name:    n.Name(),
 		Role:    n.Role(),
+		Address: n.Addr(),
 		Scratch: n.Scratch().Root,
 		Backend: n.descriptor,
 	}

@@ -74,3 +74,21 @@ func TestNodesCoLocatedAreDisjoint(t *testing.T) {
 		seen[p] = true
 	}
 }
+
+func TestNodeAddr(t *testing.T) {
+	// An explicit address wins.
+	explicit := NewNode(NodeConfig{Name: "a", Addr: "10.0.0.7", Backend: LocalBackend{}})
+	if explicit.Addr() != "10.0.0.7" {
+		t.Errorf("Addr = %q, want 10.0.0.7", explicit.Addr())
+	}
+	// With no address, fall back to the backend host.
+	viaHost := NewNode(NodeConfig{Name: "b", Backend: LocalBackend{}, Descriptor: BackendDescriptor{Kind: "ssh", Host: "10.0.0.8"}})
+	if viaHost.Addr() != "10.0.0.8" {
+		t.Errorf("Addr = %q, want the backend host 10.0.0.8", viaHost.Addr())
+	}
+	// With neither, default to the loopback so single-host runs need no address.
+	plain := NewNode(NodeConfig{Name: "c", Backend: LocalBackend{}})
+	if plain.Addr() != "127.0.0.1" {
+		t.Errorf("Addr = %q, want 127.0.0.1", plain.Addr())
+	}
+}

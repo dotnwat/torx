@@ -36,6 +36,7 @@ type BackendDescriptor struct {
 type NodeDescriptor struct {
 	Name    string            `json:"name"`
 	Role    string            `json:"role,omitempty"`
+	Address string            `json:"address,omitempty"`
 	Scratch string            `json:"scratch"`
 	Backend BackendDescriptor `json:"backend"`
 }

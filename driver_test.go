@@ -183,6 +183,9 @@ func TestDescriptorOfCarriesBackendRecipe(t *testing.T) {
 	if ssh.Backend.Kind != "ssh" || ssh.Backend.Host != "10.0.0.5" {
 		t.Errorf("ssh node descriptor backend = %+v, want {ssh 10.0.0.5}", ssh.Backend)
 	}
+	if ssh.Address != "10.0.0.5" {
+		t.Errorf("ssh node descriptor address = %q, want 10.0.0.5 (defaulted from host)", ssh.Address)
+	}
 
 	local := descriptorOf(NewNode(NodeConfig{
 		Name:       "n1",
@@ -191,5 +194,8 @@ func TestDescriptorOfCarriesBackendRecipe(t *testing.T) {
 	}))
 	if local.Backend.Kind != "local" {
 		t.Errorf("local node descriptor kind = %q, want local", local.Backend.Kind)
+	}
+	if local.Address != "127.0.0.1" {
+		t.Errorf("local node descriptor address = %q, want 127.0.0.1", local.Address)
 	}
 }
