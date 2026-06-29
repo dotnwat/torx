@@ -112,10 +112,11 @@ func localPool(n int) *Pool {
 	for i := range nodes {
 		name := fmt.Sprintf("node-%d", i)
 		nodes[i] = NewNode(NodeConfig{
-			Name:    name,
-			Backend: LocalBackend{},
-			Scratch: MakeScratch(base, name),
-			Ports:   ports,
+			Name:       name,
+			Backend:    LocalBackend{},
+			Descriptor: BackendDescriptor{Kind: "local"},
+			Scratch:    MakeScratch(base, name),
+			Ports:      ports,
 		})
 	}
 	return NewPool(nodes)

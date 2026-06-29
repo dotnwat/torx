@@ -171,3 +171,25 @@ func TestRunForwardsEventsTaggedBySource(t *testing.T) {
 		t.Errorf("expected a 'ran' log tagged with the job id; got %+v", sink.Events())
 	}
 }
+
+func TestDescriptorOfCarriesBackendRecipe(t *testing.T) {
+	// descriptorOf must emit the node's own backend recipe, not a hardcoded
+	// "local", so a remote node's transport can be rebuilt in the worker.
+	ssh := descriptorOf(NewNode(NodeConfig{
+		Name:       "n0",
+		Scratch:    MakeScratch("/tmp/torx-test", "n0"),
+		Descriptor: BackendDescriptor{Kind: "ssh", Host: "10.0.0.5"},
+	}))
+	if ssh.Backend.Kind != "ssh" || ssh.Backend.Host != "10.0.0.5" {
+		t.Errorf("ssh node descriptor backend = %+v, want {ssh 10.0.0.5}", ssh.Backend)
+	}
+
+	local := descriptorOf(NewNode(NodeConfig{
+		Name:       "n1",
+		Scratch:    MakeScratch("/tmp/torx-test", "n1"),
+		Descriptor: BackendDescriptor{Kind: "local"},
+	}))
+	if local.Backend.Kind != "local" {
+		t.Errorf("local node descriptor kind = %q, want local", local.Backend.Kind)
+	}
+}

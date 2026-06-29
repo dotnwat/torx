@@ -217,13 +217,14 @@ func buildAssignment(req JobRequest, sub *SubPool, opts RunOptions) Assignment {
 	}
 }
 
-// descriptorOf serializes a node for an assignment. v1 nodes are local.
+// descriptorOf serializes a node for an assignment, carrying the backend recipe
+// the worker needs to rebuild its transport.
 func descriptorOf(n *Node) NodeDescriptor {
 	return NodeDescriptor{
 		Name:    n.Name(),
 		Role:    n.Role(),
 		Scratch: n.Scratch().Root,
-		Backend: BackendDescriptor{Kind: "local"},
+		Backend: n.descriptor,
 	}
 }
 

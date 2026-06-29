@@ -17,33 +17,38 @@ type Node struct {
 	// WriteFile, Signal, ...) directly.
 	Backend
 
-	name      string
-	role      string
-	resources Resources
-	scratch   Scratch
-	ports     *PortAllocator
+	name       string
+	role       string
+	resources  Resources
+	scratch    Scratch
+	ports      *PortAllocator
+	descriptor BackendDescriptor
 }
 
-// NodeConfig describes how to build a Node. Ports is shared across nodes
-// co-located on the same host, so they never lease the same port.
+// NodeConfig describes how to build a Node. Backend is the live transport for
+// in-process use; Descriptor is the serializable recipe the driver hands a
+// worker so it can rebuild that transport (see descriptorOf). Ports is shared
+// across nodes co-located on the same host, so they never lease the same port.
 type NodeConfig struct {
-	Name      string
-	Role      string
-	Resources Resources
-	Backend   Backend
-	Scratch   Scratch
-	Ports     *PortAllocator
+	Name       string
+	Role       string
+	Resources  Resources
+	Backend    Backend
+	Descriptor BackendDescriptor
+	Scratch    Scratch
+	Ports      *PortAllocator
 }
 
 // NewNode builds a Node from cfg.
 func NewNode(cfg NodeConfig) *Node {
 	return &Node{
-		Backend:   cfg.Backend,
-		name:      cfg.Name,
-		role:      cfg.Role,
-		resources: cfg.Resources,
-		scratch:   cfg.Scratch,
-		ports:     cfg.Ports,
+		Backend:    cfg.Backend,
+		name:       cfg.Name,
+		role:       cfg.Role,
+		resources:  cfg.Resources,
+		scratch:    cfg.Scratch,
+		ports:      cfg.Ports,
+		descriptor: cfg.Descriptor,
 	}
 }
 
