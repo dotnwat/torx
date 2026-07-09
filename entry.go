@@ -50,6 +50,7 @@ func workerMain() int {
 func driverMain(args []string) int {
 	fs := flag.NewFlagSet("torx", flag.ContinueOnError)
 	nodes := fs.Int("nodes", 0, "local nodes in the pool (0 sizes to the largest job)")
+	poolFile := fs.String("pool", "", "build the pool from a node manifest (JSON) instead of local nodes")
 	parallel := fs.Int("parallel", 1, "maximum concurrent jobs")
 	resultsPath := fs.String("results", "", "write newline-delimited JSON results to this file")
 	resultsDir := fs.String("results-dir", "results", "write the per-run results tree under this directory (empty to disable)")
@@ -69,9 +70,10 @@ func driverMain(args []string) int {
 		return 1
 	}
 
-	size := *nodes
-	if size <= 0 {
-		size = maxDemand(requests)
+	pool, err := selectPool(*poolFile, *nodes, requests)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "torx:", err)
+		return 2
 	}
 
 	reporters := []Reporter{ConsoleReporter{W: os.Stdout}}
@@ -85,12 +87,30 @@ func driverMain(args []string) int {
 		reporters = append(reporters, NewJSONReporter(f))
 	}
 
-	res := Run(context.Background(), localPool(size), SelfExecLauncher{}, requests,
+	res := Run(context.Background(), pool, SelfExecLauncher{}, requests,
 		RunOptions{MaxParallel: *parallel, Reporters: reporters, ResultsDir: *resultsDir})
 	if !res.Ok() {
 		return 1
 	}
 	return 0
+}
+
+// selectPool builds the pool a run executes against: from a manifest file when
+// poolFile is set, otherwise a pool of local nodes sized to nodes, or to the
+// largest job when nodes is not positive.
+func selectPool(poolFile string, nodes int, requests []JobRequest) (*Pool, error) {
+	if poolFile != "" {
+		m, err := LoadManifest(poolFile)
+		if err != nil {
+			return nil, err
+		}
+		return PoolFromManifest(m)
+	}
+	size := nodes
+	if size <= 0 {
+		size = maxDemand(requests)
+	}
+	return localPool(size), nil
 }
 
 // maxDemand returns the largest node demand among the requests, at least 1.
