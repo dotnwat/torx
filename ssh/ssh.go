@@ -12,6 +12,7 @@
 package ssh
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -152,11 +154,108 @@ func (b *backend) Exec(ctx context.Context, cmd torx.Cmd) (torx.ExecResult, erro
 	return res, nil
 }
 
-// Stream is not yet supported by the SSH backend: running a long-lived process
-// on a remote node needs process-group teardown that is future work. Callers
-// that only run commands to completion use Exec.
+// pgidMarker prefixes the process-group id the stream wrapper prints, so the
+// backend learns which remote group Close must kill.
+const pgidMarker = "TORX_PGID:"
+
+// Stream starts cmd on the node and returns its combined output; Close kills the
+// command and reaps it. The command runs as the leader of a new session (via
+// setsid) so Close can SIGKILL the whole process group -- tearing down a service
+// and its children even if they ignore SIGTERM or SIGHUP, and leaving the node's
+// sshd untouched. setsid -w keeps the SSH session open for the command's
+// lifetime rather than detaching it, and the leader prints its pid (the group
+// id) before exec'ing the command in place.
 func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (io.ReadCloser, error) {
-	return nil, torx.Wrap(torx.ErrBackend, "ssh: stream", errors.New("streaming is not yet supported"))
+	client, err := b.conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sess, err := client.NewSession()
+	if err != nil {
+		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream session", err)
+	}
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		_ = sess.Close()
+		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream", err)
+	}
+	sess.Stdout = pw
+	sess.Stderr = pw
+	if err := sess.Start(wrapForStream(cmd)); err != nil {
+		_ = pw.Close()
+		_ = pr.Close()
+		_ = sess.Close()
+		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, err)
+	}
+	// Read the group id off the first line before handing back the stream, so
+	// Close knows what to kill.
+	br := bufio.NewReader(pr)
+	pgid, err := readPGID(br)
+	if err != nil {
+		_ = sess.Close()
+		_ = pw.Close()
+		_ = pr.Close()
+		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, err)
+	}
+	// Once the command exits, close the write end so the reader sees EOF.
+	go func() {
+		_ = sess.Wait()
+		_ = pw.Close()
+	}()
+	return &sshStream{backend: b, sess: sess, pr: pr, r: br, pgid: pgid}, nil
+}
+
+// sshStream is the handle Stream returns: reading it yields the command's
+// combined output, and Close kills the remote process group and reaps the
+// session.
+type sshStream struct {
+	backend *backend
+	sess    *cryptossh.Session
+	pr      *os.File
+	r       *bufio.Reader
+	pgid    int
+}
+
+func (s *sshStream) Read(p []byte) (int, error) { return s.r.Read(p) }
+
+func (s *sshStream) Close() error {
+	s.backend.killGroup(s.pgid)
+	_ = s.sess.Close()
+	return s.pr.Close()
+}
+
+// killGroup SIGKILLs a remote process group over a fresh session. It is
+// best-effort: the group may already be gone.
+func (b *backend) killGroup(pgid int) {
+	_, _ = b.Exec(context.Background(), torx.Command("kill", "-KILL", "-"+strconv.Itoa(pgid)))
+}
+
+// wrapForStream builds the remote command line for Stream. setsid -w runs the
+// command as a new session/group leader (so Close can kill the group) while
+// waiting for it (so the SSH session lives as long as the command). The leader
+// prints its pid -- the group id -- then exec's the command in place, so the
+// command inherits that pid and stays the group leader.
+func wrapForStream(cmd torx.Cmd) string {
+	payload := "echo " + pgidMarker + "$$; exec " + remoteCommand(cmd)
+	return "setsid -w sh -c " + shQuote(payload)
+}
+
+// readPGID reads the process-group id the stream wrapper prints on its first
+// line.
+func readPGID(r *bufio.Reader) (int, error) {
+	line, err := r.ReadString('\n')
+	if err != nil && line == "" {
+		return 0, err
+	}
+	rest, ok := strings.CutPrefix(strings.TrimSpace(line), pgidMarker)
+	if !ok {
+		return 0, fmt.Errorf("ssh: stream: expected %q marker, got %q", pgidMarker, strings.TrimSpace(line))
+	}
+	pgid, err := strconv.Atoi(rest)
+	if err != nil {
+		return 0, fmt.Errorf("ssh: stream: bad process-group id %q: %w", rest, err)
+	}
+	return pgid, nil
 }
 
 // Signal sends sig to a process on the node by running kill over a session. The
