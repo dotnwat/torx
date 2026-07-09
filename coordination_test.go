@@ -146,3 +146,29 @@ func TestMakeScratchInvalidKeyPanics(t *testing.T) {
 		})
 	}
 }
+
+func TestRangePortAllocator(t *testing.T) {
+	// Range mode hands out ascending, distinct ports without probing.
+	a := NewRangePortAllocator(30000, 30003)
+	for _, want := range []int{30000, 30001, 30002} {
+		if got, err := a.Allocate(); err != nil || got != want {
+			t.Fatalf("Allocate = (%d, %v), want (%d, nil)", got, err, want)
+		}
+	}
+	// The range is exhausted.
+	if _, err := a.Allocate(); err == nil {
+		t.Error("expected an exhaustion error when the range is used up")
+	}
+	// A released port is handed out again.
+	a.Release(30001)
+	if got, err := a.Allocate(); err != nil || got != 30001 {
+		t.Errorf("after release, Allocate = (%d, %v), want (30001, nil)", got, err)
+	}
+	// Range reports the interval; a probe allocator does not.
+	if lo, hi, ranged := a.Range(); !ranged || lo != 30000 || hi != 30003 {
+		t.Errorf("Range = (%d, %d, %v), want (30000, 30003, true)", lo, hi, ranged)
+	}
+	if _, _, ranged := NewPortAllocator("").Range(); ranged {
+		t.Error("a probe allocator should not report a range")
+	}
+}

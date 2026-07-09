@@ -19,25 +19,45 @@ const (
 	defaultPortHost = "127.0.0.1"
 )
 
-// PortAllocator hands out distinct free TCP ports for one host and tracks them
-// so a port is never handed out twice; a single allocator should be shared
-// across work co-located on the same host. It is safe for concurrent use.
+// PortAllocator hands out distinct free TCP ports and tracks them so a port is
+// never handed out twice; a single allocator should be shared across work
+// co-located on the same host. It is safe for concurrent use. It works one of
+// two ways: by probing (a bind to port 0 on its host) or by leasing from a fixed
+// range. Either way there is an unavoidable race between returning a port and a
+// service binding it -- another process could claim it first -- so callers
+// confirm the service came up with a readiness check.
 //
-// The OS assigns an ephemeral port via a bind to port 0; the probe socket is
-// closed before the port is returned so a service can bind it. There is an
-// unavoidable race between returning a port and a service binding it -- another
-// process could claim it first -- so callers confirm the service came up with a
-// readiness check.
+// Probing suits co-located local work, where torx can bind on the host. Range
+// leasing suits a dedicated remote node whose port space torx neither shares nor
+// can probe from the driver host.
 type PortAllocator struct {
-	host   string
-	mu     sync.Mutex
-	leased map[int]struct{}
+	host     string
+	rangeMin int
+	rangeMax int
+	mu       sync.Mutex
+	leased   map[int]struct{}
 }
 
-// NewPortAllocator returns an allocator for host. An empty host defaults to
-// 127.0.0.1.
+// NewPortAllocator returns an allocator that finds free ports on host by probing
+// a bind to port 0. An empty host defaults to 127.0.0.1.
 func NewPortAllocator(host string) *PortAllocator {
 	return &PortAllocator{host: host}
+}
+
+// NewRangePortAllocator returns an allocator that hands out ports from the
+// half-open range [lo, hi) without probing, for a node whose port space torx
+// cannot probe from here. The caller's readiness check closes the bind race
+// exactly as for the probe allocator.
+func NewRangePortAllocator(lo, hi int) *PortAllocator {
+	return &PortAllocator{rangeMin: lo, rangeMax: hi}
+}
+
+// PortRange bounds the TCP ports a node's allocator hands out, as the half-open
+// interval [Min, Max). It is how a manifest and the wire describe a remote
+// node's port space; an absent range means probe for free ports instead.
+type PortRange struct {
+	Min int `json:"min"`
+	Max int `json:"max"`
 }
 
 // Host returns the host this allocator probes.
@@ -55,6 +75,15 @@ func (a *PortAllocator) Host() string {
 func (a *PortAllocator) Allocate() (int, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.rangeMax > a.rangeMin {
+		return a.allocateFromRange()
+	}
+	return a.allocateByProbe()
+}
+
+// allocateByProbe finds a free port by binding to port 0 on the host, skipping
+// any it has already handed out. The caller holds a.mu.
+func (a *PortAllocator) allocateByProbe() (int, error) {
 	for range maxPortAttempts {
 		port, err := probeFreePort(a.Host())
 		if err != nil {
@@ -67,14 +96,40 @@ func (a *PortAllocator) Allocate() (int, error) {
 		if _, taken := a.leased[port]; taken {
 			continue
 		}
-		if a.leased == nil {
-			a.leased = make(map[int]struct{})
-		}
-		a.leased[port] = struct{}{}
+		a.lease(port)
 		return port, nil
 	}
 	return 0, Wrap(ErrAllocation, "coordination: allocate port",
 		fmt.Errorf("no free port on %s after %d attempts", a.Host(), maxPortAttempts))
+}
+
+// allocateFromRange hands out the lowest free port in [rangeMin, rangeMax). The
+// caller holds a.mu.
+func (a *PortAllocator) allocateFromRange() (int, error) {
+	for p := a.rangeMin; p < a.rangeMax; p++ {
+		if _, taken := a.leased[p]; !taken {
+			a.lease(p)
+			return p, nil
+		}
+	}
+	return 0, Wrap(ErrAllocation, "coordination: allocate port",
+		fmt.Errorf("no free port in range [%d,%d)", a.rangeMin, a.rangeMax))
+}
+
+// lease records port as handed out. The caller holds a.mu.
+func (a *PortAllocator) lease(port int) {
+	if a.leased == nil {
+		a.leased = make(map[int]struct{})
+	}
+	a.leased[port] = struct{}{}
+}
+
+// Range returns the allocator's lease range and whether it is in range mode.
+func (a *PortAllocator) Range() (lo, hi int, ranged bool) {
+	if a.rangeMax > a.rangeMin {
+		return a.rangeMin, a.rangeMax, true
+	}
+	return 0, 0, false
 }
 
 // Release returns a port to the allocator so it may be handed out again.

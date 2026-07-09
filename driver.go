@@ -220,13 +220,19 @@ func buildAssignment(req JobRequest, sub *SubPool, opts RunOptions) Assignment {
 // descriptorOf serializes a node for an assignment, carrying the backend recipe
 // the worker needs to rebuild its transport.
 func descriptorOf(n *Node) NodeDescriptor {
-	return NodeDescriptor{
+	d := NodeDescriptor{
 		Name:    n.Name(),
 		Role:    n.Role(),
 		Address: n.Addr(),
 		Scratch: n.Scratch().Root,
 		Backend: n.descriptor,
 	}
+	if n.ports != nil {
+		if lo, hi, ranged := n.ports.Range(); ranged {
+			d.Ports = &PortRange{Min: lo, Max: hi}
+		}
+	}
+	return d
 }
 
 func failResult(id string, err error) JobResult {

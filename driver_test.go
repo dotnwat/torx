@@ -199,3 +199,24 @@ func TestDescriptorOfCarriesBackendRecipe(t *testing.T) {
 		t.Errorf("local node descriptor address = %q, want 127.0.0.1", local.Address)
 	}
 }
+
+func TestDescriptorOfCarriesPortRange(t *testing.T) {
+	// A range-allocator node serializes its range; a probe-allocator node does
+	// not, so the worker rebuilds the matching allocator.
+	ranged := NewNode(NodeConfig{
+		Name:    "r0",
+		Scratch: MakeScratch("/tmp/torx-test", "r0"),
+		Ports:   NewRangePortAllocator(30000, 31000),
+	})
+	if d := descriptorOf(ranged); d.Ports == nil || d.Ports.Min != 30000 || d.Ports.Max != 31000 {
+		t.Errorf("range node descriptor ports = %+v, want [30000,31000)", d.Ports)
+	}
+	probe := NewNode(NodeConfig{
+		Name:    "p0",
+		Scratch: MakeScratch("/tmp/torx-test", "p0"),
+		Ports:   NewPortAllocator(""),
+	})
+	if d := descriptorOf(probe); d.Ports != nil {
+		t.Errorf("probe node descriptor ports = %+v, want nil", d.Ports)
+	}
+}

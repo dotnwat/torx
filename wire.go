@@ -39,6 +39,7 @@ type NodeDescriptor struct {
 	Address string            `json:"address,omitempty"`
 	Scratch string            `json:"scratch"`
 	Backend BackendDescriptor `json:"backend"`
+	Ports   *PortRange        `json:"ports,omitempty"`
 }
 
 // SessionConfig is the run-wide configuration a worker needs.

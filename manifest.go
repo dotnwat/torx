@@ -29,6 +29,7 @@ type ManifestNode struct {
 	Resources ManifestResources `json:"resources,omitempty"`
 	Scratch   string            `json:"scratch"`
 	Backend   BackendDescriptor `json:"backend"`
+	Ports     *PortRange        `json:"ports,omitempty"`
 }
 
 // ManifestResources is the JSON form of a node's Resources. Optional quantities
@@ -100,6 +101,10 @@ func PoolFromManifest(m Manifest) (*Pool, error) {
 			}
 		}
 
+		ports, err := nodeAllocator(allocators, mn)
+		if err != nil {
+			return nil, err
+		}
 		nodes[i] = NewNode(NodeConfig{
 			Name:       mn.Name,
 			Role:       mn.Role,
@@ -108,16 +113,23 @@ func PoolFromManifest(m Manifest) (*Pool, error) {
 			Backend:    backend,
 			Descriptor: mn.Backend,
 			Scratch:    Scratch{Root: mn.Scratch},
-			Ports:      allocatorFor(allocators, mn),
+			Ports:      ports,
 		})
 	}
 	return NewPool(nodes), nil
 }
 
-// allocatorFor returns the port allocator for a node's host, creating one the
-// first time a host is seen so co-located nodes share it. The host is the node's
-// reachable address, then its backend host, then the loopback.
-func allocatorFor(allocators map[string]*PortAllocator, mn ManifestNode) *PortAllocator {
+// nodeAllocator returns the port allocator for a node. A node with an explicit
+// range gets its own range allocator; otherwise it shares a probe allocator with
+// other nodes on the same host (its reachable address, then backend host, then
+// the loopback), created the first time that host is seen.
+func nodeAllocator(allocators map[string]*PortAllocator, mn ManifestNode) (*PortAllocator, error) {
+	if r := mn.Ports; r != nil {
+		if r.Min <= 0 || r.Max <= r.Min {
+			return nil, fmt.Errorf("manifest: node %q has an invalid port range [%d,%d)", mn.Name, r.Min, r.Max)
+		}
+		return NewRangePortAllocator(r.Min, r.Max), nil
+	}
 	host := mn.Address
 	if host == "" {
 		host = mn.Backend.Host
@@ -126,9 +138,9 @@ func allocatorFor(allocators map[string]*PortAllocator, mn ManifestNode) *PortAl
 		host = defaultPortHost
 	}
 	if a, ok := allocators[host]; ok {
-		return a
+		return a, nil
 	}
 	a := NewPortAllocator(host)
 	allocators[host] = a
-	return a
+	return a, nil
 }

@@ -143,3 +143,32 @@ func TestPoolFromManifestErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestPoolFromManifestPorts(t *testing.T) {
+	pool, err := PoolFromManifest(Manifest{Nodes: []ManifestNode{{
+		Name:    "r0",
+		Scratch: "/var/tmp/torx/r0",
+		Backend: BackendDescriptor{Kind: "local"},
+		Ports:   &PortRange{Min: 45000, Max: 45010},
+	}}})
+	if err != nil {
+		t.Fatalf("PoolFromManifest: %v", err)
+	}
+	sub, err := pool.Allocate(Homogeneous(1, NodeSpec{}))
+	if err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	if p, err := sub.Nodes()[0].AllocatePort(); err != nil || p < 45000 || p >= 45010 {
+		t.Errorf("allocated port = (%d, %v), want it in [45000,45010)", p, err)
+	}
+}
+
+func TestPoolFromManifestBadPortRange(t *testing.T) {
+	_, err := PoolFromManifest(Manifest{Nodes: []ManifestNode{{
+		Name: "r0", Scratch: "/s", Backend: BackendDescriptor{Kind: "local"},
+		Ports: &PortRange{Min: 50000, Max: 40000}, // max <= min
+	}}})
+	if err == nil {
+		t.Fatal("expected an error for an invalid port range")
+	}
+}

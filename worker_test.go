@@ -211,3 +211,20 @@ func TestRunWorkerTeardownOnCancel(t *testing.T) {
 		t.Errorf("teardown did not run after cancellation")
 	}
 }
+
+func TestBuildNodesPortRange(t *testing.T) {
+	// A descriptor carrying a range yields a node whose allocator leases from it.
+	nodes, err := buildNodes([]NodeDescriptor{
+		{Name: "r0", Scratch: "/tmp/torx/r0", Backend: BackendDescriptor{Kind: "local"}, Ports: &PortRange{Min: 40000, Max: 40010}},
+	})
+	if err != nil {
+		t.Fatalf("buildNodes: %v", err)
+	}
+	p, err := nodes[0].AllocatePort()
+	if err != nil {
+		t.Fatalf("AllocatePort: %v", err)
+	}
+	if p < 40000 || p >= 40010 {
+		t.Errorf("allocated port %d, want it in [40000,40010)", p)
+	}
+}

@@ -129,12 +129,19 @@ func runJob(ctx context.Context, start time.Time, id string, job Job, jc *JobCon
 }
 
 func buildNodes(descs []NodeDescriptor) ([]*Node, error) {
-	ports := NewPortAllocator("")
+	// Local nodes co-located on this host share one probe allocator; a node that
+	// carries a range gets its own range allocator, since its port space is its
+	// own and cannot be probed from here.
+	local := NewPortAllocator("")
 	nodes := make([]*Node, len(descs))
 	for i, d := range descs {
 		backend, err := buildBackend(d.Backend)
 		if err != nil {
 			return nil, err
+		}
+		ports := local
+		if d.Ports != nil {
+			ports = NewRangePortAllocator(d.Ports.Min, d.Ports.Max)
 		}
 		nodes[i] = NewNode(NodeConfig{
 			Name:       d.Name,
