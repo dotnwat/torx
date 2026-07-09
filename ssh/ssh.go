@@ -234,14 +234,20 @@ func (b *backend) killGroup(pgid int) {
 // command as a new session/group leader (so Close can kill the group) while
 // waiting for it (so the SSH session lives as long as the command). The leader
 // prints its pid -- the group id -- then exec's the command in place, so the
-// command inherits that pid and stays the group leader.
+// command inherits that pid and stays the group leader. echo appends a trailing
+// newline, so the marker is a complete line readPGID can read before exec runs
+// the command: the handshake never waits on the command's own output. Keep the
+// echo (or anything else that terminates the marker with a newline), or readPGID
+// will block.
 func wrapForStream(cmd torx.Cmd) string {
 	payload := "echo " + pgidMarker + "$$; exec " + remoteCommand(cmd)
 	return "setsid -w sh -c " + shQuote(payload)
 }
 
 // readPGID reads the process-group id the stream wrapper prints on its first
-// line.
+// line, up to the newline echo appends (see wrapForStream). That echo runs
+// before the command is exec'd, so the marker is available immediately and does
+// not depend on the command producing any output of its own.
 func readPGID(r *bufio.Reader) (int, error) {
 	line, err := r.ReadString('\n')
 	if err != nil && line == "" {
