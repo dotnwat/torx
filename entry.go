@@ -92,7 +92,18 @@ func driverMain(args []string) int {
 		reporters = append(reporters, NewJSONReporter(f))
 	}
 
-	res := Run(context.Background(), pool, SelfExecLauncher{}, requests,
+	// Ctrl-C (SIGINT) or a SIGTERM cancels the run so workers are torn down and
+	// partial results are still written, instead of orphaning workers and their
+	// services. Run's cancellation path SIGTERMs each worker's process group,
+	// which the worker turns into teardown before it exits.
+	// Ctrl-C (SIGINT) or a SIGTERM cancels the run so workers are torn down and
+	// partial results are still written, instead of orphaning workers and their
+	// services. Run's cancellation path SIGTERMs each worker's process group,
+	// which the worker turns into teardown before it exits.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	res := Run(ctx, pool, SelfExecLauncher{}, requests,
 		RunOptions{MaxParallel: *parallel, Reporters: reporters, ResultsDir: *resultsDir})
 	if !res.Ok() {
 		return 1
