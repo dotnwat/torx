@@ -20,13 +20,26 @@ func (b *backend) sftpClient(ctx context.Context) (*sftp.Client, error) {
 		return nil, err
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.sftp != nil {
-		return b.sftp, nil
+		sc := b.sftp
+		b.mu.Unlock()
+		return sc, nil
 	}
+	b.mu.Unlock()
+
+	// Create the client without holding b.mu: NewClient opens a channel and
+	// negotiates the SFTP subsystem (network I/O), which must not block other
+	// operations -- including close -- on a wedged node.
 	sc, err := sftp.NewClient(client)
 	if err != nil {
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: sftp client", err)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sftp != nil {
+		// Another caller created one while we negotiated; keep theirs, drop ours.
+		_ = sc.Close()
+		return b.sftp, nil
 	}
 	b.sftp = sc
 	return sc, nil

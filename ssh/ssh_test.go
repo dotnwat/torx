@@ -191,6 +191,91 @@ func TestBuildRejectsBadConfig(t *testing.T) {
 	}
 }
 
+// stallingBackend builds a backend pointed at a listener that accepts TCP but
+// never speaks SSH, so the handshake blocks unless a deadline stops it.
+// timeoutMS sets ConnectTimeoutMS (0 leaves it unset).
+func stallingBackend(t *testing.T, timeoutMS int) *backend {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	stall := make(chan struct{})
+	t.Cleanup(func() { close(stall) })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				<-stall // hold the connection open and silent until the test ends
+				_ = c.Close()
+			}(c)
+		}
+	}()
+
+	dir := t.TempDir()
+	idFile := filepath.Join(dir, "id")
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writePrivateKey(t, idFile, priv)
+	hostPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostKey, err := cryptossh.NewPublicKey(hostPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kh := filepath.Join(dir, "known_hosts")
+	writeKnownHosts(t, kh, ln.Addr().String(), hostKey)
+
+	host, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+	be, err := build(descriptorFor(t, host, Config{
+		Port: port, User: "torx", IdentityFile: idFile, KnownHosts: kh, ConnectTimeoutMS: timeoutMS,
+	}))
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	b := be.(*backend)
+	t.Cleanup(b.close)
+	return b
+}
+
+func assertHandshakeFails(t *testing.T, b *backend, ctx context.Context) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.Exec(ctx, torx.Command("true"))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Exec should fail when the handshake cannot complete before its deadline")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Exec hung: the SSH handshake ignored its deadline")
+	}
+}
+
+func TestConnHandshakeHonorsContext(t *testing.T) {
+	b := stallingBackend(t, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	assertHandshakeFails(t, b, ctx)
+}
+
+func TestConnHandshakeHonorsConnectTimeout(t *testing.T) {
+	// ConnectTimeoutMS bounds the handshake even with no context deadline.
+	assertHandshakeFails(t, stallingBackend(t, 300), context.Background())
+}
+
 func TestReadPGID(t *testing.T) {
 	cases := []struct {
 		name  string

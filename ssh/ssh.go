@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/pkg/sftp"
 	cryptossh "golang.org/x/crypto/ssh"
@@ -79,26 +80,62 @@ type backend struct {
 
 var _ torx.Backend = (*backend)(nil)
 
-// conn returns the node's SSH client, dialing on first use. The TCP dial honors
-// ctx; the handshake honors the client config's timeout.
+// conn returns the node's SSH client, dialing on first use. The dial and
+// handshake happen without holding b.mu -- both do network I/O and must not
+// block unrelated operations, including close/teardown, on a wedged node.
 func (b *backend) conn(ctx context.Context) (*cryptossh.Client, error) {
+	b.mu.Lock()
+	if b.client != nil {
+		c := b.client
+		b.mu.Unlock()
+		return c, nil
+	}
+	b.mu.Unlock()
+
+	client, err := b.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.client != nil {
+		// Another caller connected while we dialed; keep theirs and drop ours.
+		_ = client.Close()
 		return b.client, nil
 	}
+	b.client = client
+	return client, nil
+}
+
+// dial opens a new SSH connection to the node. The TCP dial and the handshake
+// both honor ctx, and the handshake additionally honors the client config's
+// connect timeout, which crypto/ssh's NewClientConn does not apply on its own.
+func (b *backend) dial(ctx context.Context) (*cryptossh.Client, error) {
 	var d net.Dialer
 	netConn, err := d.DialContext(ctx, "tcp", b.addr)
 	if err != nil {
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: dial "+b.addr, err)
 	}
+	// NewClientConn takes no context or timeout, so a half-open or silent peer
+	// would block the handshake forever. Bound it two ways: a ctx watcher that
+	// closes the conn on cancellation, and the config's connect timeout as an I/O
+	// deadline. Clear the deadline once connected so it does not affect sessions.
+	if b.clientCfg.Timeout > 0 {
+		_ = netConn.SetDeadline(time.Now().Add(b.clientCfg.Timeout))
+	}
+	stopWatch := context.AfterFunc(ctx, func() { _ = netConn.Close() })
 	sshConn, chans, reqs, err := cryptossh.NewClientConn(netConn, b.addr, b.clientCfg)
+	stopWatch()
 	if err != nil {
 		_ = netConn.Close()
+		if ctx.Err() != nil {
+			return nil, torx.Wrap(torx.ErrBackend, "ssh: handshake "+b.addr, ctx.Err())
+		}
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: handshake "+b.addr, err)
 	}
-	b.client = cryptossh.NewClient(sshConn, chans, reqs)
-	return b.client, nil
+	_ = netConn.SetDeadline(time.Time{})
+	return cryptossh.NewClient(sshConn, chans, reqs), nil
 }
 
 // close tears down the SSH connection and its SFTP client. A one-shot worker
@@ -158,6 +195,10 @@ func (b *backend) Exec(ctx context.Context, cmd torx.Cmd) (torx.ExecResult, erro
 // backend learns which remote group Close must kill.
 const pgidMarker = "TORX_PGID:"
 
+// killGroupTimeout bounds the remote kill Close issues, so tearing down a stream
+// cannot block indefinitely on a wedged node.
+const killGroupTimeout = 15 * time.Second
+
 // Stream starts cmd on the node and returns its combined output; Close kills the
 // command and reaps it. The command runs as the leader of a new session (via
 // setsid) so Close can SIGKILL the whole process group -- tearing down a service
@@ -196,9 +237,14 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (io.ReadCloser, erro
 		_ = pw.Close()
 	}()
 	// Read the group id off the first line before handing back the stream, so
-	// Close knows what to kill.
+	// Close knows what to kill. Bound that read by ctx, then clear the deadline
+	// so it does not affect the caller's reads over the stream's lifetime.
+	if dl, ok := ctx.Deadline(); ok {
+		_ = pr.SetReadDeadline(dl)
+	}
 	br := bufio.NewReader(pr)
 	pgid, err := readPGID(br)
+	_ = pr.SetReadDeadline(time.Time{})
 	if err != nil {
 		_ = sess.Close()
 		_ = pw.Close()
@@ -236,7 +282,11 @@ func (b *backend) killGroup(pgid int) {
 		// turn a stray id into kill -KILL -1 either.
 		return
 	}
-	_, _ = b.Exec(context.Background(), torx.Command("kill", "-KILL", "-"+strconv.Itoa(pgid)))
+	// Close carries no context, so bound the kill here: a wedged node must not
+	// hang teardown forever.
+	ctx, cancel := context.WithTimeout(context.Background(), killGroupTimeout)
+	defer cancel()
+	_, _ = b.Exec(ctx, torx.Command("kill", "-KILL", "-"+strconv.Itoa(pgid)))
 }
 
 // wrapForStream builds the remote command line for Stream. setsid -w runs the

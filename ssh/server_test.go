@@ -37,6 +37,11 @@ type testServer struct {
 	// with no output -- not even the pgid marker -- simulating a remote that dies
 	// before the stream handshake completes.
 	silentExec bool
+
+	// stallExec makes exec requests reply success but then neither produce output
+	// nor close the channel, simulating a remote that accepts the command but
+	// never emits the pgid marker, so only a client-side deadline unblocks it.
+	stallExec bool
 }
 
 // newTestServer starts a server on the loopback and returns a handle whose
@@ -184,6 +189,11 @@ func (s *testServer) serveSession(ch cryptossh.Channel, reqs <-chan *cryptossh.R
 				// remote that dies before printing the pgid marker.
 				sendExit(ch, 1)
 				_ = ch.Close()
+				continue
+			}
+			if s.stallExec {
+				// Accept the exec but leave the channel open and silent, mimicking a
+				// remote that never emits the pgid marker.
 				continue
 			}
 			go serveExec(ch, payload.Command)

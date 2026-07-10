@@ -70,6 +70,41 @@ func TestStreamFailsWhenRemoteExitsBeforeMarker(t *testing.T) {
 	}
 }
 
+// TestStreamMarkerReadHonorsContext checks that a remote which accepts the exec
+// but never emits the marker cannot wedge Stream: the marker read is bounded by
+// the context deadline.
+func TestStreamMarkerReadHonorsContext(t *testing.T) {
+	s := buildTestServer(t)
+	s.stallExec = true
+	go s.serve()
+
+	be, err := build(s.descriptor(t))
+	if err != nil {
+		t.Fatalf("build backend: %v", err)
+	}
+	b := be.(*backend)
+	t.Cleanup(b.close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		rc, err := b.Stream(ctx, torx.Command("true"))
+		if rc != nil {
+			_ = rc.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Stream should fail when the marker never arrives before the deadline")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stream hung: the marker read ignored the context deadline")
+	}
+}
+
 func TestStreamHonorsDir(t *testing.T) {
 	b := dialBackend(t)
 	dir := t.TempDir()
