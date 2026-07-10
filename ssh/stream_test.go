@@ -33,6 +33,53 @@ func TestStreamReadsOutputThenCloses(t *testing.T) {
 	}
 }
 
+func TestStreamHonorsDir(t *testing.T) {
+	b := dialBackend(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "marker"), []byte("in-dir\n"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	// cat resolves "marker" relative to the working directory, so it prints the
+	// file's contents only if Stream honored Cmd.Dir. With exec applied to the cd
+	// builtin the command never ran at all, and the stream would carry no output.
+	stream, err := b.Stream(context.Background(), torx.Cmd{Path: "cat", Args: []string{"marker"}, Dir: dir})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	defer stream.Close()
+	line, _ := bufio.NewReader(stream).ReadString('\n')
+	if strings.TrimSpace(line) != "in-dir" {
+		t.Errorf("stream output = %q, want in-dir: Cmd.Dir was not honored", strings.TrimSpace(line))
+	}
+}
+
+func TestStreamHonorsDirAndEnv(t *testing.T) {
+	b := dialBackend(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "marker"), []byte("here\n"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	// Exercises the whole cd + exec + env chain at once: the command runs in Dir
+	// (cat marker) with FOO set from Env.
+	stream, err := b.Stream(context.Background(), torx.Cmd{
+		Path: "sh", Args: []string{"-c", "cat marker; echo $FOO"},
+		Dir: dir, Env: []string{"FOO=bar"},
+	})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	defer stream.Close()
+	r := bufio.NewReader(stream)
+	fromDir, _ := r.ReadString('\n')
+	fromEnv, _ := r.ReadString('\n')
+	if strings.TrimSpace(fromDir) != "here" {
+		t.Errorf("first line = %q, want here (Cmd.Dir)", strings.TrimSpace(fromDir))
+	}
+	if strings.TrimSpace(fromEnv) != "bar" {
+		t.Errorf("second line = %q, want bar (Cmd.Env)", strings.TrimSpace(fromEnv))
+	}
+}
+
 func TestStreamCloseKillsSignalIgnoringGroup(t *testing.T) {
 	b := dialBackend(t)
 	dir := t.TempDir()

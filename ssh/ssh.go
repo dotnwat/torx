@@ -138,7 +138,7 @@ func (b *backend) Exec(ctx context.Context, cmd torx.Cmd) (torx.ExecResult, erro
 		sess.Stdin = bytes.NewReader(cmd.Stdin)
 	}
 
-	runErr := runToCompletion(ctx, sess, remoteCommand(cmd))
+	runErr := runToCompletion(ctx, sess, remoteCommand(cmd, false))
 	res := torx.ExecResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 	if ctx.Err() != nil {
 		return res, torx.Wrap(torx.ErrBackend, "ssh: exec "+cmd.Path, ctx.Err())
@@ -233,14 +233,14 @@ func (b *backend) killGroup(pgid int) {
 // wrapForStream builds the remote command line for Stream. setsid -w runs the
 // command as a new session/group leader (so Close can kill the group) while
 // waiting for it (so the SSH session lives as long as the command). The leader
-// prints its pid -- the group id -- then exec's the command in place, so the
-// command inherits that pid and stays the group leader. echo appends a trailing
-// newline, so the marker is a complete line readPGID can read before exec runs
-// the command: the handshake never waits on the command's own output. Keep the
-// echo (or anything else that terminates the marker with a newline), or readPGID
-// will block.
+// prints its pid -- the group id -- then exec's the command in place (via
+// remoteCommand's exec form), so the command inherits that pid and stays the
+// group leader. echo appends a trailing newline, so the marker is a complete
+// line readPGID can read before exec runs the command: the handshake never
+// waits on the command's own output. Keep the echo (or anything else that
+// terminates the marker with a newline), or readPGID will block.
 func wrapForStream(cmd torx.Cmd) string {
-	payload := "echo " + pgidMarker + "$$; exec " + remoteCommand(cmd)
+	payload := "echo " + pgidMarker + "$$; " + remoteCommand(cmd, true)
 	return "setsid -w sh -c " + shQuote(payload)
 }
 
@@ -301,10 +301,18 @@ func runToCompletion(ctx context.Context, sess *cryptossh.Session, line string) 
 // remoteCommand renders a Cmd as a single shell command line for an exec
 // request: the node's login shell interprets it, so environment assignments and
 // the working directory are applied with env and cd, and every token is quoted.
-func remoteCommand(cmd torx.Cmd) string {
+// When execProc is set the program replaces the shell (exec) so it inherits the
+// shell's pid; Stream relies on that, because that pid is the process-group id
+// readPGID reports. The exec must sit after the cd prefix -- exec'ing the cd
+// builtin would fail and never run the program -- and before env, so exec
+// replaces the shell with env, which runs the program in place.
+func remoteCommand(cmd torx.Cmd, execProc bool) string {
 	var b strings.Builder
 	if cmd.Dir != "" {
 		b.WriteString("cd " + shQuote(cmd.Dir) + " && ")
+	}
+	if execProc {
+		b.WriteString("exec ")
 	}
 	if len(cmd.Env) > 0 {
 		b.WriteString("env")
