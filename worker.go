@@ -69,8 +69,13 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 	}
 	jc := NewJobContext(a.Params, sink)
 	jc.resultsDir = jobDir
-	job := factory()
-	job.Declare(jc)
+	// Declare and Bind are (or drive) job-supplied code; confine a panic in
+	// either to this job's result, matching the recover wrapper Setup, Run, and
+	// Teardown already run under.
+	var job Job
+	if err := recovered(func() error { job = factory(); job.Declare(jc); return nil }); err != nil {
+		return fail(err)
+	}
 
 	nodes, err := buildNodes(a.Nodes)
 	if err != nil {
@@ -79,7 +84,9 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 	if got, want := len(nodes), jc.PoolSpec().Size(); got != want {
 		return fail(fmt.Errorf("worker: assignment has %d nodes, job needs %d", got, want))
 	}
-	jc.Bind(nodes)
+	if err := recovered(func() error { jc.Bind(nodes); return nil }); err != nil {
+		return fail(err)
+	}
 	Emit(ctx, Event{Kind: EventRunning, Source: id})
 	Logf(ctx, "info", "bound %d node(s): %s", len(nodes), nodeList(nodes))
 

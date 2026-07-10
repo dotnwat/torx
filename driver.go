@@ -196,7 +196,12 @@ func sizeJob(req JobRequest) (PoolSpec, error) {
 		return PoolSpec{}, fmt.Errorf("driver: unknown job %q", req.ID)
 	}
 	jc := NewJobContext(req.Params, nil)
-	factory().Declare(jc)
+	// Declare is job-supplied code, and sizeJob runs it in the driver process
+	// before any job is launched; a panic here must fail just this job rather
+	// than take down the whole run.
+	if err := recovered(func() error { factory().Declare(jc); return nil }); err != nil {
+		return PoolSpec{}, fmt.Errorf("driver: job %q: %w", req.ID, err)
+	}
 	return jc.PoolSpec(), nil
 }
 

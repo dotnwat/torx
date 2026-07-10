@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -76,6 +77,24 @@ func TestRunSchedulesAllJobs(t *testing.T) {
 	}
 	if !res.Ok() {
 		t.Errorf("not all jobs passed:\n%s", res.Render())
+	}
+}
+
+func TestSizeJobRecoversDeclarePanic(t *testing.T) {
+	if _, err := sizeJob(JobRequest{ID: "wtest.declarepanic"}); err == nil {
+		t.Fatal("sizeJob should return an error when Declare panics, not propagate the panic")
+	} else if !strings.Contains(err.Error(), "declare-boom") {
+		t.Errorf("error = %v, want it to mention declare-boom", err)
+	}
+}
+
+func TestRunFailsDeclarePanicWithoutCrashing(t *testing.T) {
+	res := Run(context.Background(), testPool(1), InProcessLauncher{}, []JobRequest{{ID: "wtest.declarepanic"}}, RunOptions{})
+	if len(res.Jobs) != 1 {
+		t.Fatalf("got %d job results, want 1", len(res.Jobs))
+	}
+	if res.Jobs[0].Status != StatusFail {
+		t.Errorf("status = %v, want FAIL", res.Jobs[0].Status)
 	}
 }
 

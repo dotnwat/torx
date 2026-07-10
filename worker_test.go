@@ -15,6 +15,7 @@ func init() {
 	Register("wtest.pass", func() Job { return &wPassJob{} })
 	Register("wtest.fail", func() Job { return &wFailJob{} })
 	Register("wtest.panic", func() Job { return &wPanicJob{} })
+	Register("wtest.declarepanic", func() Job { return &wDeclarePanicJob{} })
 	Register("wtest.block", func() Job { return &wBlockJob{} })
 	Register("wtest.nodes", func() Job { return &wNodeJob{} })
 }
@@ -37,6 +38,11 @@ type wPanicJob struct{ JobBase }
 
 func (*wPanicJob) Declare(*JobContext)                    {}
 func (*wPanicJob) Run(context.Context, *JobContext) error { panic("kaboom") }
+
+type wDeclarePanicJob struct{ JobBase }
+
+func (*wDeclarePanicJob) Declare(*JobContext)                    { panic("declare-boom") }
+func (*wDeclarePanicJob) Run(context.Context, *JobContext) error { return nil }
 
 type wBlockJob struct{ JobBase }
 
@@ -168,6 +174,19 @@ func TestRunWorkerPanicBecomesFailure(t *testing.T) {
 	}
 	if r.Error.Stack == "" {
 		t.Errorf("a recovered panic should carry a stack")
+	}
+}
+
+func TestRunWorkerDeclarePanicBecomesFailure(t *testing.T) {
+	r := resultOf(runWorker(t, Assignment{JobID: "wtest.declarepanic"}))
+	if r == nil || r.Status != StatusFail {
+		t.Fatalf("result = %+v, want FAIL", r)
+	}
+	if r.Error == nil || !strings.Contains(r.Error.Message, "declare-boom") {
+		t.Errorf("error = %+v, want it to mention declare-boom", r.Error)
+	}
+	if r.Error.Stack == "" {
+		t.Errorf("a recovered Declare panic should carry a stack")
 	}
 }
 
