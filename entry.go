@@ -39,6 +39,11 @@ func workerMain() int {
 		return 1
 	}
 	defer events.Close()
+	// The driver handed us this pipe via ExtraFiles, which clears close-on-exec;
+	// restore it so the services this worker spawns do not inherit it. A service
+	// that kept the write end open would stop the driver's reader from ever
+	// seeing EOF, wedging the whole run after the worker exits.
+	syscall.CloseOnExec(int(events.Fd()))
 
 	if err := RunWorker(ctx, os.Stdin, events); err != nil {
 		fmt.Fprintln(os.Stderr, "torx worker:", err)
