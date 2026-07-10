@@ -1,0 +1,308 @@
+# torx
+
+torx is a distributed testing and benchmarking framework. A **suite** is a Go
+binary that links the torx library and its own jobs; the same binary is both the
+driver and, re-executed, the worker that runs one job. You write two kinds of
+thing:
+
+- a **Service** — how to run a process (a server, a client, a load generator) on
+  the nodes allocated to it, and
+- a **Job** — one test or benchmark, which declares the services it needs and
+  drives them.
+
+The framework does the rest: it sizes each job from the services it declares,
+allocates a disjoint set of nodes for it, starts the services, waits for
+readiness, runs the job body, and tears everything down — collecting logs and
+artifacts along the way.
+
+A few concepts you will meet:
+
+- **Node** — one execution target. A node runs commands and moves files through
+  its **Backend** (`LocalBackend` for local runs, the `ssh` backend for remote
+  nodes); a service never touches the transport, it calls `node.Exec`,
+  `node.Stream`, `node.WriteFile`, and so on. A node also carries a scratch
+  directory, a port allocator, and its reachable address (`node.Addr()`).
+- **Pool** — the finite set of nodes a run owns. The driver allocates a sub-pool
+  per job and frees it on completion, so two jobs never share a node.
+- **Result** — a job passes when `Run` returns `nil`. A benchmark additionally
+  records an opaque `Data` payload plus a one-line `Summary`; torx stores these
+  verbatim and never interprets them.
+
+A worked example lives in [`demo/`](demo/): a tiny echo service and job, the
+whole vertical slice in one file.
+
+## Authoring a Service
+
+A service embeds `*torx.ServiceBase` and implements the four per-node lifecycle
+hooks. `ServiceBase` turns those hooks into the coarse `Start`/`Stop`/`Clean`/
+`Wait` lifecycle the framework drives, stopping and cleaning each node before
+starting it so a service always begins from a known state.
+
+```go
+package myservice
+
+import (
+	"context"
+	"io"
+	"net"
+	"strconv"
+	"sync"
+
+	"github.com/dotnwat/torx"
+)
+
+// Service runs one myserver per node.
+type Service struct {
+	*torx.ServiceBase
+
+	mu      sync.Mutex
+	servers map[string]io.ReadCloser // node name -> running server handle
+	addrs   map[string]string        // node name -> host:port
+}
+
+// New builds a service named name that needs one node.
+func New(name string) *Service {
+	s := &Service{servers: map[string]io.ReadCloser{}, addrs: map[string]string{}}
+	// Homogeneous(count, spec) is the node demand. A spec can require CPUs,
+	// memory, or labels (torx.NodeSpec{Required: torx.Resources{...}}); an empty
+	// spec matches any node.
+	s.ServiceBase = torx.NewServiceBase(name, torx.Homogeneous(1, torx.NodeSpec{}), s)
+	return s
+}
+
+// StartNode launches the server on n. It leases a free port, binds every
+// interface so a client off the node can reach it, and advertises the node's
+// reachable address. StartCaptured runs the process with its output redirected
+// to a node-local file and registers that file for collection.
+func (s *Service) StartNode(ctx context.Context, n *torx.Node) error {
+	port, err := n.AllocatePort()
+	if err != nil {
+		return err
+	}
+	dir := n.ServiceScratch(s.Name()).Root // a disjoint scratch dir for this service
+	cmd := torx.Command("myserver",
+		"--listen", "0.0.0.0",
+		"--port", strconv.Itoa(port),
+		"--dir", dir,
+	)
+	handle, err := s.StartCaptured(ctx, n, cmd)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.servers[n.Name()] = handle
+	s.addrs[n.Name()] = net.JoinHostPort(n.Addr(), strconv.Itoa(port))
+	s.mu.Unlock()
+	return nil
+}
+
+// WaitNode blocks until the server is ready. Readiness is a real check, never a
+// bare sleep: poll a port, an HTTP endpoint, or a protocol ping.
+func (s *Service) WaitNode(ctx context.Context, n *torx.Node) error {
+	s.mu.Lock()
+	addr := s.addrs[n.Name()]
+	s.mu.Unlock()
+	return torx.WaitForPort(ctx, addr) // or torx.WaitUntil(ctx, poll, backoff)
+}
+
+// StopNode terminates the server. Closing the StartCaptured handle kills the
+// remote process group.
+func (s *Service) StopNode(ctx context.Context, n *torx.Node) error {
+	s.mu.Lock()
+	h := s.servers[n.Name()]
+	delete(s.servers, n.Name())
+	delete(s.addrs, n.Name())
+	s.mu.Unlock()
+	if h == nil {
+		return nil
+	}
+	return h.Close()
+}
+
+// CleanNode removes the server's persistent state.
+func (s *Service) CleanNode(ctx context.Context, n *torx.Node) error {
+	return n.Rm(ctx, n.ServiceScratch(s.Name()).Root)
+}
+
+// Addr exposes the server's advertised address to jobs and other services.
+func (s *Service) Addr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, n := range s.Nodes() {
+		if a, ok := s.addrs[n.Name()]; ok {
+			return a
+		}
+	}
+	return ""
+}
+```
+
+Guidelines that keep a service portable across the local and ssh backends:
+
+- **Reach the node only through its methods** — `n.Exec`, `n.Stream`,
+  `n.ReadFile`, `n.WriteFile`, `n.Mkdir`, `n.Rm`, `n.Signal`. They run on the
+  node whether that is a local subprocess or a container over SSH.
+- **Bind broadly, advertise `n.Addr()`.** Bind the server to all interfaces so a
+  client on another node can reach it, and record `n.Addr()` (not a hardcoded
+  `127.0.0.1`) as the address others dial.
+- **Lease ports with `n.AllocatePort()`** rather than hardcoding one, so services
+  co-located on a host do not collide.
+- **Capture output with `StartCaptured`.** It redirects the process's stdout and
+  stderr to a node-local file and collects it into the results tree. For any
+  other output (a `--log-file`, a data dump) call `s.AddArtifact(n,
+  torx.Artifact{Name: ..., Path: ..., CollectOnPass: true})`.
+- **One-shot commands** (a load generator that runs and exits) use
+  `n.Exec(ctx, cmd)` instead of `StartCaptured`; it runs to completion and
+  returns the captured `ExecResult` (exit code, stdout, stderr).
+
+A service that is not a per-node server — a rolling restart, a one-shot client, a
+single cloud-API call — can override the coarse lifecycle methods (`Start`,
+`Stop`, `Clean`, `Wait`) directly instead of implementing the per-node hooks.
+
+## Authoring a Job (test or benchmark)
+
+A job embeds `torx.JobBase` and implements `Declare` and `Run`.
+
+```go
+package main
+
+import (
+	"context"
+
+	"example.com/myservice"
+	"github.com/dotnwat/torx"
+)
+
+func main() { torx.Main() }
+
+// Register the job by a stable id in an init function so the driver can discover
+// it and the worker can reconstruct it.
+func init() {
+	torx.Register("my.smoke", func() torx.Job { return &smokeJob{} })
+}
+
+type smokeJob struct {
+	torx.JobBase
+	server *myservice.Service
+}
+
+// Declare registers and configures the services the job needs. It must be pure:
+// construct and register services, but do not allocate or start anything. The
+// framework calls it to size the job and the worker calls it to rebuild the job
+// identically.
+func (j *smokeJob) Declare(jc *torx.JobContext) {
+	j.server = myservice.New("myserver")
+	jc.Register(j.server)
+}
+
+// Run is the test body. It runs after the framework has started every declared
+// service and waited for readiness. Return nil to pass, an error to fail.
+func (j *smokeJob) Run(ctx context.Context, jc *torx.JobContext) error {
+	addr := j.server.Addr()
+	// ... connect to addr, exercise the server, assert behavior ...
+	jc.SetSummary("myserver came up and answered")
+	return nil
+}
+```
+
+What `JobBase` gives you, and how to take control:
+
+- **`Setup`** starts every declared service and waits for each to be ready, in
+  registration order. Override `Setup` to control start order or start lazily.
+- **`Teardown`** stops the services, collects their artifacts, cleans them, and
+  runs finalizers — in reverse order, aggregating every error. Override it only
+  if you need to, and call `jc.CollectArtifacts(ctx)` between stopping and
+  cleaning so logs survive.
+- **`jc.Defer(fn)`** registers a cleanup callback run during teardown.
+- A **benchmark** records what it measured: `jc.Record(anyValue)` stores an
+  opaque JSON payload and `jc.SetSummary("...")` a one-line human summary. torx
+  never interprets `Data`; large outputs belong in artifacts.
+
+Multi-service jobs just declare more services; the framework sums their demand
+into the pool it allocates and hands each service its nodes (`Bind`) in
+registration order. A job accesses one service from another through the service's
+own methods (e.g. `server.Addr()`), exactly as in `Run` above.
+
+**Parametrization.** A job may expand into several variants by implementing
+`Matrix() []torx.Params`; the `torx.Matrix(map[string][]any)` helper builds the
+cross product. Each variant gets a stable id and is selected, scheduled, and
+reported independently. Read `jc.Params` (with the typed `Int`/`String`/`Bool`
+getters) inside `Declare`/`Run`.
+
+## Wiring it into a suite binary
+
+A suite is a Go binary whose `main` calls `torx.Main()` and whose jobs are
+registered via `init`. A job is discoverable only if its package is linked into
+that binary — so the file with the `torx.Register(...)` call must be imported
+(the `main` package here contains it directly).
+
+## Running a suite
+
+The binary is the driver by default. Positional arguments select jobs by id
+(regular expressions); with none, every registered job runs.
+
+```bash
+# Local pool sized to the largest job (or fix it with -nodes N):
+go run ./path/to/suite my.smoke
+go run ./path/to/suite -nodes 3 'my\..*'
+
+# Results land under ./results/<timestamp>/ with a `latest` symlink:
+#   results/<ts>/<jobVariant>/{events.ndjson, test_log, result.json,
+#                              <service>/<node>/stdout.log}
+```
+
+Useful flags: `-nodes N` (local pool size), `-parallel N` (concurrent jobs),
+`-results <file>` (newline-delimited JSON results), `-results-dir <dir>` (the
+per-run tree; empty to disable), and `-pool <manifest.json>` (below).
+
+**Remote pools.** To run against nodes a provisioner prepared, pass a node
+manifest with `-pool` and blank-import the ssh backend in your suite's `main` so
+`ssh`-kind nodes are constructible:
+
+```go
+import _ "github.com/dotnwat/torx/ssh"
+```
+
+```json
+{
+  "nodes": [
+    { "name": "n0", "address": "10.0.0.5", "scratch": "/var/tmp/torx",
+      "ports": { "min": 30000, "max": 31000 },
+      "backend": { "kind": "ssh", "host": "10.0.0.5",
+        "config": { "user": "torx", "identity_file": "/etc/torx/id_ed25519",
+                    "known_hosts": "/etc/torx/known_hosts" } } }
+  ]
+}
+```
+
+Because a suite is one static binary, production and multi-node runs invoke it
+directly; `go run`/`go test` is one way to invoke the same binary, not a second
+code path.
+
+## Testing your service and job
+
+Cross-language wire compatibility and full service lifecycles need a live server,
+so a suite is usually exercised by running it end to end and asserting the
+result. The idiom (see [`demo/echo_test.go`](demo/echo_test.go)) is a Go test
+whose `TestMain` lets the test binary double as the torx worker, then runs the
+suite through the real driver/worker split on a small local pool:
+
+```go
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "worker" {
+		torx.Main() // dispatch to worker mode and exit
+	}
+	os.Exit(m.Run())
+}
+
+func TestSmoke(t *testing.T) {
+	reqs, err := torx.Discover("my.smoke")
+	// ... build a local pool, torx.Run(ctx, pool, torx.SelfExecLauncher{}, reqs, opts),
+	//     assert res.Ok() and inspect the collected results tree ...
+}
+```
+
+Everything else — the pure functions a service and job are built from (readiness
+predicates, address handling, result parsing) — is ordinary Go unit-testable, and
+should be: design services and jobs so their logic is reachable without a running
+server wherever possible.
