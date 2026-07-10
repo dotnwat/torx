@@ -187,6 +187,14 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (io.ReadCloser, erro
 		_ = sess.Close()
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, err)
 	}
+	// Close the write end once the command exits so the reader sees EOF. This
+	// must start before reading the marker: if the remote dies before emitting
+	// it, this goroutine's pw.Close is what unblocks readPGID with EOF instead of
+	// leaving it to block forever on a marker that will never arrive.
+	go func() {
+		_ = sess.Wait()
+		_ = pw.Close()
+	}()
 	// Read the group id off the first line before handing back the stream, so
 	// Close knows what to kill.
 	br := bufio.NewReader(pr)
@@ -197,11 +205,6 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (io.ReadCloser, erro
 		_ = pr.Close()
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, err)
 	}
-	// Once the command exits, close the write end so the reader sees EOF.
-	go func() {
-		_ = sess.Wait()
-		_ = pw.Close()
-	}()
 	return &sshStream{backend: b, sess: sess, pr: pr, r: br, pgid: pgid}, nil
 }
 
@@ -227,6 +230,12 @@ func (s *sshStream) Close() error {
 // killGroup SIGKILLs a remote process group over a fresh session. It is
 // best-effort: the group may already be gone.
 func (b *backend) killGroup(pgid int) {
+	if pgid < 2 {
+		// Never signal group 1 (every process the caller may signal) or 0 (the
+		// caller's own group). readPGID already rejects these, but Close must not
+		// turn a stray id into kill -KILL -1 either.
+		return
+	}
 	_, _ = b.Exec(context.Background(), torx.Command("kill", "-KILL", "-"+strconv.Itoa(pgid)))
 }
 
@@ -247,11 +256,16 @@ func wrapForStream(cmd torx.Cmd) string {
 // readPGID reads the process-group id the stream wrapper prints on its first
 // line, up to the newline echo appends (see wrapForStream). That echo runs
 // before the command is exec'd, so the marker is available immediately and does
-// not depend on the command producing any output of its own.
+// not depend on the command producing any output of its own. The complete line
+// is required, and the id must be a plausible pgid (>= 2): a partial read or an
+// out-of-range value is rejected rather than fed to a later kill.
 func readPGID(r *bufio.Reader) (int, error) {
 	line, err := r.ReadString('\n')
-	if err != nil && line == "" {
-		return 0, err
+	if err != nil {
+		// Without the trailing newline the marker is incomplete: the remote died
+		// mid-write or before echoing it. A truncated pgid must never be trusted --
+		// "TORX_PGID:1" cut from ":1234" would target process group 1.
+		return 0, fmt.Errorf("ssh: stream: incomplete %q marker %q: %w", pgidMarker, strings.TrimSpace(line), err)
 	}
 	rest, ok := strings.CutPrefix(strings.TrimSpace(line), pgidMarker)
 	if !ok {
@@ -260,6 +274,12 @@ func readPGID(r *bufio.Reader) (int, error) {
 	pgid, err := strconv.Atoi(rest)
 	if err != nil {
 		return 0, fmt.Errorf("ssh: stream: bad process-group id %q: %w", rest, err)
+	}
+	if pgid < 2 {
+		// A session leader's pgid is its pid, always >= 2 (1 is init). Reject
+		// anything lower so a negated pgid can never become kill -KILL -1 (every
+		// process the caller may signal) or -0 (the caller's own group).
+		return 0, fmt.Errorf("ssh: stream: implausible process-group id %d", pgid)
 	}
 	return pgid, nil
 }

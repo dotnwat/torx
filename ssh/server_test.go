@@ -32,11 +32,25 @@ type testServer struct {
 	config Config // client settings that reach this server
 	sc     *cryptossh.ServerConfig
 	ln     net.Listener
+
+	// silentExec makes exec requests reply success and then close the channel
+	// with no output -- not even the pgid marker -- simulating a remote that dies
+	// before the stream handshake completes.
+	silentExec bool
 }
 
 // newTestServer starts a server on the loopback and returns a handle whose
 // descriptor builds a backend that authenticates to and trusts it.
 func newTestServer(t *testing.T) *testServer {
+	s := buildTestServer(t)
+	go s.serve()
+	return s
+}
+
+// buildTestServer sets up the server and its listener but does not start
+// accepting connections, so a caller can tweak fields (e.g. silentExec) before
+// calling serve.
+func buildTestServer(t *testing.T) *testServer {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -94,7 +108,6 @@ func newTestServer(t *testing.T) *testServer {
 			KnownHosts:   khFile,
 		},
 	}
-	go s.serve()
 	t.Cleanup(func() { _ = ln.Close() })
 	return s
 }
@@ -155,17 +168,24 @@ func (s *testServer) handleConn(conn net.Conn) {
 		if err != nil {
 			continue
 		}
-		go serveSession(ch, chReqs)
+		go s.serveSession(ch, chReqs)
 	}
 }
 
-func serveSession(ch cryptossh.Channel, reqs <-chan *cryptossh.Request) {
+func (s *testServer) serveSession(ch cryptossh.Channel, reqs <-chan *cryptossh.Request) {
 	for req := range reqs {
 		switch req.Type {
 		case "exec":
 			var payload struct{ Command string }
 			_ = cryptossh.Unmarshal(req.Payload, &payload)
 			_ = req.Reply(true, nil)
+			if s.silentExec {
+				// Accept the exec but produce no output and close, mimicking a
+				// remote that dies before printing the pgid marker.
+				sendExit(ch, 1)
+				_ = ch.Close()
+				continue
+			}
 			go serveExec(ch, payload.Command)
 		case "subsystem":
 			var payload struct{ Name string }

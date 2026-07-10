@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -187,6 +188,43 @@ func TestBuildRejectsBadConfig(t *testing.T) {
 	}
 	if _, err := build(descriptorFor(t, "h", Config{})); err == nil {
 		t.Error("expected an error when the config is missing user/identity/known_hosts")
+	}
+}
+
+func TestReadPGID(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  int
+		ok    bool
+	}{
+		{"valid", "TORX_PGID:1234\n", 1234, true},
+		{"valid with trailing output", "TORX_PGID:1234\nhello\n", 1234, true},
+		{"no newline", "TORX_PGID:1234", 0, false},
+		{"truncated pgid, no newline", "TORX_PGID:1", 0, false},
+		{"pgid one", "TORX_PGID:1\n", 0, false},
+		{"pgid zero", "TORX_PGID:0\n", 0, false},
+		{"negative pgid", "TORX_PGID:-5\n", 0, false},
+		{"non-numeric", "TORX_PGID:abc\n", 0, false},
+		{"wrong marker", "GARBAGE\n", 0, false},
+		{"empty", "", 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pgid, err := readPGID(bufio.NewReader(strings.NewReader(tc.input)))
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("readPGID(%q) = error %v, want %d", tc.input, err, tc.want)
+				}
+				if pgid != tc.want {
+					t.Errorf("readPGID(%q) = %d, want %d", tc.input, pgid, tc.want)
+				}
+				return
+			}
+			if err == nil {
+				t.Errorf("readPGID(%q) = %d, nil; want an error", tc.input, pgid)
+			}
+		})
 	}
 }
 

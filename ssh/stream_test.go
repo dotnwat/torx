@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,6 +31,42 @@ func TestStreamReadsOutputThenCloses(t *testing.T) {
 	}
 	if err := stream.Close(); err != nil {
 		t.Errorf("close: %v", err)
+	}
+}
+
+// TestStreamFailsWhenRemoteExitsBeforeMarker is the regression for the marker
+// handshake hang: a remote that accepts the exec but dies before printing the
+// pgid marker must make Stream return an error, not block forever. It relies on
+// the EOF-delivering goroutine starting before the marker read.
+func TestStreamFailsWhenRemoteExitsBeforeMarker(t *testing.T) {
+	s := buildTestServer(t)
+	s.silentExec = true
+	go s.serve()
+
+	be, err := build(s.descriptor(t))
+	if err != nil {
+		t.Fatalf("build backend: %v", err)
+	}
+	b := be.(*backend)
+	t.Cleanup(b.close)
+
+	type result struct {
+		rc  io.ReadCloser
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		rc, err := b.Stream(context.Background(), torx.Command("true"))
+		ch <- result{rc, err}
+	}()
+	select {
+	case r := <-ch:
+		if r.err == nil {
+			_ = r.rc.Close()
+			t.Fatal("Stream returned a healthy handle when the remote exited before the marker")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Stream hung waiting for a marker the remote never sent")
 	}
 }
 
