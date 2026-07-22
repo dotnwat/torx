@@ -2,16 +2,25 @@ package torx
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 )
 
 func init() {
 	Register("disc.plain", func() Job { return &discPlainJob{} })
 	Register("disc.matrix", func() Job { return &discMatrixJob{} })
-	// Under a prefix the disc.* tests do not select, so they see a stable count.
+	// Under prefixes the disc.* tests do not select, so they see a stable count.
 	Register("discpanic.factory", func() Job { panic("factory-boom") })
 	Register("discpanic.matrix", func() Job { return &discMatrixPanicJob{} })
+	Register("discdup.matrix", func() Job { return &discDupJob{} })
 }
+
+// discDupJob returns the same parameter set twice, so its variants collide.
+type discDupJob struct{ JobBase }
+
+func (*discDupJob) Declare(*JobContext)                    {}
+func (*discDupJob) Run(context.Context, *JobContext) error { return nil }
+func (*discDupJob) Matrix() []Params                       { return []Params{{"n": 1}, {"n": 1}} }
 
 // discMatrixPanicJob panics while enumerating its variants.
 type discMatrixPanicJob struct{ JobBase }
@@ -48,7 +57,7 @@ func TestMatrixCrossProduct(t *testing.T) {
 	for _, p := range got {
 		seen[variantID("j", p)] = true
 	}
-	for _, want := range []string{"j[a=1,b=x]", "j[a=1,b=y]", "j[a=2,b=x]", "j[a=2,b=y]"} {
+	for _, want := range []string{`j[a=1,b="x"]`, `j[a=1,b="y"]`, `j[a=2,b="x"]`, `j[a=2,b="y"]`} {
 		if !seen[want] {
 			t.Errorf("missing variant %q", want)
 		}
@@ -65,9 +74,46 @@ func TestVariantID(t *testing.T) {
 	if got := variantID("pkg.Job", nil); got != "pkg.Job" {
 		t.Errorf("variantID(no params) = %q, want pkg.Job", got)
 	}
-	// Keys are sorted, so the id is independent of map iteration order.
-	if got := variantID("pkg.Job", Params{"b": "x", "a": 1}); got != "pkg.Job[a=1,b=x]" {
-		t.Errorf("variantID = %q, want pkg.Job[a=1,b=x]", got)
+	// Keys are sorted, so the id is independent of map iteration order; string
+	// values are quoted (JSON) so their type is preserved.
+	if got := variantID("pkg.Job", Params{"b": "x", "a": 1}); got != `pkg.Job[a=1,b="x"]` {
+		t.Errorf(`variantID = %q, want pkg.Job[a=1,b="x"]`, got)
+	}
+}
+
+func TestVariantIDInjectiveAcrossTypes(t *testing.T) {
+	// The reported collision: %v rendered both the number 1 and the string "1" as
+	// "1". JSON encoding keeps them distinct.
+	if num, str := variantID("j", Params{"v": 1}), variantID("j", Params{"v": "1"}); num == str {
+		t.Errorf("number and string values collided: both %q", num)
+	}
+}
+
+func TestVariantIDStableAcrossJSONRoundtrip(t *testing.T) {
+	// The driver computes the id from native Matrix values (int, string, bool);
+	// a worker recomputes it from params decoded from JSON, where the int is now a
+	// float64. The two must agree or they would name different result directories.
+	native := Params{"n": 1, "name": "x", "on": true}
+	data, err := json.Marshal(native)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Params
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if a, b := variantID("j", native), variantID("j", decoded); a != b {
+		t.Errorf("variantID differs across a JSON round-trip: %q vs %q", a, b)
+	}
+}
+
+func TestDiscoverRejectsDuplicateVariants(t *testing.T) {
+	reqs, err := Discover("^discdup[.]matrix$")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(reqs) != 1 || reqs[0].discErr == nil {
+		t.Fatalf("got %+v, want one failing request for the duplicate variant", reqs)
 	}
 }
 

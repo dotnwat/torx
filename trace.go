@@ -104,9 +104,24 @@ func eventTagText(e Event) (tag, text string) {
 	}
 }
 
-// sanitizeID makes a variant id safe as a single path component.
+// sanitizeID encodes a variant id as a single safe path component. It
+// percent-encodes the path separator, the percent sign itself, and any control
+// byte; the encoding is reversible and therefore injective, so two distinct
+// variant ids never collapse to the same directory (a plain '/' -> '_'
+// substitution would). Everything else a variant id may contain -- the [ ] = ,
+// and quotes from JSON-encoded values -- is legal in a POSIX filename and is kept
+// for readability.
 func sanitizeID(id string) string {
-	return strings.ReplaceAll(id, "/", "_")
+	var b strings.Builder
+	for i := range len(id) {
+		c := id[i]
+		if c == '/' || c == '%' || c < 0x20 {
+			fmt.Fprintf(&b, "%%%02X", c)
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // jobResultsDir creates and returns the per-job directory under runDir, or "" if

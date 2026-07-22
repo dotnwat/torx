@@ -171,6 +171,19 @@ func TestRunTraceHasLifecycle(t *testing.T) {
 	}
 }
 
+func TestSanitizeIDInjective(t *testing.T) {
+	// A "/" inside a value and its percent-encoding must map to distinct
+	// components, or the two variants would share a result directory.
+	a := sanitizeID(`j[p="a/b"]`)
+	b := sanitizeID(`j[p="a%2Fb"]`)
+	if a == b {
+		t.Errorf("distinct ids sanitized to the same component: %q", a)
+	}
+	if strings.ContainsRune(a, '/') {
+		t.Errorf("sanitizeID left a path separator in %q", a)
+	}
+}
+
 func TestMakeRunDirUnique(t *testing.T) {
 	root := t.TempDir()
 	stamp := "2026-01-02T03-04-05Z"

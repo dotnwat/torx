@@ -10,6 +10,7 @@
 package torx
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -69,11 +70,15 @@ func Discover(patterns ...string) ([]JobRequest, error) {
 			continue
 		}
 		variants, err := expandVariants(factory)
+		if err == nil {
+			err = checkDuplicateVariants(id, variants)
+		}
 		if err != nil {
-			// The factory or Matrix panicked. Both are job-supplied code running in
-			// the driver before any worker isolation, so confine the failure to this
-			// job -- as a failing variant when the job was selected -- rather than
-			// letting one bad job crash discovery for the whole suite.
+			// The factory or Matrix panicked, or the job produced two variants with
+			// the same id. Both are job-supplied problems surfacing at the driver
+			// before any worker isolation, so confine the failure to this job -- as a
+			// failing variant when the job was selected -- rather than letting one bad
+			// job crash discovery for the whole suite.
 			if matchesAny(id, res) {
 				requests = append(requests, JobRequest{ID: id, discErr: fmt.Errorf("discover: job %q: %w", id, err)})
 			}
@@ -100,6 +105,23 @@ func expandVariants(factory func() Job) (variants []Params, err error) {
 	return variants, err
 }
 
+// checkDuplicateVariants reports an error if two of a job's parameter sets encode
+// to the same variant id -- for example a Matrix dimension that lists a value
+// twice. Colliding variants are indistinguishable in selection and reporting and
+// would share a per-variant result directory, letting concurrent workers truncate
+// each other's traces and results, so discovery rejects the job outright.
+func checkDuplicateVariants(id string, variants []Params) error {
+	seen := make(map[string]struct{}, len(variants))
+	for _, params := range variants {
+		vid := variantID(id, params)
+		if _, dup := seen[vid]; dup {
+			return fmt.Errorf("duplicate variant %q", vid)
+		}
+		seen[vid] = struct{}{}
+	}
+	return nil
+}
+
 func variantsOf(job Job) []Params {
 	if p, ok := job.(Parametrized); ok {
 		if m := p.Matrix(); len(m) > 0 {
@@ -122,7 +144,14 @@ func matchesAny(id string, res []*regexp.Regexp) bool {
 }
 
 // variantID is the stable id for a job variant: the base id, plus its parameters
-// in sorted order when present, e.g. "pkg.Job" or "pkg.Job[a=1,b=x]".
+// in sorted order when present, e.g. "pkg.Job" or `pkg.Job[a=1,b="x"]`. Each
+// value is JSON-encoded, which makes the id injective and type-preserving: the
+// number 1 and the string "1" get distinct ids (v=1 versus v="1") instead of
+// colliding, and the encoding is stable across the JSON round-trip a parameter
+// set makes between the driver and a worker -- an integer and the float64 it
+// decodes to both render as 1. Injectivity matters because these ids name
+// per-variant result directories, so two variants sharing an id would write over
+// each other's traces and results.
 func variantID(base string, params Params) string {
 	if len(params) == 0 {
 		return base
@@ -134,7 +163,18 @@ func variantID(base string, params Params) string {
 	sort.Strings(keys)
 	parts := make([]string, len(keys))
 	for i, k := range keys {
-		parts[i] = fmt.Sprintf("%s=%v", k, params[k])
+		parts[i] = k + "=" + encodeParamValue(params[k])
 	}
 	return base + "[" + strings.Join(parts, ",") + "]"
+}
+
+// encodeParamValue renders a parameter value as canonical JSON, so distinct
+// values map to distinct strings. A value that cannot be JSON-encoded -- unusual,
+// since parameters normally arrive as JSON -- falls back to %v, trading
+// injectivity for a readable id rather than failing.
+func encodeParamValue(v any) string {
+	if b, err := json.Marshal(v); err == nil {
+		return string(b)
+	}
+	return fmt.Sprintf("%v", v)
 }
