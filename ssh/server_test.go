@@ -214,12 +214,15 @@ func (s *testServer) serveSession(ch cryptossh.Channel, reqs <-chan *cryptossh.R
 	}
 }
 
-// serveExec runs line as a local subprocess in its own process group, wiring its
-// output to the channel and reporting its exit status. It runs to completion; a
-// client that cancels simply closes its session, which unblocks the client side.
+// serveExec runs line as a local subprocess in its own process group, wiring the
+// channel to its stdin/stdout/stderr the way sshd does and reporting its exit
+// status. Connecting stdin lets the client's Cmd.Stdin reach the command. It
+// runs to completion; a client that cancels simply closes its session, which
+// unblocks the client side.
 func serveExec(ch cryptossh.Channel, line string) {
 	cmd := exec.Command("sh", "-c", line)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdin = ch
 	cmd.Stdout = ch
 	cmd.Stderr = ch.Stderr()
 	sendExit(ch, exitCode(cmd.Run()))

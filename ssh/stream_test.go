@@ -152,6 +152,26 @@ func TestStreamHonorsDirAndEnv(t *testing.T) {
 	}
 }
 
+// TestStreamForwardsStdin is the regression for Stream silently dropping
+// Cmd.Stdin: Exec and the LocalBackend honor it, so StartCaptured's contract
+// requires Stream to as well. cat echoes its stdin, which the wrapper feeds to
+// the exec'd command; the stream carries it back after the pgid marker line.
+func TestStreamForwardsStdin(t *testing.T) {
+	b := dialBackend(t)
+	stream, err := b.Stream(context.Background(), torx.Cmd{Path: "cat", Stdin: []byte("round-trip\n")})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	defer stream.Close()
+	line, err := bufio.NewReader(stream).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.TrimSpace(line) != "round-trip" {
+		t.Errorf("stream output = %q, want round-trip: Cmd.Stdin was not forwarded", strings.TrimSpace(line))
+	}
+}
+
 func TestStreamCloseKillsSignalIgnoringGroup(t *testing.T) {
 	b := dialBackend(t)
 	dir := t.TempDir()

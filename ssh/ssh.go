@@ -222,6 +222,11 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (io.ReadCloser, erro
 	}
 	sess.Stdout = pw
 	sess.Stderr = pw
+	if cmd.Stdin != nil {
+		// Feed stdin to the wrapped command, matching Exec and the LocalBackend.
+		// The setsid wrapper exec's the command in place, so it inherits this stdin.
+		sess.Stdin = bytes.NewReader(cmd.Stdin)
+	}
 	if err := sess.Start(wrapForStream(cmd)); err != nil {
 		_ = pw.Close()
 		_ = pr.Close()
