@@ -4,10 +4,11 @@
 // nothing: either every node spec is matched to a distinct free node or the pool
 // is left untouched and an error wrapping ErrAllocation is returned. Free gives
 // a SubPool's nodes back. Matching honors each spec's hard Required resources
-// (NodeSpec.SatisfiedBy) and assigns the most-constrained specs first, so a
-// flexible spec does not claim a node a pickier one needs. OS matching is not
-// yet enforced -- v1 pools are single-OS -- and is future work once nodes carry
-// an OS.
+// (NodeSpec.SatisfiedBy) and computes a maximum bipartite matching, so it accepts
+// a request whenever some assignment of distinct nodes to specs exists rather
+// than rejecting a feasible one because a flexible spec greedily took a node a
+// pickier spec needed. OS matching is not yet enforced -- v1 pools are
+// single-OS -- and is future work once nodes carry an OS.
 package torx
 
 import (
@@ -149,36 +150,70 @@ func (p *Pool) MaxUsed() int {
 	return p.maxUsed
 }
 
-// matchSpecs assigns a distinct candidate node to each spec, most-constrained
-// first, so a flexible spec does not claim a node a pickier one needs. It
-// returns the assignment in spec order (assigned[i] satisfies specs[i]) and
-// whether every spec was matched. It does not mutate candidates.
+// matchSpecs assigns a distinct candidate node to every spec, or reports that no
+// such assignment exists. It computes a maximum bipartite matching between specs
+// and the candidates that satisfy them (augmenting-path search, ample for these
+// pool sizes), so it succeeds whenever a feasible assignment exists -- a greedy
+// pass can wrongly reject one by letting a flexible spec claim a node a pickier
+// spec is the only taker for. Specs are processed most-constrained first, which
+// does not affect whether a full matching is found but steers which feasible
+// matching is chosen toward the intuitive one (a picky spec keeps its scarce
+// node). The result is in spec order: assigned[i] satisfies specs[i]. It does
+// not mutate candidates.
 func matchSpecs(candidates []*Node, specs []NodeSpec) ([]*Node, bool) {
-	assigned := make([]*Node, len(specs))
-	used := make([]bool, len(candidates))
+	// specOfCand[j] is the spec index currently holding candidate j, or -1.
+	specOfCand := make([]int, len(candidates))
+	for j := range specOfCand {
+		specOfCand[j] = -1
+	}
+	candOfSpec := make([]int, len(specs))
+	for i := range candOfSpec {
+		candOfSpec[i] = -1
+	}
+
+	matched := 0
 	for _, si := range constraintOrder(specs) {
-		spec := specs[si]
-		found := -1
-		for i, node := range candidates {
-			if used[i] {
-				continue
-			}
-			if spec.SatisfiedBy(node.Resources()) {
-				found = i
-				break
-			}
+		seen := make([]bool, len(candidates))
+		if augmentSpec(si, specs, candidates, specOfCand, candOfSpec, seen) {
+			matched++
 		}
-		if found < 0 {
-			return nil, false
-		}
-		used[found] = true
-		assigned[si] = candidates[found]
+	}
+	if matched != len(specs) {
+		return nil, false
+	}
+	assigned := make([]*Node, len(specs))
+	for i := range specs {
+		assigned[i] = candidates[candOfSpec[i]]
 	}
 	return assigned, true
 }
 
+// augmentSpec tries to match spec si to a candidate, rerouting earlier matches
+// along an augmenting path when the candidates si can use are already taken. It
+// returns whether si ended up matched, updating specOfCand (candidate -> spec)
+// and candOfSpec (spec -> candidate) in place. seen guards against revisiting a
+// candidate within one search.
+func augmentSpec(si int, specs []NodeSpec, candidates []*Node, specOfCand, candOfSpec []int, seen []bool) bool {
+	for j, node := range candidates {
+		if seen[j] || !specs[si].SatisfiedBy(node.Resources()) {
+			continue
+		}
+		seen[j] = true
+		// Take j if it is free, or if the spec currently holding it can move to
+		// another candidate.
+		if specOfCand[j] == -1 || augmentSpec(specOfCand[j], specs, candidates, specOfCand, candOfSpec, seen) {
+			specOfCand[j] = si
+			candOfSpec[si] = j
+			return true
+		}
+	}
+	return false
+}
+
 // constraintOrder returns spec indices ordered by decreasing constraint, so the
-// pickiest specs are matched first.
+// pickiest specs are considered first. This is a preference heuristic for
+// choosing among feasible matchings, not a correctness mechanism: matchSpecs
+// finds a full assignment whenever one exists regardless of this order.
 func constraintOrder(specs []NodeSpec) []int {
 	order := make([]int, len(specs))
 	for i := range order {
@@ -191,7 +226,8 @@ func constraintOrder(specs []NodeSpec) []int {
 }
 
 // specScore is a rough measure of how constrained a spec is: more required
-// labels and set quantities rank higher.
+// labels and set quantities rank higher. It only orders the preference search,
+// so its coarseness does not affect which requests are satisfiable.
 func specScore(s NodeSpec) int {
 	score := len(s.Required.Labels)
 	if _, ok := s.Required.CPUs.Get(); ok {

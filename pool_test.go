@@ -79,6 +79,63 @@ func TestPoolMostConstrainedFirst(t *testing.T) {
 	}
 }
 
+// cpuNode is a node advertising a CPU count, for matching tests.
+func cpuNode(name string, cpus float64) *Node {
+	return NewNode(NodeConfig{
+		Name:      name,
+		Resources: Resources{CPUs: Some(cpus)},
+		Backend:   LocalBackend{},
+		Scratch:   MakeScratch("/tmp/torx-test", name),
+		Ports:     NewPortAllocator(""),
+	})
+}
+
+// TestPoolMatchesHeterogeneousDemand is the regression for greedy allocation
+// wrongly rejecting a feasible request. Candidates are 8-CPU then 2-CPU; specs
+// need 2 then need 8. A greedy pass lets the need-2 spec take the 8-CPU node
+// (first satisfier) and then fails need-8, though 2->2 and 8->8 is feasible.
+func TestPoolMatchesHeterogeneousDemand(t *testing.T) {
+	p := NewPool([]*Node{cpuNode("big", 8), cpuNode("small", 2)})
+	spec := PoolSpec{Nodes: []NodeSpec{
+		{Role: "need-2", Required: Resources{CPUs: Some(2.0)}},
+		{Role: "need-8", Required: Resources{CPUs: Some(8.0)}},
+	}}
+
+	sub, err := p.Allocate(spec)
+	if err != nil {
+		t.Fatalf("Allocate rejected a feasible assignment: %v", err)
+	}
+	nodes := sub.Nodes()
+	if nodes[0].Name() != "small" {
+		t.Errorf("need-2 spec got %q, want small", nodes[0].Name())
+	}
+	if nodes[1].Name() != "big" {
+		t.Errorf("need-8 spec got %q, want big", nodes[1].Name())
+	}
+}
+
+// TestPoolCanEverFitHeterogeneous guards the same feasibility check the driver
+// uses to decide a job can never run: it must not declare a runnable job
+// permanently unschedulable.
+func TestPoolCanEverFitHeterogeneous(t *testing.T) {
+	p := NewPool([]*Node{cpuNode("big", 8), cpuNode("small", 2)})
+	spec := PoolSpec{Nodes: []NodeSpec{
+		{Required: Resources{CPUs: Some(2.0)}},
+		{Required: Resources{CPUs: Some(8.0)}},
+	}}
+	if !p.CanEverFit(spec) {
+		t.Errorf("CanEverFit = false for a feasible request")
+	}
+	// Truly infeasible: two specs both need 8 CPUs, only one 8-CPU node exists.
+	tooMuch := PoolSpec{Nodes: []NodeSpec{
+		{Required: Resources{CPUs: Some(8.0)}},
+		{Required: Resources{CPUs: Some(8.0)}},
+	}}
+	if p.CanEverFit(tooMuch) {
+		t.Errorf("CanEverFit = true though only one 8-CPU node exists")
+	}
+}
+
 func TestPoolLabelUnsatisfiable(t *testing.T) {
 	p := NewPool([]*Node{testNode("plain")})
 	spec := PoolSpec{Nodes: []NodeSpec{{Required: Resources{Labels: NewLabels("nvme")}}}}
