@@ -196,8 +196,11 @@ func (b *backend) Exec(ctx context.Context, cmd torx.Cmd) (torx.ExecResult, erro
 const pgidMarker = "TORX_PGID:"
 
 // killGroupTimeout bounds the remote kill Close issues, so tearing down a stream
-// cannot block indefinitely on a wedged node.
-const killGroupTimeout = 15 * time.Second
+// cannot block indefinitely on a wedged node. It is kept below the driver's
+// worker grace period (torx.workerGracePeriod, 10s) so a cancelled worker's kill
+// attempt can finish -- and a failure be observed -- before the worker itself is
+// force-killed.
+const killGroupTimeout = 8 * time.Second
 
 // Stream starts cmd on the node and returns its combined output; Close kills the
 // command and reaps it. The command runs as the leader of a new session (via
@@ -279,25 +282,43 @@ type sshStream struct {
 func (s *sshStream) Read(p []byte) (int, error) { return s.r.Read(p) }
 
 func (s *sshStream) Close() error {
-	s.backend.killGroup(s.pgid)
+	killErr := s.backend.killGroup(s.pgid)
 	_ = s.sess.Close()
-	return s.pr.Close()
+	prErr := s.pr.Close()
+	// Surface a failed remote kill above the local pipe close: a service believed
+	// stopped but still running would contaminate a later job on the same node, so
+	// this error is what lets teardown flag the node as not safe to reuse.
+	if killErr != nil {
+		return killErr
+	}
+	return prErr
 }
 
-// killGroup SIGKILLs a remote process group over a fresh session. It is
-// best-effort: the group may already be gone.
-func (b *backend) killGroup(pgid int) {
+// killGroup SIGKILLs a remote process group over a fresh session and reports
+// whether the kill could be carried out. The group already being gone is success
+// for teardown, but a transport failure or a kill that could not run is returned
+// so the caller can treat the node as not confirmed clean rather than silently
+// reused.
+func (b *backend) killGroup(pgid int) error {
 	if pgid < 2 {
 		// Never signal group 1 (every process the caller may signal) or 0 (the
 		// caller's own group). readPGID already rejects these, but Close must not
 		// turn a stray id into kill -KILL -1 either.
-		return
+		return nil
 	}
 	// Close carries no context, so bound the kill here: a wedged node must not
 	// hang teardown forever.
 	ctx, cancel := context.WithTimeout(context.Background(), killGroupTimeout)
 	defer cancel()
-	_, _ = b.Exec(ctx, torx.Command("kill", "-KILL", "-"+strconv.Itoa(pgid)))
+	res, err := b.Exec(ctx, torx.Command("kill", "-KILL", "-"+strconv.Itoa(pgid)))
+	if err != nil {
+		return torx.Wrap(torx.ErrBackend, "ssh: kill group", err)
+	}
+	if res.ExitCode != 0 && !strings.Contains(string(res.Stderr), "No such process") {
+		return torx.Wrap(torx.ErrBackend, "ssh: kill group",
+			fmt.Errorf("kill exited %d: %s", res.ExitCode, strings.TrimSpace(string(res.Stderr))))
+	}
+	return nil
 }
 
 // wrapForStream builds the remote command line for Stream. setsid -w runs the

@@ -121,6 +121,27 @@ func (p *Pool) Free(sub *SubPool) {
 	}
 }
 
+// Evict removes a SubPool's nodes from circulation without returning them to the
+// free set. Use it for a job that could not confirm its node was left clean -- a
+// service that may still be running, a port still held, data not removed -- so a
+// possibly-dirty node cannot be handed to a later job. Evicted nodes count as
+// neither free nor in use, shrinking the pool's capacity. Like Free it is
+// idempotent for a given SubPool, and the two are mutually exclusive.
+func (p *Pool) Evict(sub *SubPool) {
+	if sub == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if sub.freed {
+		return
+	}
+	sub.freed = true
+	for _, n := range sub.nodes {
+		delete(p.inUse, n)
+	}
+}
+
 // Size is the total number of nodes in the pool.
 func (p *Pool) Size() int {
 	p.mu.Lock()

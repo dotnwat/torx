@@ -198,6 +198,44 @@ func TestRunNotCancelledOnCleanRun(t *testing.T) {
 	}
 }
 
+// dirtyLauncher returns a failing, dirty result without touching the job, to
+// exercise node quarantine.
+type dirtyLauncher struct{}
+
+func (dirtyLauncher) Launch(_ context.Context, a Assignment, _ EventSink) (JobResult, error) {
+	return JobResult{ID: variantID(a.JobID, a.Params), Status: StatusFail, Dirty: true}, nil
+}
+
+func TestRunEvictsDirtyNode(t *testing.T) {
+	pool := testPool(1)
+	res := Run(context.Background(), pool, dirtyLauncher{}, sizedRequests(1, 1, nil), RunOptions{})
+	if len(res.Jobs) != 1 || res.Jobs[0].Status != StatusFail {
+		t.Fatalf("result = %+v, want one FAIL", res.Jobs)
+	}
+	// The dirty node is quarantined: it is neither free nor in use.
+	if pool.Available() != 0 || pool.InUse() != 0 {
+		t.Errorf("dirty node not quarantined: avail=%d inuse=%d, want 0/0", pool.Available(), pool.InUse())
+	}
+}
+
+func TestRunFailsStrandedJobsWhenPoolShrinks(t *testing.T) {
+	pool := testPool(1)
+	// Two jobs share one node; the first is dirty and evicts it, so the second can
+	// never be scheduled and must be recorded as a failure rather than dropped.
+	res := Run(context.Background(), pool, dirtyLauncher{}, sizedRequests(2, 1, nil), RunOptions{MaxParallel: 1})
+	if len(res.Jobs) != 2 {
+		t.Fatalf("recorded %d results, want 2 (the dirty job and the stranded one)", len(res.Jobs))
+	}
+	for _, j := range res.Jobs {
+		if j.Status != StatusFail {
+			t.Errorf("result %s = %v, want FAIL", j.ID, j.Status)
+		}
+	}
+	if res.Ok() {
+		t.Errorf("a run with a stranded, unrunnable job reported Ok")
+	}
+}
+
 func TestRunForwardsEventsTaggedBySource(t *testing.T) {
 	var sink InMemoryEventSink
 	Run(context.Background(), testPool(1), InProcessLauncher{},

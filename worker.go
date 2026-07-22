@@ -125,11 +125,21 @@ func runJob(ctx context.Context, start time.Time, id string, job Job, jc *JobCon
 	case runErr != nil:
 		res.Status = StatusFail
 		res.Error = errorInfo(runErr)
+		if tdErr != nil && res.Error != nil {
+			// Keep the teardown failure visible rather than letting the run failure
+			// mask it; the node is dirty either way.
+			res.Error.Message += "; teardown also failed: " + tdErr.Error()
+		}
 	case tdErr != nil:
 		res.Status = StatusFail
 		res.Error = errorInfo(tdErr)
 	default:
 		res.Status = StatusPass
+	}
+	if tdErr != nil {
+		// Stop/clean could not be confirmed, so a service may still be up or data
+		// may be stale: the node is not safe to reuse.
+		res.Dirty = true
 	}
 	Emit(ctx, Event{Kind: EventFinished, Source: id, Message: string(res.Status)})
 	return res

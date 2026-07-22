@@ -18,6 +18,7 @@ func init() {
 	Register("wtest.declarepanic", func() Job { return &wDeclarePanicJob{} })
 	Register("wtest.block", func() Job { return &wBlockJob{} })
 	Register("wtest.nodes", func() Job { return &wNodeJob{} })
+	Register("wtest.dirtyteardown", func() Job { return &wDirtyTeardownJob{} })
 }
 
 type wPassJob struct{ JobBase }
@@ -67,6 +68,26 @@ func (j *wNodeJob) Declare(jc *JobContext) {
 }
 func (j *wNodeJob) Run(_ context.Context, jc *JobContext) error {
 	jc.SetSummary(fmt.Sprintf("nodes=%d", len(j.svc.Nodes())))
+	return nil
+}
+
+// wDirtyTeardownJob passes its body but arranges for teardown's stop to fail, so
+// the node cannot be confirmed clean.
+type wDirtyTeardownJob struct {
+	JobBase
+	svc *fakeService
+}
+
+func (j *wDirtyTeardownJob) Declare(jc *JobContext) {
+	j.svc = newFakeServiceSpec("s", new([]string), 1)
+	jc.Register(j.svc)
+}
+func (j *wDirtyTeardownJob) Run(_ context.Context, _ *JobContext) error {
+	// Set the failure after Setup has started the service, so the failure lands in
+	// teardown's stop rather than in the pre-start preparation.
+	for _, n := range j.svc.Nodes() {
+		j.svc.failStop[n.Name()] = true
+	}
 	return nil
 }
 
@@ -228,6 +249,19 @@ func TestRunWorkerTeardownOnCancel(t *testing.T) {
 	}
 	if !hasLog(msgs, "teardown-ran") {
 		t.Errorf("teardown did not run after cancellation")
+	}
+}
+
+func TestRunWorkerFlagsDirtyOnTeardownFailure(t *testing.T) {
+	a := Assignment{JobID: "wtest.dirtyteardown", Nodes: []NodeDescriptor{
+		{Name: "n0", Scratch: "/tmp/torx/n0", Backend: BackendDescriptor{Kind: "local"}},
+	}}
+	r := resultOf(runWorker(t, a))
+	if r == nil || r.Status != StatusFail {
+		t.Fatalf("result = %+v, want FAIL (teardown stop failed)", r)
+	}
+	if !r.Dirty {
+		t.Errorf("Dirty = false, want true when teardown could not confirm the node clean")
 	}
 }
 

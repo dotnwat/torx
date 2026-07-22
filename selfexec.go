@@ -122,7 +122,11 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	waitErr := <-waitCh
 
 	if !haveResult {
-		return failResult(variantID(a.JobID, a.Params), fmt.Errorf("driver: worker produced no result: %v", waitErr)), nil
+		// The worker died before reporting a result, so its teardown never
+		// completed: mark the node dirty so the driver quarantines it.
+		res := failResult(variantID(a.JobID, a.Params), fmt.Errorf("driver: worker produced no result: %v", waitErr))
+		res.Dirty = true
+		return res, nil
 	}
 	return result, nil
 }

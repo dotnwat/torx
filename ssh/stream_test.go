@@ -234,6 +234,31 @@ func TestStreamCloseKillsSignalIgnoringGroup(t *testing.T) {
 	}
 }
 
+// TestStreamCloseSurfacesKillFailure checks that Close reports a remote kill it
+// could not deliver, instead of returning success while the service may still be
+// running. The node is made unreachable before Close, so the kill cannot run.
+func TestStreamCloseSurfacesKillFailure(t *testing.T) {
+	s := newTestServer(t)
+	be, err := build(s.descriptor(t))
+	if err != nil {
+		t.Fatalf("build backend: %v", err)
+	}
+	b := be.(*backend)
+
+	stream, err := b.Stream(context.Background(), torx.Command("sh", "-c", "sleep 30"))
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	// Drop the connection and stop the listener so Close's fresh session to run the
+	// remote kill cannot be established.
+	b.close()
+	_ = s.ln.Close()
+
+	if err := stream.Close(); err == nil {
+		t.Error("Close reported success though the remote kill could not be delivered")
+	}
+}
+
 func waitForPid(t *testing.T, pidfile string) int {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

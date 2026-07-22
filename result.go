@@ -131,6 +131,11 @@ type JobResult struct {
 	Summary string          `json:"summary,omitempty"`
 	Data    json.RawMessage `json:"data,omitempty"`
 	Error   *ErrorInfo      `json:"error,omitempty"`
+	// Dirty marks a result whose node could not be confirmed clean: teardown
+	// failed, or the worker died before reporting, so a service may still be
+	// running or data may be stale. The driver quarantines such a node instead of
+	// returning it to the free set, so it cannot contaminate a later job.
+	Dirty bool `json:"dirty,omitempty"`
 }
 
 // Duration is the wall-clock time the job took.

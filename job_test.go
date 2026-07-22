@@ -10,7 +10,7 @@ import (
 // newFakeServiceSpec builds a fake service with a node demand but no bound nodes,
 // for exercising Declare sizing and Bind.
 func newFakeServiceSpec(name string, log *[]string, size int) *fakeService {
-	f := &fakeService{log: log, failStart: map[string]bool{}, failStop: map[string]bool{}}
+	f := &fakeService{log: log, failStart: map[string]bool{}, failStop: map[string]bool{}, failClean: map[string]bool{}}
 	f.ServiceBase = NewServiceBase(name, Homogeneous(size, NodeSpec{}), f)
 	return f
 }

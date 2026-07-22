@@ -172,6 +172,19 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 		}
 	}
 
+	// If scheduling stopped on purpose -- ExitFirst after a failure, or a cancelled
+	// context -- any remaining pending jobs were deliberately not run (cancellation
+	// is reflected by the run-level Cancelled flag below). Otherwise the loop ended
+	// with jobs still pending only because the pool shrank below their demand: nodes
+	// were quarantined after their cleanup could not be confirmed. Record a terminal
+	// failure for those so they are not silently dropped.
+	if !stop {
+		for _, pl := range pending {
+			record(failResult(variantID(pl.req.ID, pl.req.Params),
+				fmt.Errorf("driver: no clean nodes remain; some were quarantined after teardown could not be confirmed")))
+		}
+	}
+
 	// A cancelled context means scheduling stopped before every request was run,
 	// so the suite is incomplete no matter how the recorded jobs fared. Marking it
 	// here is what keeps Ok() -- and the CLI exit status -- from reporting success
@@ -202,9 +215,18 @@ func runOne(ctx context.Context, pool *Pool, launcher WorkerLauncher, req JobReq
 
 	res, err := launcher.Launch(jobCtx, buildAssignment(req, sub, opts), sink)
 	if err != nil {
+		// A launch-level error means the worker could not be spawned, so the node
+		// was never touched and stays clean.
 		res = failResult(id, err)
 	}
-	pool.Free(sub)
+	// A dirty result is one whose node could not be confirmed clean; quarantine it
+	// rather than returning it to the free set, where it could contaminate a later
+	// job with a leftover service, held port, or stale data.
+	if res.Dirty {
+		pool.Evict(sub)
+	} else {
+		pool.Free(sub)
+	}
 	done <- res
 }
 
