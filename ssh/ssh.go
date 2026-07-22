@@ -265,33 +265,52 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (io.ReadCloser, erro
 		}
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, err)
 	}
-	return &sshStream{backend: b, sess: sess, pr: pr, r: br, pgid: pgid}, nil
+	s := &sshStream{backend: b, sess: sess, pr: pr, r: br, pgid: pgid}
+	// Match the LocalBackend, whose command dies with the context that started it:
+	// once Stream returns, nothing else watches ctx, so without this a cancelled
+	// run would leave the command running on the node. The watcher and Close share
+	// one teardown, run at most once.
+	s.stopWatch = context.AfterFunc(ctx, func() { _ = s.teardown() })
+	return s, nil
 }
 
 // sshStream is the handle Stream returns: reading it yields the command's
 // combined output, and Close kills the remote process group and reaps the
-// session.
+// session. Cancelling the context that started the stream tears it down the same
+// way, through the shared teardown.
 type sshStream struct {
-	backend *backend
-	sess    *cryptossh.Session
-	pr      *os.File
-	r       *bufio.Reader
-	pgid    int
+	backend   *backend
+	sess      *cryptossh.Session
+	pr        *os.File
+	r         *bufio.Reader
+	pgid      int
+	stopWatch func() bool
+	once      sync.Once
+	killErr   error
 }
 
 func (s *sshStream) Read(p []byte) (int, error) { return s.r.Read(p) }
 
+// Close tears the stream down and reports whether the remote kill succeeded. A
+// failed kill means a service believed stopped may still be running, which must
+// surface so the node is not silently reused.
 func (s *sshStream) Close() error {
-	killErr := s.backend.killGroup(s.pgid)
-	_ = s.sess.Close()
-	prErr := s.pr.Close()
-	// Surface a failed remote kill above the local pipe close: a service believed
-	// stopped but still running would contaminate a later job on the same node, so
-	// this error is what lets teardown flag the node as not safe to reuse.
-	if killErr != nil {
-		return killErr
+	if s.stopWatch != nil {
+		s.stopWatch()
 	}
-	return prErr
+	return s.teardown()
+}
+
+// teardown kills the remote process group and reaps the session exactly once,
+// whether it is Close or the context watcher that reaches it first. It records
+// the kill outcome so Close can return it.
+func (s *sshStream) teardown() error {
+	s.once.Do(func() {
+		s.killErr = s.backend.killGroup(s.pgid)
+		_ = s.sess.Close()
+		_ = s.pr.Close()
+	})
+	return s.killErr
 }
 
 // killGroup SIGKILLs a remote process group over a fresh session and reports

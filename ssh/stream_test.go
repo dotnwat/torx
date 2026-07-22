@@ -259,6 +259,35 @@ func TestStreamCloseSurfacesKillFailure(t *testing.T) {
 	}
 }
 
+// TestStreamContextCancelTerminatesCommand checks that cancelling the context
+// that started a stream tears the remote command down, matching the LocalBackend
+// -- so a cancelled run does not leave services running on the node. Close is not
+// called; the cancellation alone must do it.
+func TestStreamContextCancelTerminatesCommand(t *testing.T) {
+	b := dialBackend(t)
+	dir := t.TempDir()
+	pidfile := filepath.Join(dir, "pid")
+	// Ignore SIGHUP and SIGTERM and loop, so only a SIGKILL to the whole group
+	// stops it -- which is what the context watcher must deliver.
+	script := fmt.Sprintf("trap '' HUP TERM; echo $$ > %s; while true; do sleep 1; done", pidfile)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := b.Stream(ctx, torx.Command("sh", "-c", script))
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	defer stream.Close()
+	pid := waitForPid(t, pidfile)
+	if !processAlive(pid) {
+		t.Fatalf("service pid %d should be running", pid)
+	}
+
+	cancel() // no Close: cancelling the context alone must tear the command down
+	if !eventuallyDead(pid, 3*time.Second) {
+		t.Errorf("service pid %d survived context cancellation", pid)
+	}
+}
+
 func waitForPid(t *testing.T, pidfile string) int {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
