@@ -66,6 +66,7 @@ type EchoService struct {
 	mu      sync.Mutex
 	servers map[string]io.ReadCloser // node name -> running server handle
 	addrs   map[string]string        // node name -> host:port
+	ports   map[string]int           // node name -> leased port
 }
 
 // NewEchoService builds an EchoService named name that needs one node.
@@ -73,6 +74,7 @@ func NewEchoService(name string) *EchoService {
 	s := &EchoService{
 		servers: map[string]io.ReadCloser{},
 		addrs:   map[string]string{},
+		ports:   map[string]int{},
 	}
 	s.ServiceBase = torx.NewServiceBase(name, torx.Homogeneous(1, torx.NodeSpec{}), s)
 	return s
@@ -105,10 +107,12 @@ func (s *EchoService) StartNode(ctx context.Context, n *torx.Node) error {
 	// registers it for collection after the job.
 	server, err := s.StartCaptured(ctx, n, torx.Command(exe, "echo-server", strconv.Itoa(port)))
 	if err != nil {
+		n.ReleasePort(port) // the server never came up; do not leak the lease
 		return err
 	}
 	s.mu.Lock()
 	s.servers[n.Name()] = server
+	s.ports[n.Name()] = port
 	s.addrs[n.Name()] = net.JoinHostPort(echoHost, strconv.Itoa(port))
 	s.mu.Unlock()
 	return nil
@@ -122,17 +126,27 @@ func (s *EchoService) WaitNode(ctx context.Context, n *torx.Node) error {
 	return torx.WaitForPort(ctx, addr)
 }
 
-// StopNode terminates the server on n, if one is running.
+// StopNode terminates the server on n, if one is running, and reclaims its
+// leased port once the process is down so repeated start/stop cycles do not
+// exhaust the node's port range.
 func (s *EchoService) StopNode(ctx context.Context, n *torx.Node) error {
 	s.mu.Lock()
 	server := s.servers[n.Name()]
+	port, hasPort := s.ports[n.Name()]
 	delete(s.servers, n.Name())
+	delete(s.ports, n.Name())
 	delete(s.addrs, n.Name())
 	s.mu.Unlock()
 	if server == nil {
 		return nil
 	}
-	return server.Close()
+	if err := server.Close(); err != nil {
+		return err
+	}
+	if hasPort {
+		n.ReleasePort(port)
+	}
+	return nil
 }
 
 // CleanNode has nothing to remove: the echo server keeps no persistent state.

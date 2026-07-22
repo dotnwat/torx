@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,6 +63,44 @@ func TestEchoEndToEnd(t *testing.T) {
 	if !strings.Contains(string(log), "echo server listening") {
 		t.Errorf("collected echo log lacks the server's startup output:\n%s", log)
 	}
+}
+
+// TestEchoServiceReleasesPortAcrossRestarts is the regression for a leaked port
+// lease: the node's allocator holds a single port, so a start that failed to
+// release its lease on stop would exhaust the range and the next start would
+// fail. Running several start/stop cycles proves the lease is reclaimed.
+func TestEchoServiceReleasesPortAcrossRestarts(t *testing.T) {
+	port := freePort(t)
+	node := torx.NewNode(torx.NodeConfig{
+		Name:    "n0",
+		Backend: torx.LocalBackend{},
+		Scratch: torx.MakeScratch(t.TempDir(), "n0"),
+		Ports:   torx.NewRangePortAllocator(port, port+1), // exactly one port
+	})
+	svc := NewEchoService("echo")
+	svc.Bind([]*torx.Node{node})
+
+	ctx := context.Background()
+	for i := range 3 {
+		if err := svc.Start(ctx); err != nil {
+			t.Fatalf("start %d failed -- a leaked lease exhausted the one-port range: %v", i, err)
+		}
+		if err := svc.Stop(ctx); err != nil {
+			t.Fatalf("stop %d: %v", i, err)
+		}
+	}
+}
+
+// freePort returns a TCP port that is free at call time, for use as a
+// single-port allocation range.
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
 }
 
 // demoPool builds a pool of n local nodes rooted in the test's temp directory.
