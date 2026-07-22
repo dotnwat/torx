@@ -15,10 +15,11 @@ type fakeService struct {
 	log       *[]string
 	failStart map[string]bool
 	failStop  map[string]bool
+	failClean map[string]bool
 }
 
 func newFakeService(name string, log *[]string, nodes []*Node) *fakeService {
-	f := &fakeService{log: log, failStart: map[string]bool{}, failStop: map[string]bool{}}
+	f := &fakeService{log: log, failStart: map[string]bool{}, failStop: map[string]bool{}, failClean: map[string]bool{}}
 	f.ServiceBase = NewServiceBase(name, Homogeneous(len(nodes), NodeSpec{}), f)
 	f.Bind(nodes)
 	return f
@@ -44,6 +45,9 @@ func (f *fakeService) StopNode(_ context.Context, n *Node) error {
 
 func (f *fakeService) CleanNode(_ context.Context, n *Node) error {
 	f.record("clean", n.Name())
+	if f.failClean[n.Name()] {
+		return errors.New("clean boom")
+	}
 	return nil
 }
 
@@ -89,6 +93,36 @@ func TestServiceStartFailsFast(t *testing.T) {
 	}
 	if slices.Contains(log, "svc:start:n1") {
 		t.Errorf("started n1 after n0 failed: %v", log)
+	}
+}
+
+func TestServiceStartAbortsWhenPreStopFails(t *testing.T) {
+	var log []string
+	f := newFakeService("svc", &log, []*Node{testNode("n0")})
+	f.failStop["n0"] = true
+
+	err := f.Start(context.Background())
+	if !errors.Is(err, ErrService) {
+		t.Errorf("err = %v, want ErrService", err)
+	}
+	// A node that could not be stopped must not be started onto.
+	if slices.Contains(log, "svc:start:n0") {
+		t.Errorf("started n0 despite a failed pre-stop: %v", log)
+	}
+}
+
+func TestServiceStartAbortsWhenPreCleanFails(t *testing.T) {
+	var log []string
+	f := newFakeService("svc", &log, []*Node{testNode("n0")})
+	f.failClean["n0"] = true
+
+	err := f.Start(context.Background())
+	if !errors.Is(err, ErrService) {
+		t.Errorf("err = %v, want ErrService", err)
+	}
+	// A node whose stale data could not be removed must not be started onto.
+	if slices.Contains(log, "svc:start:n0") {
+		t.Errorf("started n0 despite a failed pre-clean: %v", log)
 	}
 }
 

@@ -105,20 +105,39 @@ func (b *ServiceBase) Artifacts(n *Node) []Artifact {
 	return append([]Artifact(nil), b.artifacts[n.Name()]...)
 }
 
-// Start stops, cleans, and starts each node so the service begins from a known
-// state, returning on the first StartNode error and leaving teardown to stop
-// whatever already came up.
+// Start brings each node to a known state -- stopping any prior instance and
+// removing stale data -- and then starts it, returning on the first failure to
+// either establish that state or start, and leaving teardown to stop whatever
+// already came up. A node whose preparation failed is not started: a second
+// instance must not come up beside a process that could not be stopped, and a
+// run must not proceed against data that could not be cleaned.
 func (b *ServiceBase) Start(ctx context.Context) error {
 	ctx = WithComponent(ctx, b.name)
 	Logf(ctx, "info", "starting")
 	for _, n := range b.nodes {
-		_ = b.hooks.StopNode(ctx, n)
-		_ = b.hooks.CleanNode(ctx, n)
+		if err := b.prepareNode(ctx, n); err != nil {
+			return err
+		}
 		if err := b.hooks.StartNode(ctx, n); err != nil {
 			return Wrap(ErrService, "service: start "+b.name, err)
 		}
 	}
 	return nil
+}
+
+// prepareNode establishes n's known pre-start state by stopping any prior
+// instance and removing stale data, aggregating both errors so neither is
+// masked. A non-nil result means the precondition could not be established and
+// the caller must not start onto the node.
+func (b *ServiceBase) prepareNode(ctx context.Context, n *Node) error {
+	var errs MultiError
+	if err := b.hooks.StopNode(ctx, n); err != nil {
+		errs.Append(Wrap(ErrService, "service: pre-stop "+b.name, err))
+	}
+	if err := b.hooks.CleanNode(ctx, n); err != nil {
+		errs.Append(Wrap(ErrService, "service: pre-clean "+b.name, err))
+	}
+	return errs.Err()
 }
 
 // Stop stops every node, continuing past failures and aggregating the errors.
