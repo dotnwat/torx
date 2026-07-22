@@ -42,6 +42,11 @@ type testServer struct {
 	// nor close the channel, simulating a remote that accepts the command but
 	// never emits the pgid marker, so only a client-side deadline unblocks it.
 	stallExec bool
+
+	// stallSFTP makes the sftp subsystem request reply success but never start the
+	// server, so the client's version negotiation hangs -- a wedged SFTP subsystem
+	// that only a cancelled context can unblock.
+	stallSFTP bool
 }
 
 // newTestServer starts a server on the loopback and returns a handle whose
@@ -202,6 +207,11 @@ func (s *testServer) serveSession(ch cryptossh.Channel, reqs <-chan *cryptossh.R
 			_ = cryptossh.Unmarshal(req.Payload, &payload)
 			if payload.Name == "sftp" {
 				_ = req.Reply(true, nil)
+				if s.stallSFTP {
+					// Accept the subsystem but never serve it, so the client's version
+					// negotiation blocks until its context is cancelled.
+					continue
+				}
 				go serveSFTP(ch)
 			} else {
 				_ = req.Reply(false, nil)

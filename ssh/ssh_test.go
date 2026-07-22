@@ -165,6 +165,40 @@ func TestExecContextCancel(t *testing.T) {
 	}
 }
 
+// TestSFTPNegotiationHonorsCancel is the regression for SFTP ignoring the
+// context after the SSH connection is up: a subsystem that accepts the request
+// but never negotiates would wedge collection or cleanup forever. Cancelling the
+// context must unblock the operation.
+func TestSFTPNegotiationHonorsCancel(t *testing.T) {
+	s := buildTestServer(t)
+	s.stallSFTP = true
+	go s.serve()
+
+	be, err := build(s.descriptor(t))
+	if err != nil {
+		t.Fatalf("build backend: %v", err)
+	}
+	b := be.(*backend)
+	t.Cleanup(b.close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.ReadFile(ctx, "/anything")
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond) // let SFTP negotiation block
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("SFTP op should fail once the cancelled context unblocks negotiation")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SFTP negotiation ignored context cancellation")
+	}
+}
+
 func TestHostKeyVerificationRejects(t *testing.T) {
 	s := newTestServer(t)
 	// A known_hosts that trusts the WRONG key for the server's address.
