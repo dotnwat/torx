@@ -68,13 +68,36 @@ func Discover(patterns ...string) ([]JobRequest, error) {
 		if !ok {
 			continue
 		}
-		for _, params := range variantsOf(factory()) {
+		variants, err := expandVariants(factory)
+		if err != nil {
+			// The factory or Matrix panicked. Both are job-supplied code running in
+			// the driver before any worker isolation, so confine the failure to this
+			// job -- as a failing variant when the job was selected -- rather than
+			// letting one bad job crash discovery for the whole suite.
+			if matchesAny(id, res) {
+				requests = append(requests, JobRequest{ID: id, discErr: fmt.Errorf("discover: job %q: %w", id, err)})
+			}
+			continue
+		}
+		for _, params := range variants {
 			if matchesAny(variantID(id, params), res) {
 				requests = append(requests, JobRequest{ID: id, Params: params})
 			}
 		}
 	}
 	return requests, nil
+}
+
+// expandVariants builds a job from factory and returns its parameter variants,
+// recovering a panic in the factory or in the job's Matrix into an error. Both
+// run at the driver, so a panic there would otherwise abort discovery for every
+// job rather than just the one at fault.
+func expandVariants(factory func() Job) (variants []Params, err error) {
+	err = recovered(func() error {
+		variants = variantsOf(factory())
+		return nil
+	})
+	return variants, err
 }
 
 func variantsOf(job Job) []Params {

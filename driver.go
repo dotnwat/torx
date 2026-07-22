@@ -23,6 +23,11 @@ import (
 type JobRequest struct {
 	ID     string
 	Params Params
+
+	// discErr, when non-nil, marks a request that could not be discovered because
+	// the job's factory or Matrix panicked. The driver records it as a failing
+	// result rather than scheduling it, so one broken job does not abort the run.
+	discErr error
 }
 
 // RunOptions configure a driver run.
@@ -106,6 +111,10 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 
 	var pending []plan
 	for _, req := range requests {
+		if req.discErr != nil {
+			record(failResult(variantID(req.ID, req.Params), req.discErr))
+			continue
+		}
 		spec, err := sizeJob(req)
 		if err != nil {
 			record(failResult(variantID(req.ID, req.Params), err))

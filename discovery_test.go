@@ -8,7 +8,17 @@ import (
 func init() {
 	Register("disc.plain", func() Job { return &discPlainJob{} })
 	Register("disc.matrix", func() Job { return &discMatrixJob{} })
+	// Under a prefix the disc.* tests do not select, so they see a stable count.
+	Register("discpanic.factory", func() Job { panic("factory-boom") })
+	Register("discpanic.matrix", func() Job { return &discMatrixPanicJob{} })
 }
+
+// discMatrixPanicJob panics while enumerating its variants.
+type discMatrixPanicJob struct{ JobBase }
+
+func (*discMatrixPanicJob) Declare(*JobContext)                    {}
+func (*discMatrixPanicJob) Run(context.Context, *JobContext) error { return nil }
+func (*discMatrixPanicJob) Matrix() []Params                       { panic("matrix-boom") }
 
 type discPlainJob struct{ JobBase }
 
@@ -99,5 +109,46 @@ func TestDiscoverSelects(t *testing.T) {
 func TestDiscoverBadPattern(t *testing.T) {
 	if _, err := Discover("["); err == nil {
 		t.Errorf("expected an error for an invalid regexp pattern")
+	}
+}
+
+func TestDiscoverRecoversFactoryPanic(t *testing.T) {
+	reqs, err := Discover("^discpanic[.]factory$")
+	if err != nil {
+		t.Fatalf("Discover crashed on a panicking factory instead of recovering: %v", err)
+	}
+	if len(reqs) != 1 || reqs[0].discErr == nil {
+		t.Fatalf("got %+v, want one request carrying a discovery error", reqs)
+	}
+}
+
+func TestDiscoverRecoversMatrixPanic(t *testing.T) {
+	reqs, err := Discover("^discpanic[.]matrix$")
+	if err != nil {
+		t.Fatalf("Discover crashed on a panicking Matrix instead of recovering: %v", err)
+	}
+	if len(reqs) != 1 || reqs[0].discErr == nil {
+		t.Fatalf("got %+v, want one request carrying a discovery error", reqs)
+	}
+}
+
+// TestRunReportsDiscoveryPanicAsFailure checks that a discovery-broken job
+// becomes a FAIL in the run rather than being dropped, and does not prevent a
+// healthy job discovered alongside it from running.
+func TestRunReportsDiscoveryPanicAsFailure(t *testing.T) {
+	reqs, err := Discover("^discpanic[.]factory$", "^disc[.]plain$")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	res := Run(context.Background(), testPool(1), InProcessLauncher{}, reqs, RunOptions{})
+	byID := map[string]Status{}
+	for _, j := range res.Jobs {
+		byID[j.ID] = j.Status
+	}
+	if byID["discpanic.factory"] != StatusFail {
+		t.Errorf("broken job status = %v, want FAIL", byID["discpanic.factory"])
+	}
+	if byID["disc.plain"] != StatusPass {
+		t.Errorf("healthy job status = %v, want PASS (a broken sibling must not block it)", byID["disc.plain"])
 	}
 }
