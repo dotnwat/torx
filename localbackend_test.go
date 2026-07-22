@@ -169,3 +169,20 @@ func TestLocalBackendSignal(t *testing.T) {
 		t.Errorf("process survived SIGKILL (Wait returned nil)")
 	}
 }
+
+func TestLocalBackendSignalRejectsUnsafePID(t *testing.T) {
+	var b LocalBackend
+	// os.FindProcess never fails on Unix, so without a guard these would reach
+	// kill(2) and hit the caller's process group (0), every signalable process
+	// (-1), init (1), or an arbitrary group (< -1).
+	for _, pid := range []int{0, 1, -1, -1000} {
+		err := b.Signal(context.Background(), pid, syscall.SIGKILL)
+		if err == nil {
+			t.Errorf("Signal(pid=%d) = nil, want a refusal", pid)
+			continue
+		}
+		if !errors.Is(err, ErrBackend) {
+			t.Errorf("Signal(pid=%d) err = %v, want ErrBackend", pid, err)
+		}
+	}
+}

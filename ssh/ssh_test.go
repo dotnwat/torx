@@ -134,6 +134,17 @@ func TestSignal(t *testing.T) {
 	}
 }
 
+func TestSignalRejectsUnsafePID(t *testing.T) {
+	b := dialBackend(t)
+	// A pid read from a node-side pidfile is untrusted; a non-positive value must
+	// be rejected before it can become a group- or system-wide kill on the node.
+	for _, pid := range []int{0, 1, -1, -1000} {
+		if err := b.Signal(context.Background(), pid, syscall.SIGKILL); err == nil {
+			t.Errorf("Signal(pid=%d) = nil, want a refusal", pid)
+		}
+	}
+}
+
 func TestExecContextCancel(t *testing.T) {
 	b := dialBackend(t)
 	ctx, cancel := context.WithCancel(context.Background())

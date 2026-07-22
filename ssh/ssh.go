@@ -335,8 +335,17 @@ func readPGID(r *bufio.Reader) (int, error) {
 }
 
 // Signal sends sig to a process on the node by running kill over a session. The
-// pid is a pid on the node, e.g. one a service recorded in a pidfile.
+// pid is a pid on the node, e.g. one a service recorded in a pidfile. Because
+// that pid crosses the wire from a node-side file, it is validated before use:
+// kill treats a non-positive operand as a process group or a broadcast, so a
+// stale or hostile pidfile holding 0 or -1 must never become "kill -KILL -1".
 func (b *backend) Signal(ctx context.Context, pid int, sig syscall.Signal) error {
+	if pid < 2 {
+		// 1 is init, 0 is the caller's process group, and negatives target a group
+		// or every process the user may signal. Only a specific process is allowed,
+		// matching the pgid guard in killGroup and readPGID.
+		return torx.Wrap(torx.ErrBackend, "ssh: signal", fmt.Errorf("refusing to signal unsafe pid %d", pid))
+	}
 	res, err := b.Exec(ctx, torx.Command("kill", "-"+strconv.Itoa(int(sig)), strconv.Itoa(pid)))
 	if err != nil {
 		return err

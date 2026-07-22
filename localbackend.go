@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -22,6 +23,12 @@ var _ Backend = LocalBackend{}
 // localWaitDelay bounds how long Wait blocks for a command's I/O after the
 // process is cancelled, a backstop in case a process escapes the killed group.
 const localWaitDelay = 2 * time.Second
+
+// minSignalablePID is the lowest pid Signal will target. A pid below 2 is never
+// a specific process to signal: 1 is init, 0 is the caller's process group, and
+// negatives select a process group or every process. Rejecting them keeps a
+// stale or malformed pid from turning a signal into a group- or system-wide one.
+const minSignalablePID = 2
 
 func (b LocalBackend) command(ctx context.Context, cmd Cmd) *exec.Cmd {
 	c := exec.CommandContext(ctx, cmd.Path, cmd.Args...)
@@ -179,6 +186,15 @@ func (b LocalBackend) Rm(ctx context.Context, path string) error {
 }
 
 func (b LocalBackend) Signal(ctx context.Context, pid int, sig syscall.Signal) error {
+	if pid < minSignalablePID {
+		// os.FindProcess never fails on Unix, so a non-positive pid would reach
+		// kill(2) verbatim: 0 targets the caller's whole process group, -1 every
+		// process the user may signal, and any value below -1 an arbitrary group.
+		// Refuse anything that is not a specific process, the same boundary the ssh
+		// backend applies to process-group ids. Signal 0 (a liveness probe) stays
+		// available for a valid pid.
+		return Wrap(ErrBackend, "backend: signal", fmt.Errorf("refusing to signal unsafe pid %d", pid))
+	}
 	p, err := os.FindProcess(pid)
 	if err != nil {
 		return Wrap(ErrBackend, "backend: signal", err)
