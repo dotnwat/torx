@@ -105,6 +105,43 @@ func TestStreamMarkerReadHonorsContext(t *testing.T) {
 	}
 }
 
+// TestStreamMarkerReadHonorsCancelWithoutDeadline is the regression for the
+// deadline-free cancellation gap: the operator's stop context has no deadline, so
+// a marker read that only installed one on ctx.Deadline() would block forever
+// once cancelled. Cancelling must unblock the read promptly.
+func TestStreamMarkerReadHonorsCancelWithoutDeadline(t *testing.T) {
+	s := buildTestServer(t)
+	s.stallExec = true
+	go s.serve()
+
+	be, err := build(s.descriptor(t))
+	if err != nil {
+		t.Fatalf("build backend: %v", err)
+	}
+	b := be.(*backend)
+	t.Cleanup(b.close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		rc, err := b.Stream(ctx, torx.Command("true"))
+		if rc != nil {
+			_ = rc.Close()
+		}
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond) // let the marker read block
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Stream should fail once the cancelled context unblocks the marker read")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stream hung: the marker read ignored a deadline-free cancellation")
+	}
+}
+
 func TestStreamHonorsDir(t *testing.T) {
 	b := dialBackend(t)
 	dir := t.TempDir()

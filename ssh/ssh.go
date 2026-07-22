@@ -242,18 +242,24 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (io.ReadCloser, erro
 		_ = pw.Close()
 	}()
 	// Read the group id off the first line before handing back the stream, so
-	// Close knows what to kill. Bound that read by ctx, then clear the deadline
-	// so it does not affect the caller's reads over the stream's lifetime.
-	if dl, ok := ctx.Deadline(); ok {
-		_ = pr.SetReadDeadline(dl)
-	}
+	// Close knows what to kill. Bound that read by ctx -- a deadline or a plain
+	// cancellation -- with a watcher that trips an immediate read deadline once ctx
+	// is done. A deadline-only bound would ignore cancellation: the operator's stop
+	// context carries no deadline of its own, so cancelling it must still unblock
+	// this read. Clear the deadline and stop the watcher afterward so neither
+	// affects the caller's reads over the stream's lifetime.
+	stopWatch := context.AfterFunc(ctx, func() { _ = pr.SetReadDeadline(time.Unix(1, 0)) })
 	br := bufio.NewReader(pr)
 	pgid, err := readPGID(br)
+	stopWatch()
 	_ = pr.SetReadDeadline(time.Time{})
 	if err != nil {
 		_ = sess.Close()
 		_ = pw.Close()
 		_ = pr.Close()
+		if ctx.Err() != nil {
+			return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, ctx.Err())
+		}
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, err)
 	}
 	return &sshStream{backend: b, sess: sess, pr: pr, r: br, pgid: pgid}, nil
