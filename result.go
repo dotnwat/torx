@@ -154,6 +154,11 @@ func (r JobResult) Render() string {
 // SuiteResult aggregates the results of a run.
 type SuiteResult struct {
 	Jobs []JobResult `json:"jobs"`
+	// Cancelled is set when the run's context was cancelled (a deadline or an
+	// operator stop) before the driver finished scheduling every request. The
+	// recorded jobs are then only a prefix of what was asked for, so the run did
+	// not complete regardless of how those jobs fared.
+	Cancelled bool `json:"cancelled,omitempty"`
 }
 
 // Counts returns the number of jobs in each status.
@@ -165,9 +170,13 @@ func (s SuiteResult) Counts() map[Status]int {
 	return counts
 }
 
-// Ok reports whether the run had no failures. Ignored and flaky jobs do not
-// count as failures.
+// Ok reports whether the run completed with no failures. A cancelled run is
+// never Ok even if every job it managed to run passed, since the rest never ran.
+// Ignored and flaky jobs do not count as failures.
 func (s SuiteResult) Ok() bool {
+	if s.Cancelled {
+		return false
+	}
 	for _, j := range s.Jobs {
 		if j.Status == StatusFail {
 			return false
@@ -192,8 +201,12 @@ func (s SuiteResult) Render() string {
 // ConsoleReporter.
 func (s SuiteResult) summaryLine() string {
 	c := s.Counts()
-	return fmt.Sprintf("%d jobs: %d passed, %d failed, %d flaky, %d ignored",
+	line := fmt.Sprintf("%d jobs: %d passed, %d failed, %d flaky, %d ignored",
 		len(s.Jobs), c[StatusPass], c[StatusFail], c[StatusFlaky], c[StatusIgnore])
+	if s.Cancelled {
+		line += " (run cancelled before completion)"
+	}
+	return line
 }
 
 // JSON marshals the suite result as indented JSON, the machine-readable

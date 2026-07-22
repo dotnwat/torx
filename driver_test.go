@@ -175,6 +175,29 @@ func TestRunPartialResultOnCancel(t *testing.T) {
 	}
 }
 
+func TestRunPreCancelledReportsFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled: the scheduler launches nothing
+
+	res := Run(ctx, testPool(1), InProcessLauncher{}, sizedRequests(3, 1, nil), RunOptions{})
+	if !res.Cancelled {
+		t.Errorf("res.Cancelled = false, want true for a pre-cancelled run")
+	}
+	if res.Ok() {
+		t.Errorf("a cancelled run that ran nothing reported success: %+v", res)
+	}
+}
+
+func TestRunNotCancelledOnCleanRun(t *testing.T) {
+	res := Run(context.Background(), testPool(2), InProcessLauncher{}, sizedRequests(3, 1, nil), RunOptions{MaxParallel: 2})
+	if res.Cancelled {
+		t.Errorf("res.Cancelled = true for a run that completed normally")
+	}
+	if !res.Ok() {
+		t.Errorf("clean run not Ok:\n%s", res.Render())
+	}
+}
+
 func TestRunForwardsEventsTaggedBySource(t *testing.T) {
 	var sink InMemoryEventSink
 	Run(context.Background(), testPool(1), InProcessLauncher{},

@@ -95,11 +95,8 @@ func driverMain(args []string) int {
 	// Ctrl-C (SIGINT) or a SIGTERM cancels the run so workers are torn down and
 	// partial results are still written, instead of orphaning workers and their
 	// services. Run's cancellation path SIGTERMs each worker's process group,
-	// which the worker turns into teardown before it exits.
-	// Ctrl-C (SIGINT) or a SIGTERM cancels the run so workers are torn down and
-	// partial results are still written, instead of orphaning workers and their
-	// services. Run's cancellation path SIGTERMs each worker's process group,
-	// which the worker turns into teardown before it exits.
+	// which the worker turns into teardown before it exits. A cancelled run is
+	// reported as not Ok, so the exit below is non-zero.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

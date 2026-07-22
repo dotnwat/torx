@@ -167,7 +167,11 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 		}
 	}
 
-	suite := SuiteResult{Jobs: results}
+	// A cancelled context means scheduling stopped before every request was run,
+	// so the suite is incomplete no matter how the recorded jobs fared. Marking it
+	// here is what keeps Ok() -- and the CLI exit status -- from reporting success
+	// for a run the operator or a deadline cut short.
+	suite := SuiteResult{Jobs: results, Cancelled: ctx.Err() != nil}
 	if runDir != "" {
 		writeRunJSON(runDir, suite)
 	}
