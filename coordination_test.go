@@ -135,7 +135,7 @@ func TestMakeScratchDisjoint(t *testing.T) {
 }
 
 func TestMakeScratchInvalidKeyPanics(t *testing.T) {
-	for _, key := range []string{"", "a/b", "/abs", "trailing/"} {
+	for _, key := range []string{"", "a/b", "/abs", "trailing/", ".", ".."} {
 		t.Run(key, func(t *testing.T) {
 			defer func() {
 				if recover() == nil {

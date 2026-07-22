@@ -170,13 +170,16 @@ func (s Scratch) Sub(parts ...string) string {
 }
 
 // MakeScratch mints a scratch root base/key for a node or service. key must be
-// a single, non-empty path component (no separators) so that co-located work
-// lands in disjoint, predictable directories. MakeScratch panics on a
-// separator: keys are framework-generated identifiers, so one is a programming
-// error.
+// a single, non-empty path component that is neither "." nor ".." (no
+// separators, no traversal) so that co-located work lands in disjoint,
+// predictable directories beneath base. MakeScratch panics otherwise: keys are
+// framework-generated identifiers, so a bad one is a programming error. The
+// traversal check matters because the resulting root is later handed to a
+// recursive remove during cleanup -- MakeScratch(base, "..") returning base's
+// parent must never happen.
 func MakeScratch(base, key string) Scratch {
-	if key == "" || strings.Contains(key, "/") {
-		panic(fmt.Sprintf("torx: scratch key must be a non-empty path component: %q", key))
+	if key == "" || key == "." || key == ".." || strings.Contains(key, "/") {
+		panic(fmt.Sprintf("torx: scratch key must be a single non-traversal path component: %q", key))
 	}
 	return Scratch{Root: path.Join(base, key)}
 }
