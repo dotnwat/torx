@@ -159,6 +159,10 @@ type SuiteResult struct {
 	// recorded jobs are then only a prefix of what was asked for, so the run did
 	// not complete regardless of how those jobs fared.
 	Cancelled bool `json:"cancelled,omitempty"`
+	// PersistErr is set when the run was asked to write a results tree but the tree
+	// could not be created. The jobs still ran, but the requested on-disk results
+	// are missing, so the run is not Ok rather than silently producing nothing.
+	PersistErr string `json:"persist_error,omitempty"`
 }
 
 // Counts returns the number of jobs in each status.
@@ -174,7 +178,7 @@ func (s SuiteResult) Counts() map[Status]int {
 // never Ok even if every job it managed to run passed, since the rest never ran.
 // Ignored and flaky jobs do not count as failures.
 func (s SuiteResult) Ok() bool {
-	if s.Cancelled {
+	if s.Cancelled || s.PersistErr != "" {
 		return false
 	}
 	for _, j := range s.Jobs {
@@ -205,6 +209,9 @@ func (s SuiteResult) summaryLine() string {
 		len(s.Jobs), c[StatusPass], c[StatusFail], c[StatusFlaky], c[StatusIgnore])
 	if s.Cancelled {
 		line += " (run cancelled before completion)"
+	}
+	if s.PersistErr != "" {
+		line += " (results not persisted: " + s.PersistErr + ")"
 	}
 	return line
 }

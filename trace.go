@@ -132,17 +132,39 @@ func writeResultJSON(dir string, res JobResult) {
 	}
 }
 
-// makeRunDir creates a run directory named stamp under root and repoints a
-// "latest" symlink at it, returning the run directory.
+// makeRunDir creates a unique run directory under root, names it after stamp,
+// repoints a "latest" symlink at it, and returns it. A one-second timestamp is
+// not unique on its own: two runs started in the same second under the same root
+// would otherwise share a directory and truncate each other's traces, results,
+// and run.json. MkdirTemp appends a random suffix and creates the directory
+// exclusively, so each run gets its own.
 func makeRunDir(root, stamp string) (string, error) {
-	dir := filepath.Join(root, stamp)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(root, 0o755); err != nil {
 		return "", err
 	}
-	latest := filepath.Join(root, "latest")
-	_ = os.Remove(latest)
-	_ = os.Symlink(stamp, latest) // relative target, best-effort
+	dir, err := os.MkdirTemp(root, stamp+"-")
+	if err != nil {
+		return "", err
+	}
+	repointLatest(root, filepath.Base(dir))
 	return dir, nil
+}
+
+// repointLatest moves root/latest to point at name via a temporary symlink and a
+// rename, so a concurrent run never observes a missing or half-written link (the
+// rename is atomic). The temporary name embeds the unique run name so parallel
+// runs do not collide on it. Updating the convenience link is best-effort and
+// never fails the run.
+func repointLatest(root, name string) {
+	tmp := filepath.Join(root, ".latest."+name)
+	latest := filepath.Join(root, "latest")
+	_ = os.Remove(tmp)
+	if err := os.Symlink(name, tmp); err != nil {
+		return
+	}
+	if err := os.Rename(tmp, latest); err != nil {
+		_ = os.Remove(tmp)
+	}
 }
 
 // writeRunJSON writes the aggregate run.json in dir, best-effort.

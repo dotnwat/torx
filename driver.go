@@ -83,13 +83,18 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 	// Persist the run when a results root is configured: a timestamped run
 	// directory (with a "latest" symlink) whose path workers fill in per job.
 	runDir := ""
+	persistErr := ""
 	if opts.ResultsDir != "" {
 		stamp := time.Now().UTC().Format("2006-01-02T15-04-05Z")
 		if d, err := makeRunDir(opts.ResultsDir, stamp); err == nil {
 			runDir = d
 			opts.ResultsDir = runDir
 		} else {
-			opts.ResultsDir = "" // cannot create the tree; do not ask workers to persist
+			// The caller asked for a results tree and it could not be created. Run in
+			// memory, but record the failure rather than silently turning a requested
+			// tree into no results: Ok() and the CLI exit status must reflect it.
+			persistErr = fmt.Sprintf("cannot create results tree under %q: %v", opts.ResultsDir, err)
+			opts.ResultsDir = ""
 		}
 	}
 
@@ -171,7 +176,7 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 	// so the suite is incomplete no matter how the recorded jobs fared. Marking it
 	// here is what keeps Ok() -- and the CLI exit status -- from reporting success
 	// for a run the operator or a deadline cut short.
-	suite := SuiteResult{Jobs: results, Cancelled: ctx.Err() != nil}
+	suite := SuiteResult{Jobs: results, Cancelled: ctx.Err() != nil, PersistErr: persistErr}
 	if runDir != "" {
 		writeRunJSON(runDir, suite)
 	}

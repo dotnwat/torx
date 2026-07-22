@@ -171,6 +171,54 @@ func TestRunTraceHasLifecycle(t *testing.T) {
 	}
 }
 
+func TestMakeRunDirUnique(t *testing.T) {
+	root := t.TempDir()
+	stamp := "2026-01-02T03-04-05Z"
+
+	d1, err := makeRunDir(root, stamp)
+	if err != nil {
+		t.Fatalf("first makeRunDir: %v", err)
+	}
+	d2, err := makeRunDir(root, stamp)
+	if err != nil {
+		t.Fatalf("second makeRunDir: %v", err)
+	}
+	if d1 == d2 {
+		t.Fatalf("two runs with the same stamp shared a directory: %s", d1)
+	}
+	for _, d := range []string{d1, d2} {
+		if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
+			t.Errorf("run dir %s not created: %v", d, err)
+		}
+	}
+	// latest resolves to the most recent run.
+	target, err := os.Readlink(filepath.Join(root, "latest"))
+	if err != nil {
+		t.Fatalf("readlink latest: %v", err)
+	}
+	if target != filepath.Base(d2) {
+		t.Errorf("latest -> %q, want %q", target, filepath.Base(d2))
+	}
+}
+
+func TestRunSurfacesResultsDirFailure(t *testing.T) {
+	// A results dir whose parent is a regular file cannot be created, so the
+	// requested tree fails. The run must not silently report success with no
+	// results.
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := Run(context.Background(), testPool(1), InProcessLauncher{},
+		sizedRequests(1, 1, nil), RunOptions{ResultsDir: filepath.Join(file, "results")})
+	if res.PersistErr == "" {
+		t.Errorf("PersistErr empty though the results tree could not be created")
+	}
+	if res.Ok() {
+		t.Errorf("run reported Ok despite failing to persist the requested results tree")
+	}
+}
+
 func TestRunCollectsServiceArtifacts(t *testing.T) {
 	root := t.TempDir()
 	res := Run(context.Background(), testPool(1), InProcessLauncher{},
