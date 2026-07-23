@@ -182,9 +182,12 @@ func repointLatest(root, name string) {
 	}
 }
 
-// writeRunJSON writes the aggregate run.json in dir, best-effort.
-func writeRunJSON(dir string, suite SuiteResult) {
-	if b, err := suite.JSON(); err == nil {
-		_ = os.WriteFile(filepath.Join(dir, "run.json"), b, 0o644)
+// writeRunJSON writes the aggregate run.json in dir, returning any error so the
+// caller can surface a failure to persist the run summary.
+func writeRunJSON(dir string, suite SuiteResult) error {
+	b, err := suite.JSON()
+	if err != nil {
+		return err
 	}
+	return os.WriteFile(filepath.Join(dir, "run.json"), b, 0o644)
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -112,6 +113,30 @@ type recordingReporter struct {
 	finished *SuiteResult
 }
 
-func (r *recordingReporter) Report(res JobResult) { r.reported = append(r.reported, res) }
+func (r *recordingReporter) Report(res JobResult) error {
+	r.reported = append(r.reported, res)
+	return nil
+}
 
-func (r *recordingReporter) Finish(s SuiteResult) { r.finished = &s }
+func (r *recordingReporter) Finish(s SuiteResult) error {
+	r.finished = &s
+	return nil
+}
+
+// failWriter fails every write, standing in for a full disk or a broken pipe.
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+func TestRunSurfacesReporterWriteFailure(t *testing.T) {
+	// The job itself passes; only the reporter's write fails. The run must report
+	// the persistence failure rather than exiting as a clean success.
+	res := Run(context.Background(), testPool(1), InProcessLauncher{}, sizedRequests(1, 1, nil),
+		RunOptions{Reporters: []Reporter{ConsoleReporter{W: failWriter{}}}})
+	if res.PersistErr == "" {
+		t.Errorf("PersistErr empty though a reporter write failed")
+	}
+	if res.Ok() {
+		t.Errorf("run reported Ok despite a reporter that could not persist results")
+	}
+}

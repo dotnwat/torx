@@ -20,11 +20,13 @@ import (
 
 // Reporter consumes job results as a run progresses. Report is called once per
 // job as its result lands; Finish is called once after the last result, with the
-// aggregate. The driver calls a reporter from a single goroutine, so an
-// implementation need not be safe for concurrent use.
+// aggregate. Each returns an error if it could not deliver the result (e.g. a
+// failed write to a results file), which the driver records as a run-level
+// persistence failure rather than discarding. The driver calls a reporter from a
+// single goroutine, so an implementation need not be safe for concurrent use.
 type Reporter interface {
-	Report(JobResult)
-	Finish(SuiteResult)
+	Report(JobResult) error
+	Finish(SuiteResult) error
 }
 
 // ConsoleReporter writes one human-readable line per job as it completes,
@@ -37,10 +39,16 @@ type ConsoleReporter struct {
 var _ Reporter = ConsoleReporter{}
 
 // Report prints the job's rendered result.
-func (r ConsoleReporter) Report(res JobResult) { fmt.Fprintln(r.W, res.Render()) }
+func (r ConsoleReporter) Report(res JobResult) error {
+	_, err := fmt.Fprintln(r.W, res.Render())
+	return err
+}
 
 // Finish prints the run summary.
-func (r ConsoleReporter) Finish(s SuiteResult) { fmt.Fprintf(r.W, "\n%s\n", s.summaryLine()) }
+func (r ConsoleReporter) Finish(s SuiteResult) error {
+	_, err := fmt.Fprintf(r.W, "\n%s\n", s.summaryLine())
+	return err
+}
 
 // JSONReporter writes each job result as a line of JSON to W as it lands. The
 // newline-delimited framing means a run killed mid-flight still leaves a file of
@@ -60,15 +68,18 @@ func NewJSONReporter(w io.Writer) *JSONReporter {
 }
 
 // Report writes res as one line of JSON, flushing to disk when backed by a file.
-func (r *JSONReporter) Report(res JobResult) {
-	_ = r.enc.Encode(res) // Encode appends a newline, giving newline-delimited JSON
-	if f, ok := r.w.(*os.File); ok {
-		_ = f.Sync()
+func (r *JSONReporter) Report(res JobResult) error {
+	if err := r.enc.Encode(res); err != nil { // Encode appends a newline (NDJSON)
+		return err
 	}
+	if f, ok := r.w.(*os.File); ok {
+		return f.Sync()
+	}
+	return nil
 }
 
 // Finish does nothing: the per-job lines are the complete artifact.
-func (r *JSONReporter) Finish(SuiteResult) {}
+func (r *JSONReporter) Finish(SuiteResult) error { return nil }
 
 // ReadResults reconstructs a SuiteResult from a newline-delimited JSON result
 // stream as written by JSONReporter. A truncated final record -- the mark of a

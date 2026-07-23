@@ -103,14 +103,28 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 		spec PoolSpec
 	}
 
+	// noteErr folds a persistence failure into the run-level PersistErr. It runs
+	// only from the single recording goroutine, so it needs no synchronization.
+	noteErr := func(err error) {
+		if err == nil {
+			return
+		}
+		if persistErr == "" {
+			persistErr = err.Error()
+		} else {
+			persistErr += "; " + err.Error()
+		}
+	}
+
 	var results []JobResult
 	// record keeps the aggregate and feeds each result to the reporters as it
 	// lands; the driver records from a single goroutine, so reporters see results
-	// one at a time and in completion order.
+	// one at a time and in completion order. A reporter that cannot deliver a
+	// result marks the run as having failed to persist.
 	record := func(res JobResult) {
 		results = append(results, res)
 		for _, rep := range opts.Reporters {
-			rep.Report(res)
+			noteErr(rep.Report(res))
 		}
 	}
 
@@ -189,12 +203,17 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 	// so the suite is incomplete no matter how the recorded jobs fared. Marking it
 	// here is what keeps Ok() -- and the CLI exit status -- from reporting success
 	// for a run the operator or a deadline cut short.
-	suite := SuiteResult{Jobs: results, Cancelled: ctx.Err() != nil, PersistErr: persistErr}
-	if runDir != "" {
-		writeRunJSON(runDir, suite)
-	}
+	suite := SuiteResult{Jobs: results, Cancelled: ctx.Err() != nil}
 	for _, rep := range opts.Reporters {
-		rep.Finish(suite)
+		noteErr(rep.Finish(suite))
+	}
+	suite.PersistErr = persistErr
+	if runDir != "" {
+		// run.json records the final suite, including any persistence failure noted
+		// so far; a failure to write it is itself surfaced (in the returned suite,
+		// for the exit status, though it cannot land in the file that failed).
+		noteErr(writeRunJSON(runDir, suite))
+		suite.PersistErr = persistErr
 	}
 	return suite
 }
