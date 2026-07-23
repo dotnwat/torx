@@ -314,10 +314,15 @@ func (s *sshStream) teardown() error {
 }
 
 // killGroup SIGKILLs a remote process group over a fresh session and reports
-// whether the kill could be carried out. The group already being gone is success
-// for teardown, but a transport failure or a kill that could not run is returned
-// so the caller can treat the node as not confirmed clean rather than silently
-// reused.
+// whether the kill could be carried out. A transport failure -- an unreachable
+// node, a session that would not open -- is returned so the caller can treat the
+// node as not confirmed clean rather than silently reused. Once the kill actually
+// runs its exit status is not inspected: the group is one this backend created (a
+// setsid leader over its own session), so a non-zero exit means the group is
+// already gone, which is success for teardown. kill(1) cannot distinguish that
+// from other failures by exit code anyway, and its diagnostic text is locale- and
+// implementation-dependent, so relying on either would be less reliable than the
+// transport error the run-or-not signal already provides.
 func (b *backend) killGroup(pgid int) error {
 	if pgid < 2 {
 		// Never signal group 1 (every process the caller may signal) or 0 (the
@@ -329,13 +334,8 @@ func (b *backend) killGroup(pgid int) error {
 	// hang teardown forever.
 	ctx, cancel := context.WithTimeout(context.Background(), killGroupTimeout)
 	defer cancel()
-	res, err := b.Exec(ctx, torx.Command("kill", "-KILL", "-"+strconv.Itoa(pgid)))
-	if err != nil {
+	if _, err := b.Exec(ctx, torx.Command("kill", "-KILL", "-"+strconv.Itoa(pgid))); err != nil {
 		return torx.Wrap(torx.ErrBackend, "ssh: kill group", err)
-	}
-	if res.ExitCode != 0 && !strings.Contains(string(res.Stderr), "No such process") {
-		return torx.Wrap(torx.ErrBackend, "ssh: kill group",
-			fmt.Errorf("kill exited %d: %s", res.ExitCode, strings.TrimSpace(string(res.Stderr))))
 	}
 	return nil
 }
