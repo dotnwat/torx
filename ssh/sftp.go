@@ -200,6 +200,14 @@ func (b *backend) Mkdir(ctx context.Context, path string) error {
 // (rm -rf).
 func (b *backend) Rm(ctx context.Context, path string) error {
 	return b.sftpDo(ctx, "rm", func(sc *sftp.Client) error {
-		return sc.RemoveAll(path)
+		// pkg/sftp's RemoveAll opens with a Stat and surfaces its error, so an
+		// absent path fails with ErrNotExist. A missing path is already in the
+		// desired state, not a failure -- absorb it to honor the rm -rf contract,
+		// as os.RemoveAll (and thus LocalBackend.Rm) already does. Without this,
+		// a service's pre-clean of not-yet-created data fails its first launch.
+		if err := sc.RemoveAll(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return nil
 	})
 }

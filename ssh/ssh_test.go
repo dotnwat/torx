@@ -125,6 +125,21 @@ func TestFileOperations(t *testing.T) {
 	}
 }
 
+// TestRmAbsentPathSucceeds pins the rm -rf contract: removing a path that does
+// not exist is not an error. A service's pre-clean removes a node's stale data
+// before its first start, when that data has never existed; an Rm that failed on
+// absence would fail every service's first launch. pkg/sftp's RemoveAll surfaces
+// its opening Stat's ErrNotExist, so the backend must absorb it, matching
+// os.RemoveAll and thus LocalBackend.Rm.
+func TestRmAbsentPathSucceeds(t *testing.T) {
+	b := dialBackend(t)
+	ctx := context.Background()
+	absent := filepath.Join(t.TempDir(), "never", "created")
+	if err := b.Rm(ctx, absent); err != nil {
+		t.Errorf("Rm(absent) = %v; want nil (rm -rf tolerates a missing path)", err)
+	}
+}
+
 func TestSignal(t *testing.T) {
 	b := dialBackend(t)
 	// kill -0 against a live pid (this test process) succeeds; the point is that
