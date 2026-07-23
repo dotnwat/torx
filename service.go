@@ -8,8 +8,10 @@
 // standard lifecycle that stops and cleans each node before starting it. To
 // customize a phase, override the corresponding method -- it shadows the default
 // and the registry and jobs, which dispatch through the interface, call the
-// override. A ServiceRegistry tears a job's services down in reverse order,
-// running every step even on failure and aggregating the errors.
+// override. A ServiceRegistry stops (StopAll) then cleans (CleanAll) a job's
+// services in reverse registration order, running every step even on failure and
+// aggregating the errors; a job's Teardown composes the two, collecting artifacts
+// between them.
 package torx
 
 import (
@@ -239,14 +241,5 @@ func (r *ServiceRegistry) CleanAll(ctx context.Context) error {
 	for _, svc := range r.reversed() {
 		errs.Append(svc.Clean(ctx))
 	}
-	return errs.Err()
-}
-
-// Teardown stops then cleans every service in reverse order, running every step
-// even on failure and aggregating all errors so none is masked.
-func (r *ServiceRegistry) Teardown(ctx context.Context) error {
-	var errs MultiError
-	errs.Append(r.StopAll(ctx))
-	errs.Append(r.CleanAll(ctx))
 	return errs.Err()
 }

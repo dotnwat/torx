@@ -164,14 +164,19 @@ func TestServiceStopAggregatesAcrossNodes(t *testing.T) {
 	}
 }
 
-func TestServiceRegistryTeardownLIFO(t *testing.T) {
+func TestServiceRegistryStopThenCleanLIFO(t *testing.T) {
 	var log []string
 	var reg ServiceRegistry
 	reg.Add(newFakeService("a", &log, []*Node{testNode("n")}))
 	reg.Add(newFakeService("b", &log, []*Node{testNode("n")}))
 
-	if err := reg.Teardown(context.Background()); err != nil {
-		t.Fatalf("Teardown: %v", err)
+	// The teardown sequence JobBase drives: stop every service, then clean every
+	// service, each in reverse registration order.
+	if err := reg.StopAll(context.Background()); err != nil {
+		t.Fatalf("StopAll: %v", err)
+	}
+	if err := reg.CleanAll(context.Background()); err != nil {
+		t.Fatalf("CleanAll: %v", err)
 	}
 	want := []string{"b:stop:n", "a:stop:n", "b:clean:n", "a:clean:n"}
 	if !slices.Equal(log, want) {
@@ -179,7 +184,7 @@ func TestServiceRegistryTeardownLIFO(t *testing.T) {
 	}
 }
 
-func TestServiceRegistryTeardownRunsEveryStepAndAggregates(t *testing.T) {
+func TestServiceRegistryStopAggregatesAndCleanStillRuns(t *testing.T) {
 	var log []string
 	var reg ServiceRegistry
 	a := newFakeService("a", &log, []*Node{testNode("n")})
@@ -189,13 +194,17 @@ func TestServiceRegistryTeardownRunsEveryStepAndAggregates(t *testing.T) {
 	reg.Add(a)
 	reg.Add(b)
 
-	err := reg.Teardown(context.Background())
+	err := reg.StopAll(context.Background())
 	if err == nil {
-		t.Fatalf("Teardown err = nil, want aggregated errors")
+		t.Fatalf("StopAll err = nil, want aggregated errors")
 	}
 	msg := err.Error()
 	if !strings.Contains(msg, "service: stop a") || !strings.Contains(msg, "service: stop b") {
 		t.Errorf("aggregated error missing a cause: %v", err)
+	}
+	// Clean must still run even though every stop failed, so logs are not stranded.
+	if err := reg.CleanAll(context.Background()); err != nil {
+		t.Fatalf("CleanAll: %v", err)
 	}
 	if !slices.Contains(log, "a:clean:n") || !slices.Contains(log, "b:clean:n") {
 		t.Errorf("clean did not run after stop failures: %v", log)
