@@ -80,8 +80,11 @@ func PoolFromManifest(m Manifest) (*Pool, error) {
 	allocators := make(map[string]*PortAllocator)
 	nodes := make([]*Node, len(m.Nodes))
 	for i, mn := range m.Nodes {
-		if mn.Name == "" {
-			return nil, fmt.Errorf("manifest: node %d has no name", i)
+		if !validComponent(mn.Name) {
+			// The name becomes a directory component in the results tree, so a value
+			// with a separator or ".."/"." could steer collection outside the run
+			// directory. Reject it at load, where the manifest is external input.
+			return nil, fmt.Errorf("manifest: node %d has an invalid name %q (must be a single path component)", i, mn.Name)
 		}
 		if _, dup := seen[mn.Name]; dup {
 			return nil, fmt.Errorf("manifest: duplicate node name %q", mn.Name)

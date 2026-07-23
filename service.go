@@ -14,6 +14,7 @@ package torx
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -67,8 +68,13 @@ type ServiceBase struct {
 
 // NewServiceBase builds a ServiceBase. hooks is the concrete service, driven by
 // the default lifecycle; it may be nil if the service overrides every lifecycle
-// method.
+// method. name becomes a directory component in the results tree and a scratch
+// key, so it must be a single non-traversal path component; a bad name is a
+// programming error and panics.
 func NewServiceBase(name string, spec PoolSpec, hooks PerNode) *ServiceBase {
+	if !validComponent(name) {
+		panic(fmt.Sprintf("torx: service name must be a single non-traversal path component: %q", name))
+	}
 	return &ServiceBase{name: name, spec: spec, hooks: hooks}
 }
 
@@ -89,6 +95,11 @@ func (b *ServiceBase) Bind(nodes []*Node) { b.nodes = nodes }
 // does not capture automatically -- a --log-file target, a data dump, a metrics
 // file. StartCaptured uses it to register captured console output.
 func (b *ServiceBase) AddArtifact(n *Node, a Artifact) {
+	if !validComponent(a.Name) {
+		// a.Name is joined into the collection destination, so a separator or ".."
+		// could write the artifact outside the job's results directory.
+		panic(fmt.Sprintf("torx: artifact name must be a single non-traversal path component: %q", a.Name))
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.artifacts == nil {

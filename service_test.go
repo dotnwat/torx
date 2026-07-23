@@ -70,6 +70,29 @@ func TestServiceBase(t *testing.T) {
 	}
 }
 
+func TestNewServiceBaseRejectsTraversalName(t *testing.T) {
+	for _, name := range []string{"", ".", "..", "a/b", "../escape"} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("NewServiceBase(%q) did not panic", name)
+				}
+			}()
+			NewServiceBase(name, Homogeneous(1, NodeSpec{}), nil)
+		})
+	}
+}
+
+func TestAddArtifactRejectsTraversalName(t *testing.T) {
+	f := newFakeService("svc", new([]string), []*Node{testNode("n0")})
+	defer func() {
+		if recover() == nil {
+			t.Errorf("AddArtifact with a traversal name did not panic")
+		}
+	}()
+	f.AddArtifact(testNode("n0"), Artifact{Name: "../escape.log", Path: "/x"})
+}
+
 func TestServiceStartStopsAndCleansFirst(t *testing.T) {
 	var log []string
 	f := newFakeService("svc", &log, []*Node{testNode("n0")})

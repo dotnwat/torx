@@ -131,6 +131,8 @@ func TestPoolFromManifestErrors(t *testing.T) {
 	cases := map[string]Manifest{
 		"no nodes":        {},
 		"missing name":    {Nodes: []ManifestNode{{Scratch: "/s", Backend: BackendDescriptor{Kind: "local"}}}},
+		"traversal name":  {Nodes: []ManifestNode{{Name: "../escape", Scratch: "/s", Backend: BackendDescriptor{Kind: "local"}}}},
+		"separator name":  {Nodes: []ManifestNode{{Name: "a/b", Scratch: "/s", Backend: BackendDescriptor{Kind: "local"}}}},
 		"missing scratch": {Nodes: []ManifestNode{{Name: "n", Backend: BackendDescriptor{Kind: "local"}}}},
 		"duplicate name": {Nodes: []ManifestNode{
 			{Name: "dup", Scratch: "/a", Backend: BackendDescriptor{Kind: "local"}},

@@ -169,16 +169,25 @@ func (s Scratch) Sub(parts ...string) string {
 	return path.Join(append([]string{s.Root}, parts...)...)
 }
 
-// MakeScratch mints a scratch root base/key for a node or service. key must be
-// a single, non-empty path component that is neither "." nor ".." (no
-// separators, no traversal) so that co-located work lands in disjoint,
-// predictable directories beneath base. MakeScratch panics otherwise: keys are
-// framework-generated identifiers, so a bad one is a programming error. The
-// traversal check matters because the resulting root is later handed to a
-// recursive remove during cleanup -- MakeScratch(base, "..") returning base's
-// parent must never happen.
+// validComponent reports whether s is safe to use as a single path component: a
+// non-empty name that is neither "." nor ".." and contains no separator, so
+// joining it beneath a root cannot escape that root. It is the shared check for
+// every framework identifier that becomes a directory name -- scratch keys, node
+// and service names, artifact names -- since all of them are eventually joined
+// into a scratch or results path.
+func validComponent(s string) bool {
+	return s != "" && s != "." && s != ".." && !strings.Contains(s, "/")
+}
+
+// MakeScratch mints a scratch root base/key for a node or service. key must be a
+// single, non-traversal path component (see validComponent) so that co-located
+// work lands in disjoint, predictable directories beneath base. MakeScratch
+// panics otherwise: keys are framework-generated identifiers, so a bad one is a
+// programming error. The traversal check matters because the resulting root is
+// later handed to a recursive remove during cleanup -- MakeScratch(base, "..")
+// returning base's parent must never happen.
 func MakeScratch(base, key string) Scratch {
-	if key == "" || key == "." || key == ".." || strings.Contains(key, "/") {
+	if !validComponent(key) {
 		panic(fmt.Sprintf("torx: scratch key must be a single non-traversal path component: %q", key))
 	}
 	return Scratch{Root: path.Join(base, key)}
