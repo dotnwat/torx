@@ -60,6 +60,7 @@ func driverMain(args []string) int {
 	resultsPath := fs.String("results", "", "write newline-delimited JSON results to this file")
 	resultsDir := fs.String("results-dir", "results", "write the per-run results tree under this directory (empty to disable)")
 	runDir := fs.String("run-dir", "", "write results into exactly this pre-created directory (mutually exclusive with -results-dir)")
+	paramsFile := fs.String("params", "", "JSON file of parameter overrides replacing the named jobs' compiled-in variants")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -81,9 +82,18 @@ func driverMain(args []string) int {
 		*resultsDir = ""
 	}
 
+	var overrides ParamsOverrides
+	if *paramsFile != "" {
+		var err error
+		if overrides, err = LoadParamsOverrides(*paramsFile); err != nil {
+			fmt.Fprintln(os.Stderr, "torx:", err)
+			return 2
+		}
+	}
+
 	// Positional arguments select jobs by id (regular expressions); with none,
 	// every registered job runs.
-	requests, err := Discover(fs.Args()...)
+	requests, err := DiscoverWith(overrides, fs.Args()...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "torx:", err)
 		return 2

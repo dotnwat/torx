@@ -229,6 +229,24 @@ cross product. Each variant gets a stable id and is selected, scheduled, and
 reported independently. Read `jc.Params` (with the typed `Int`/`String`/`Bool`
 getters) inside `Declare`/`Run`.
 
+A parametrized job — especially one meant to take externally supplied
+configurations (`-params`, below) — should also implement
+
+```go
+ResolveParams(p torx.Params) (torx.Params, error)
+```
+
+Discovery calls it once per variant, before selection, duplicate detection,
+and id construction. The job returns the complete canonical map — defaults
+filled in, values type- and range-checked, unknown keys rejected — and that
+map is what the variant runs with, what its id is computed from, and what its
+results record. Without the hook, `{a:1}` and `{a:1, b:<default>}` are two
+different ids for the same configuration, and a mistyped key silently runs
+the default value. An error from the resolver fails the variant loudly before
+any node is allocated. One consequence worth knowing: adding a dimension
+later changes every canonical id (its default joins every map), so join runs
+on the recorded params in results, not on id strings.
+
 ## Wiring it into a suite binary
 
 A suite is a Go binary whose `main` calls `torx.Main()` and whose jobs are
@@ -253,8 +271,33 @@ go run ./path/to/suite -nodes 3 'my\..*'
 
 Useful flags: `-nodes N` (local pool size), `-parallel N` (concurrent jobs),
 `-results <file>` (newline-delimited JSON results), `-results-dir <dir>` (the
-per-run tree; empty to disable), `-run-dir <dir>` (below), and
-`-pool <manifest.json>` (below).
+per-run tree; empty to disable), `-run-dir <dir>` (below), `-params <file>`
+(below), and `-pool <manifest.json>` (below).
+
+**External parametrization.** `-params FILE` replaces the named jobs'
+compiled-in variants with externally supplied ones, so a specific
+configuration or sweep runs without editing the suite. The file is JSON keyed
+by job id; each entry gives `matrix` (dimension name → list of values,
+expanded to the cross product), `configs` (explicit parameter objects, for
+curated points a cross product cannot express), or both (the expanded matrix
+plus the configs):
+
+```json
+{
+  "my.bench": {
+    "matrix":  { "clients": [1, 8, 32], "trial": [1, 2, 3] },
+    "configs": [ { "clients": 64, "pipeline": 8 } ]
+  }
+}
+```
+
+Entries replace a job's compiled-in variants entirely; nothing is merged. The
+envelope is strict — unknown fields, empty forms, empty dimensions, and null
+values are rejected, and naming a job that is unknown or whose variants end up
+entirely unselected is an error — because externally supplied configuration
+must never degrade silently. Each supplied parameter set still passes through
+the job's `ResolveParams` (above), so ids stay canonical and two entries that
+resolve to the same configuration are rejected as duplicates.
 
 **Launchers and `-run-dir`.** A tool that wraps a suite — building it, writing
 an invocation record, archiving the run's inputs — needs to know the exact run
