@@ -186,7 +186,7 @@ func TestRunReportsDiscoveryPanicAsFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
-	res := Run(context.Background(), testPool(1), InProcessLauncher{}, reqs, RunOptions{})
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{}, reqs, RunOptions{})
 	byID := map[string]Status{}
 	for _, j := range res.Jobs {
 		byID[j.ID] = j.Status

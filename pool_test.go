@@ -5,18 +5,22 @@ import (
 	"testing"
 )
 
-func testNode(name string, labels ...string) *Node {
+// testNode builds a local node whose scratch root lives in a per-test
+// temporary directory, so state one test's jobs leave on a node can never
+// leak into another test's readiness checks or collected artifacts.
+func testNode(t *testing.T, name string, labels ...string) *Node {
+	t.Helper()
 	return NewNode(NodeConfig{
 		Name:      name,
 		Resources: Resources{Labels: NewLabels(labels...)},
 		Backend:   LocalBackend{},
-		Scratch:   MakeScratch("/tmp/torx-test", name),
+		Scratch:   MakeScratch(t.TempDir(), name),
 		Ports:     NewPortAllocator(""),
 	})
 }
 
 func TestPoolAllocateAndFree(t *testing.T) {
-	p := NewPool([]*Node{testNode("a"), testNode("b"), testNode("c")})
+	p := NewPool([]*Node{testNode(t, "a"), testNode(t, "b"), testNode(t, "c")})
 	if p.Size() != 3 || p.Available() != 3 || p.InUse() != 0 {
 		t.Fatalf("init: size=%d avail=%d inuse=%d", p.Size(), p.Available(), p.InUse())
 	}
@@ -44,7 +48,7 @@ func TestPoolAllocateAndFree(t *testing.T) {
 }
 
 func TestPoolAllocateAtomicFailure(t *testing.T) {
-	p := NewPool([]*Node{testNode("a"), testNode("b")})
+	p := NewPool([]*Node{testNode(t, "a"), testNode(t, "b")})
 
 	_, err := p.Allocate(Homogeneous(3, NodeSpec{}))
 	if !errors.Is(err, ErrAllocation) {
@@ -60,7 +64,7 @@ func TestPoolMostConstrainedFirst(t *testing.T) {
 	// nvme is listed first; a naive in-order greedy would give it to the "any"
 	// spec and then fail the "needs-nvme" spec. Most-constrained-first matching
 	// reserves nvme for the spec that needs it.
-	p := NewPool([]*Node{testNode("nvme", "nvme"), testNode("plain")})
+	p := NewPool([]*Node{testNode(t, "nvme", "nvme"), testNode(t, "plain")})
 	spec := PoolSpec{Nodes: []NodeSpec{
 		{Role: "any"},
 		{Role: "needs-nvme", Required: Resources{Labels: NewLabels("nvme")}},
@@ -137,7 +141,7 @@ func TestPoolCanEverFitHeterogeneous(t *testing.T) {
 }
 
 func TestPoolLabelUnsatisfiable(t *testing.T) {
-	p := NewPool([]*Node{testNode("plain")})
+	p := NewPool([]*Node{testNode(t, "plain")})
 	spec := PoolSpec{Nodes: []NodeSpec{{Required: Resources{Labels: NewLabels("nvme")}}}}
 	if _, err := p.Allocate(spec); !errors.Is(err, ErrAllocation) {
 		t.Errorf("err = %v, want ErrAllocation", err)
@@ -145,7 +149,7 @@ func TestPoolLabelUnsatisfiable(t *testing.T) {
 }
 
 func TestPoolCanAllocate(t *testing.T) {
-	p := NewPool([]*Node{testNode("a"), testNode("b")})
+	p := NewPool([]*Node{testNode(t, "a"), testNode(t, "b")})
 	if !p.CanAllocate(Homogeneous(2, NodeSpec{})) {
 		t.Errorf("CanAllocate(2) = false, want true")
 	}
@@ -158,7 +162,7 @@ func TestPoolCanAllocate(t *testing.T) {
 }
 
 func TestPoolMaxUsed(t *testing.T) {
-	p := NewPool([]*Node{testNode("a"), testNode("b"), testNode("c")})
+	p := NewPool([]*Node{testNode(t, "a"), testNode(t, "b"), testNode(t, "c")})
 
 	s1, err := p.Allocate(Homogeneous(2, NodeSpec{}))
 	if err != nil {

@@ -58,7 +58,7 @@ func (f *fakeService) WaitNode(_ context.Context, n *Node) error {
 
 func TestServiceBase(t *testing.T) {
 	var log []string
-	f := newFakeService("svc", &log, []*Node{testNode("n0"), testNode("n1")})
+	f := newFakeService("svc", &log, []*Node{testNode(t, "n0"), testNode(t, "n1")})
 	if f.Name() != "svc" {
 		t.Errorf("Name = %q", f.Name())
 	}
@@ -84,18 +84,18 @@ func TestNewServiceBaseRejectsTraversalName(t *testing.T) {
 }
 
 func TestAddArtifactRejectsTraversalName(t *testing.T) {
-	f := newFakeService("svc", new([]string), []*Node{testNode("n0")})
+	f := newFakeService("svc", new([]string), []*Node{testNode(t, "n0")})
 	defer func() {
 		if recover() == nil {
 			t.Errorf("AddArtifact with a traversal name did not panic")
 		}
 	}()
-	f.AddArtifact(testNode("n0"), Artifact{Name: "../escape.log", Path: "/x"})
+	f.AddArtifact(testNode(t, "n0"), Artifact{Name: "../escape.log", Path: "/x"})
 }
 
 func TestServiceStartStopsAndCleansFirst(t *testing.T) {
 	var log []string
-	f := newFakeService("svc", &log, []*Node{testNode("n0")})
+	f := newFakeService("svc", &log, []*Node{testNode(t, "n0")})
 	if err := f.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestServiceStartStopsAndCleansFirst(t *testing.T) {
 
 func TestServiceStartFailsFast(t *testing.T) {
 	var log []string
-	f := newFakeService("svc", &log, []*Node{testNode("n0"), testNode("n1")})
+	f := newFakeService("svc", &log, []*Node{testNode(t, "n0"), testNode(t, "n1")})
 	f.failStart["n0"] = true
 
 	err := f.Start(context.Background())
@@ -121,7 +121,7 @@ func TestServiceStartFailsFast(t *testing.T) {
 
 func TestServiceStartAbortsWhenPreStopFails(t *testing.T) {
 	var log []string
-	f := newFakeService("svc", &log, []*Node{testNode("n0")})
+	f := newFakeService("svc", &log, []*Node{testNode(t, "n0")})
 	f.failStop["n0"] = true
 
 	err := f.Start(context.Background())
@@ -136,7 +136,7 @@ func TestServiceStartAbortsWhenPreStopFails(t *testing.T) {
 
 func TestServiceStartAbortsWhenPreCleanFails(t *testing.T) {
 	var log []string
-	f := newFakeService("svc", &log, []*Node{testNode("n0")})
+	f := newFakeService("svc", &log, []*Node{testNode(t, "n0")})
 	f.failClean["n0"] = true
 
 	err := f.Start(context.Background())
@@ -151,7 +151,7 @@ func TestServiceStartAbortsWhenPreCleanFails(t *testing.T) {
 
 func TestServiceStopAggregatesAcrossNodes(t *testing.T) {
 	var log []string
-	f := newFakeService("svc", &log, []*Node{testNode("n0"), testNode("n1")})
+	f := newFakeService("svc", &log, []*Node{testNode(t, "n0"), testNode(t, "n1")})
 	f.failStop["n0"] = true
 	f.failStop["n1"] = true
 
@@ -167,8 +167,8 @@ func TestServiceStopAggregatesAcrossNodes(t *testing.T) {
 func TestServiceRegistryStopThenCleanLIFO(t *testing.T) {
 	var log []string
 	var reg ServiceRegistry
-	reg.Add(newFakeService("a", &log, []*Node{testNode("n")}))
-	reg.Add(newFakeService("b", &log, []*Node{testNode("n")}))
+	reg.Add(newFakeService("a", &log, []*Node{testNode(t, "n")}))
+	reg.Add(newFakeService("b", &log, []*Node{testNode(t, "n")}))
 
 	// The teardown sequence JobBase drives: stop every service, then clean every
 	// service, each in reverse registration order.
@@ -187,8 +187,8 @@ func TestServiceRegistryStopThenCleanLIFO(t *testing.T) {
 func TestServiceRegistryStopAggregatesAndCleanStillRuns(t *testing.T) {
 	var log []string
 	var reg ServiceRegistry
-	a := newFakeService("a", &log, []*Node{testNode("n")})
-	b := newFakeService("b", &log, []*Node{testNode("n")})
+	a := newFakeService("a", &log, []*Node{testNode(t, "n")})
+	b := newFakeService("b", &log, []*Node{testNode(t, "n")})
 	a.failStop["n"] = true
 	b.failStop["n"] = true
 	reg.Add(a)
@@ -242,7 +242,7 @@ func (c *customStopService) Stop(context.Context) error {
 func TestServiceCanOverrideLifecycle(t *testing.T) {
 	var log []string
 	var reg ServiceRegistry
-	reg.Add(newCustomStopService("custom", &log, []*Node{testNode("n0"), testNode("n1")}))
+	reg.Add(newCustomStopService("custom", &log, []*Node{testNode(t, "n0"), testNode(t, "n1")}))
 
 	if err := reg.StopAll(context.Background()); err != nil {
 		t.Fatalf("StopAll: %v", err)

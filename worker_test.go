@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -212,9 +213,10 @@ func TestRunWorkerDeclarePanicBecomesFailure(t *testing.T) {
 }
 
 func TestRunWorkerRebuildsAndBindsNodes(t *testing.T) {
+	scratch := t.TempDir()
 	a := Assignment{JobID: "wtest.nodes", Nodes: []NodeDescriptor{
-		{Name: "n0", Scratch: "/tmp/torx/n0", Backend: BackendDescriptor{Kind: "local"}},
-		{Name: "n1", Scratch: "/tmp/torx/n1", Backend: BackendDescriptor{Kind: "local"}},
+		{Name: "n0", Scratch: filepath.Join(scratch, "n0"), Backend: BackendDescriptor{Kind: "local"}},
+		{Name: "n1", Scratch: filepath.Join(scratch, "n1"), Backend: BackendDescriptor{Kind: "local"}},
 	}}
 	r := resultOf(runWorker(t, a))
 	if r == nil || r.Status != StatusPass {
@@ -254,7 +256,7 @@ func TestRunWorkerTeardownOnCancel(t *testing.T) {
 
 func TestRunWorkerFlagsDirtyOnTeardownFailure(t *testing.T) {
 	a := Assignment{JobID: "wtest.dirtyteardown", Nodes: []NodeDescriptor{
-		{Name: "n0", Scratch: "/tmp/torx/n0", Backend: BackendDescriptor{Kind: "local"}},
+		{Name: "n0", Scratch: filepath.Join(t.TempDir(), "n0"), Backend: BackendDescriptor{Kind: "local"}},
 	}}
 	r := resultOf(runWorker(t, a))
 	if r == nil || r.Status != StatusFail {

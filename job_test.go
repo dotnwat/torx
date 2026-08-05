@@ -79,7 +79,7 @@ func TestJobContextBind(t *testing.T) {
 	jc.Register(b)
 
 	pool := NewPool([]*Node{
-		testNode("0"), testNode("1"), testNode("2"), testNode("3"), testNode("4"),
+		testNode(t, "0"), testNode(t, "1"), testNode(t, "2"), testNode(t, "3"), testNode(t, "4"),
 	})
 	sub, err := pool.Allocate(jc.PoolSpec())
 	if err != nil {
@@ -98,7 +98,7 @@ func TestJobContextBind(t *testing.T) {
 func TestJobBaseSetupStartsServices(t *testing.T) {
 	var log []string
 	jc := NewJobContext(nil, nil)
-	jc.Register(newFakeService("a", &log, []*Node{testNode("n")}))
+	jc.Register(newFakeService("a", &log, []*Node{testNode(t, "n")}))
 
 	var base JobBase
 	if err := base.Setup(context.Background(), jc); err != nil {
@@ -115,7 +115,7 @@ func TestJobBaseSetupStartsServices(t *testing.T) {
 func TestJobBaseTeardownTearsDownAndRunsFinalizers(t *testing.T) {
 	var log []string
 	jc := NewJobContext(nil, nil)
-	jc.Register(newFakeService("a", &log, []*Node{testNode("n")}))
+	jc.Register(newFakeService("a", &log, []*Node{testNode(t, "n")}))
 	finalized := false
 	jc.Defer(func(context.Context) error { finalized = true; return nil })
 

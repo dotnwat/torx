@@ -106,7 +106,7 @@ func TestExecuteWritesResultsTree(t *testing.T) {
 
 func TestRunWritesResultsTree(t *testing.T) {
 	root := t.TempDir()
-	res := Run(context.Background(), testPool(1), InProcessLauncher{}, sizedRequests(1, 1, nil),
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{}, sizedRequests(1, 1, nil),
 		RunOptions{ResultsDir: root})
 	if !res.Ok() {
 		t.Fatalf("run failed:\n%s", res.Render())
@@ -139,7 +139,7 @@ func TestRunWritesResultsTree(t *testing.T) {
 
 func TestRunTraceHasLifecycle(t *testing.T) {
 	root := t.TempDir()
-	res := Run(context.Background(), testPool(1), InProcessLauncher{},
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{},
 		[]JobRequest{{ID: "ttest.capture"}}, RunOptions{ResultsDir: root})
 	if !res.Ok() {
 		t.Fatalf("run failed:\n%s", res.Render())
@@ -222,7 +222,7 @@ func TestRunSurfacesResultsDirFailure(t *testing.T) {
 	if err := os.WriteFile(file, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res := Run(context.Background(), testPool(1), InProcessLauncher{},
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{},
 		sizedRequests(1, 1, nil), RunOptions{ResultsDir: filepath.Join(file, "results")})
 	if res.PersistErr == "" {
 		t.Errorf("PersistErr empty though the results tree could not be created")
@@ -234,7 +234,7 @@ func TestRunSurfacesResultsDirFailure(t *testing.T) {
 
 func TestRunCollectsServiceArtifacts(t *testing.T) {
 	root := t.TempDir()
-	res := Run(context.Background(), testPool(1), InProcessLauncher{},
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{},
 		[]JobRequest{{ID: "ttest.capture"}}, RunOptions{ResultsDir: root})
 	if !res.Ok() {
 		t.Fatalf("run failed:\n%s", res.Render())

@@ -81,7 +81,7 @@ func TestReadResultsRejectsCorruptRecord(t *testing.T) {
 
 func TestRunReportsEachResult(t *testing.T) {
 	rep := &recordingReporter{}
-	res := Run(context.Background(), testPool(1), InProcessLauncher{}, sizedRequests(3, 1, nil),
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{}, sizedRequests(3, 1, nil),
 		RunOptions{MaxParallel: 1, Reporters: []Reporter{rep}})
 
 	if len(rep.reported) != 3 {
@@ -99,7 +99,7 @@ func TestRunReportsUnschedulable(t *testing.T) {
 	// A job that fails before scheduling (needs 5 nodes, pool has 1) is still
 	// reported, not just returned in the aggregate.
 	rep := &recordingReporter{}
-	Run(context.Background(), testPool(1), InProcessLauncher{}, sizedRequests(1, 5, nil),
+	Run(context.Background(), testPool(t, 1), InProcessLauncher{}, sizedRequests(1, 5, nil),
 		RunOptions{Reporters: []Reporter{rep}})
 
 	if len(rep.reported) != 1 || rep.reported[0].Status != StatusFail {
@@ -131,7 +131,7 @@ func (failWriter) Write([]byte) (int, error) { return 0, errors.New("write faile
 func TestRunSurfacesReporterWriteFailure(t *testing.T) {
 	// The job itself passes; only the reporter's write fails. The run must report
 	// the persistence failure rather than exiting as a clean success.
-	res := Run(context.Background(), testPool(1), InProcessLauncher{}, sizedRequests(1, 1, nil),
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{}, sizedRequests(1, 1, nil),
 		RunOptions{Reporters: []Reporter{ConsoleReporter{W: failWriter{}}}})
 	if res.PersistErr == "" {
 		t.Errorf("PersistErr empty though a reporter write failed")

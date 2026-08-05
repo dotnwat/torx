@@ -50,10 +50,11 @@ func (*dtestJob) Run(ctx context.Context, jc *JobContext) error {
 	return nil
 }
 
-func testPool(n int) *Pool {
+func testPool(t *testing.T, n int) *Pool {
+	t.Helper()
 	nodes := make([]*Node, n)
 	for i := range nodes {
-		nodes[i] = testNode(fmt.Sprintf("n%d", i))
+		nodes[i] = testNode(t, fmt.Sprintf("n%d", i))
 	}
 	return NewPool(nodes)
 }
@@ -71,7 +72,7 @@ func sizedRequests(n, size int, extra Params) []JobRequest {
 }
 
 func TestRunSchedulesAllJobs(t *testing.T) {
-	res := Run(context.Background(), testPool(2), InProcessLauncher{}, sizedRequests(5, 1, nil), RunOptions{MaxParallel: 2})
+	res := Run(context.Background(), testPool(t, 2), InProcessLauncher{}, sizedRequests(5, 1, nil), RunOptions{MaxParallel: 2})
 	if len(res.Jobs) != 5 {
 		t.Fatalf("ran %d jobs, want 5", len(res.Jobs))
 	}
@@ -89,7 +90,7 @@ func TestSizeJobRecoversDeclarePanic(t *testing.T) {
 }
 
 func TestRunFailsDeclarePanicWithoutCrashing(t *testing.T) {
-	res := Run(context.Background(), testPool(1), InProcessLauncher{}, []JobRequest{{ID: "wtest.declarepanic"}}, RunOptions{})
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{}, []JobRequest{{ID: "wtest.declarepanic"}}, RunOptions{})
 	if len(res.Jobs) != 1 {
 		t.Fatalf("got %d job results, want 1", len(res.Jobs))
 	}
@@ -104,7 +105,7 @@ func TestRunRespectsParallelismCap(t *testing.T) {
 
 	// Pool (4) is larger than MaxParallel (2), so concurrency is bounded by
 	// MaxParallel, not the pool.
-	res := Run(context.Background(), testPool(4), InProcessLauncher{}, sizedRequests(6, 1, Params{"track": true}), RunOptions{MaxParallel: 2})
+	res := Run(context.Background(), testPool(t, 4), InProcessLauncher{}, sizedRequests(6, 1, Params{"track": true}), RunOptions{MaxParallel: 2})
 	if len(res.Jobs) != 6 || !res.Ok() {
 		t.Fatalf("jobs=%d ok=%v", len(res.Jobs), res.Ok())
 	}
@@ -115,21 +116,21 @@ func TestRunRespectsParallelismCap(t *testing.T) {
 
 func TestRunUnschedulable(t *testing.T) {
 	// Needs 5 nodes; pool has 2.
-	res := Run(context.Background(), testPool(2), InProcessLauncher{}, sizedRequests(1, 5, nil), RunOptions{})
+	res := Run(context.Background(), testPool(t, 2), InProcessLauncher{}, sizedRequests(1, 5, nil), RunOptions{})
 	if len(res.Jobs) != 1 || res.Jobs[0].Status != StatusFail {
 		t.Fatalf("result = %+v, want one FAIL", res.Jobs)
 	}
 }
 
 func TestRunUnknownJob(t *testing.T) {
-	res := Run(context.Background(), testPool(1), InProcessLauncher{}, []JobRequest{{ID: "dtest.nope"}}, RunOptions{})
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{}, []JobRequest{{ID: "dtest.nope"}}, RunOptions{})
 	if len(res.Jobs) != 1 || res.Jobs[0].Status != StatusFail {
 		t.Fatalf("result = %+v, want one FAIL", res.Jobs)
 	}
 }
 
 func TestRunDeadline(t *testing.T) {
-	res := Run(context.Background(), testPool(1), InProcessLauncher{},
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{},
 		sizedRequests(1, 1, Params{"block": true}),
 		RunOptions{Timeout: 50 * time.Millisecond})
 	if len(res.Jobs) != 1 || res.Jobs[0].Status != StatusFail {
@@ -143,7 +144,7 @@ func TestRunExitFirst(t *testing.T) {
 		{ID: "dtest.job", Params: Params{"size": 1}},
 		{ID: "dtest.job", Params: Params{"size": 1}},
 	}
-	res := Run(context.Background(), testPool(1), InProcessLauncher{}, reqs, RunOptions{MaxParallel: 1, ExitFirst: true})
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{}, reqs, RunOptions{MaxParallel: 1, ExitFirst: true})
 	if len(res.Jobs) != 1 {
 		t.Fatalf("ran %d jobs, want 1 (exit-first stops scheduling)", len(res.Jobs))
 	}
@@ -158,7 +159,7 @@ func TestRunPartialResultOnCancel(t *testing.T) {
 
 	ch := make(chan SuiteResult, 1)
 	go func() {
-		ch <- Run(ctx, testPool(2), InProcessLauncher{}, reqs, RunOptions{MaxParallel: 2})
+		ch <- Run(ctx, testPool(t, 2), InProcessLauncher{}, reqs, RunOptions{MaxParallel: 2})
 	}()
 
 	time.Sleep(30 * time.Millisecond) // let 2 jobs launch and block
@@ -179,7 +180,7 @@ func TestRunPreCancelledReportsFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled: the scheduler launches nothing
 
-	res := Run(ctx, testPool(1), InProcessLauncher{}, sizedRequests(3, 1, nil), RunOptions{})
+	res := Run(ctx, testPool(t, 1), InProcessLauncher{}, sizedRequests(3, 1, nil), RunOptions{})
 	if !res.Cancelled {
 		t.Errorf("res.Cancelled = false, want true for a pre-cancelled run")
 	}
@@ -189,7 +190,7 @@ func TestRunPreCancelledReportsFailure(t *testing.T) {
 }
 
 func TestRunNotCancelledOnCleanRun(t *testing.T) {
-	res := Run(context.Background(), testPool(2), InProcessLauncher{}, sizedRequests(3, 1, nil), RunOptions{MaxParallel: 2})
+	res := Run(context.Background(), testPool(t, 2), InProcessLauncher{}, sizedRequests(3, 1, nil), RunOptions{MaxParallel: 2})
 	if res.Cancelled {
 		t.Errorf("res.Cancelled = true for a run that completed normally")
 	}
@@ -207,7 +208,7 @@ func (dirtyLauncher) Launch(_ context.Context, a Assignment, _ EventSink) (JobRe
 }
 
 func TestRunEvictsDirtyNode(t *testing.T) {
-	pool := testPool(1)
+	pool := testPool(t, 1)
 	res := Run(context.Background(), pool, dirtyLauncher{}, sizedRequests(1, 1, nil), RunOptions{})
 	if len(res.Jobs) != 1 || res.Jobs[0].Status != StatusFail {
 		t.Fatalf("result = %+v, want one FAIL", res.Jobs)
@@ -219,7 +220,7 @@ func TestRunEvictsDirtyNode(t *testing.T) {
 }
 
 func TestRunFailsStrandedJobsWhenPoolShrinks(t *testing.T) {
-	pool := testPool(1)
+	pool := testPool(t, 1)
 	// Two jobs share one node; the first is dirty and evicts it, so the second can
 	// never be scheduled and must be recorded as a failure rather than dropped.
 	res := Run(context.Background(), pool, dirtyLauncher{}, sizedRequests(2, 1, nil), RunOptions{MaxParallel: 1})
@@ -238,7 +239,7 @@ func TestRunFailsStrandedJobsWhenPoolShrinks(t *testing.T) {
 
 func TestRunForwardsEventsTaggedBySource(t *testing.T) {
 	var sink InMemoryEventSink
-	Run(context.Background(), testPool(1), InProcessLauncher{},
+	Run(context.Background(), testPool(t, 1), InProcessLauncher{},
 		[]JobRequest{{ID: "wtest.pass"}}, RunOptions{Sink: &sink})
 
 	tagged := false

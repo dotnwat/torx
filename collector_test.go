@@ -36,7 +36,7 @@ func TestCollect(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(nodeDir, "ondemand.log"), []byte("b"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	n := testNode("n0") // LocalBackend: node paths are local paths
+	n := testNode(t, "n0") // LocalBackend: node paths are local paths
 	artifacts := []Artifact{
 		{Name: "always.log", Path: filepath.Join(nodeDir, "always.log"), CollectOnPass: true},
 		{Name: "ondemand.log", Path: filepath.Join(nodeDir, "ondemand.log"), CollectOnPass: false},
