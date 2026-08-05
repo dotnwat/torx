@@ -44,23 +44,60 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 	id := variantID(a.JobID, a.Params)
 
 	// When the run persists results, give the job its own directory and tee its
-	// event stream into the on-disk trace alongside the caller's sink.
-	jobDir := jobResultsDir(a.Session.ResultsDir, id)
-	if jobDir != "" {
-		if trace, err := newTraceSink(jobDir); err == nil {
-			defer trace.Close()
-			sink = teeSink{sinks: []EventSink{sink, trace}}
+	// event stream into the on-disk trace alongside the caller's sink. A
+	// persistence failure here -- the directory or the trace files could not be
+	// created -- must not pass silently: the job would report its own status
+	// while its slice of the requested results tree is missing. Such failures
+	// accumulate into the result's PersistErr instead of failing the job.
+	var persistErrs []string
+	notePersist := func(err error) {
+		if err != nil {
+			persistErrs = append(persistErrs, err.Error())
 		}
 	}
+	jobDir, dirErr := jobResultsDir(a.Session.ResultsDir, id)
+	notePersist(dirErr)
+	var trace *traceSink
+	if jobDir != "" {
+		if ts, err := newTraceSink(jobDir); err == nil {
+			trace = ts
+			sink = teeSink{sinks: []EventSink{sink, ts}}
+		} else {
+			notePersist(err)
+		}
+	}
+	// The trace is closed in finish, before the result is finalized, so trace
+	// write and close failures join PersistErr. This backstop only covers a
+	// panic escaping past finish.
+	defer func() {
+		if trace != nil {
+			_ = trace.Close()
+		}
+	}()
 	// Carry the sink on the context so lifecycle and service code can narrate
 	// into the trace; tag the worker's own lines, which services override with
 	// their own name as they act.
 	ctx = WithComponent(WithSink(ctx, sink), "worker")
 
-	fail := func(err error) JobResult {
-		res := JobResult{ID: id, Status: StatusFail, Start: start, Stop: time.Now(), Error: errorInfo(err)}
-		writeResultJSON(jobDir, res)
+	// finish closes the trace -- the job's last event has been emitted by the
+	// time any path reaches it -- and stamps the persistence failures seen so
+	// far into the result, then writes result.json. When that write itself
+	// fails, its error cannot land in the file that failed; it is carried on
+	// the streamed result alone, which is how the driver learns of it.
+	finish := func(res JobResult) JobResult {
+		if trace != nil {
+			notePersist(trace.Close())
+			trace = nil
+		}
+		res.PersistErr = strings.Join(persistErrs, "; ")
+		if err := writeResultJSON(jobDir, res); err != nil {
+			notePersist(err)
+			res.PersistErr = strings.Join(persistErrs, "; ")
+		}
 		return res
+	}
+	fail := func(err error) JobResult {
+		return finish(JobResult{ID: id, Status: StatusFail, Start: start, Stop: time.Now(), Error: errorInfo(err)})
 	}
 
 	factory, ok := lookupJob(a.JobID)
@@ -90,9 +127,7 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 	Emit(ctx, Event{Kind: EventRunning, Source: id})
 	Logf(ctx, "info", "bound %d node(s): %s", len(nodes), nodeList(nodes))
 
-	res := runJob(ctx, start, id, job, jc)
-	writeResultJSON(jobDir, res)
-	return res
+	return finish(runJob(ctx, start, id, job, jc))
 }
 
 // nodeList renders bound nodes as "name (role), name, ..." for the trace.

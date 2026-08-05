@@ -9,6 +9,8 @@
 package torx
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -35,6 +37,11 @@ type traceSink struct {
 	events *os.File
 	human  *os.File
 	enc    *json.Encoder
+	// err is the first write failure. Emit sites cannot act on an error (see
+	// EventSink), so it is retained and surfaced by Close: a trace that opened
+	// fine and then truncated -- a disk that filled mid-run -- must still be
+	// reported, not pass for a complete record.
+	err error
 }
 
 // newTraceSink opens the trace files in dir.
@@ -51,23 +58,34 @@ func newTraceSink(dir string) (*traceSink, error) {
 	return &traceSink{events: events, human: human, enc: json.NewEncoder(events)}, nil
 }
 
-// Emit appends the event to both trace files.
+// Emit appends the event to both trace files, retaining the first failure.
 func (s *traceSink) Emit(e Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.enc.Encode(e)
-	fmt.Fprintln(s.human, renderEvent(e))
+	if err := s.enc.Encode(e); err != nil && s.err == nil {
+		s.err = err
+	}
+	if _, err := fmt.Fprintln(s.human, renderEvent(e)); err != nil && s.err == nil {
+		s.err = err
+	}
 }
 
-// Close closes the trace files.
+// Close closes the trace files and reports the first error the trace hit: a
+// write that failed mid-run, or the closes themselves.
 func (s *traceSink) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	err := s.events.Close()
+	err := s.err
+	if cerr := s.events.Close(); err == nil {
+		err = cerr
+	}
 	if cerr := s.human.Close(); err == nil {
 		err = cerr
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("results: trace: %w", err)
+	}
+	return nil
 }
 
 // renderEvent formats an event as one human-readable test_log line:
@@ -124,27 +142,71 @@ func sanitizeID(id string) string {
 	return b.String()
 }
 
-// jobResultsDir creates and returns the per-job directory under runDir, or "" if
-// runDir is empty or the directory cannot be created.
-func jobResultsDir(runDir, id string) string {
-	if runDir == "" {
-		return ""
+// A variant directory name is bounded: filesystems cap a path component
+// (commonly 255 bytes), while variant ids grow without bound as parameters are
+// added. maxVariantDirName is the ceiling on the component torx emits, and
+// variantDigestHexLen is how much of the full id's hex SHA-256 a bounded name
+// carries.
+const (
+	maxVariantDirName   = 200
+	variantDigestHexLen = 32
+)
+
+// variantDirName maps a variant id to its results-directory component. An id
+// whose sanitized form fits maxVariantDirName is used as-is. A longer id
+// becomes a readable prefix of the sanitized form plus the truncated hex
+// SHA-256 of the full id, joined by "%-". The two forms can never collide:
+// sanitizeID emits '%' only as an escape followed by two hex digits, so no
+// unbounded name contains "%-", and two bounded names agree only when their
+// digests -- and so, collisions aside, their full ids -- agree. The full id is
+// not recoverable from a bounded name; result.json inside the directory
+// carries it.
+func variantDirName(id string) string {
+	s := sanitizeID(id)
+	if len(s) <= maxVariantDirName {
+		return s
 	}
-	dir := filepath.Join(runDir, sanitizeID(id))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return ""
+	sum := sha256.Sum256([]byte(id))
+	digest := hex.EncodeToString(sum[:])[:variantDigestHexLen]
+	prefix := s[:maxVariantDirName-len(digest)-2]
+	// Do not cut a percent-escape in half: drop a trailing "%" or "%X" fragment.
+	if n := len(prefix); prefix[n-1] == '%' {
+		prefix = prefix[:n-1]
+	} else if n >= 2 && prefix[n-2] == '%' {
+		prefix = prefix[:n-2]
 	}
-	return dir
+	return prefix + "%-" + digest
 }
 
-// writeResultJSON writes res as result.json in dir, best-effort; dir == "" skips.
-func writeResultJSON(dir string, res JobResult) {
+// jobResultsDir creates and returns the per-variant directory under runDir. It
+// returns "" with a nil error when runDir is empty (the run is not persisting
+// results); an error means the run wanted the directory and it could not be
+// created.
+func jobResultsDir(runDir, id string) (string, error) {
+	if runDir == "" {
+		return "", nil
+	}
+	dir := filepath.Join(runDir, variantDirName(id))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("results: create variant directory: %w", err)
+	}
+	return dir, nil
+}
+
+// writeResultJSON writes res as result.json in dir; dir == "" (the run is not
+// persisting results) is a no-op.
+func writeResultJSON(dir string, res JobResult) error {
 	if dir == "" {
-		return
+		return nil
 	}
-	if b, err := json.MarshalIndent(res, "", "  "); err == nil {
-		_ = os.WriteFile(filepath.Join(dir, "result.json"), b, 0o644)
+	b, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return fmt.Errorf("results: encode result.json: %w", err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "result.json"), b, 0o644); err != nil {
+		return fmt.Errorf("results: %w", err)
+	}
+	return nil
 }
 
 // makeRunDir creates a unique run directory under root, names it after stamp,

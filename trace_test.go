@@ -74,6 +74,33 @@ func TestRenderEvent(t *testing.T) {
 	}
 }
 
+func TestTraceSinkSurfacesWriteFailure(t *testing.T) {
+	// Reopen the trace files read-only, so every write fails the way it would on
+	// a disk that filled up (or started erroring) after the files were opened. A
+	// trace that opens and then silently truncates must be reported: the write
+	// failure has to come back from Close, which is how it reaches PersistErr.
+	dir := t.TempDir()
+	for _, name := range []string{"events.ndjson", "test_log"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := os.Open(filepath.Join(dir, "events.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	human, err := os.Open(filepath.Join(dir, "test_log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &traceSink{events: events, human: human, enc: json.NewEncoder(events)}
+
+	s.Emit(Event{Kind: EventLog, Message: "lost", Time: time.Now()})
+	if err := s.Close(); err == nil {
+		t.Errorf("Close = nil though every trace write failed")
+	}
+}
+
 func TestExecuteWritesResultsTree(t *testing.T) {
 	runDir := t.TempDir()
 	a := Assignment{JobID: "wtest.pass", Session: SessionConfig{ResultsDir: runDir}}
@@ -168,6 +195,116 @@ func TestRunTraceHasLifecycle(t *testing.T) {
 		if !strings.Contains(string(log), want) {
 			t.Errorf("test_log missing %q:\n%s", want, log)
 		}
+	}
+}
+
+func TestVariantDirNameShortUnchanged(t *testing.T) {
+	// An id whose sanitized form fits the bound keeps it verbatim, so existing
+	// results trees keep their readable directory names.
+	id := `j[p="a/b"]`
+	if got, want := variantDirName(id), sanitizeID(id); got != want {
+		t.Errorf("short id renamed: got %q, want %q", got, want)
+	}
+}
+
+func TestVariantDirNameBounded(t *testing.T) {
+	long := `j[p="` + strings.Repeat("x", 400) + `1"]`
+	name := variantDirName(long)
+	if len(name) > maxVariantDirName {
+		t.Errorf("bounded name is %d bytes, want <= %d", len(name), maxVariantDirName)
+	}
+	if name != variantDirName(long) {
+		t.Errorf("variantDirName is not deterministic")
+	}
+	// Two ids that differ only beyond the readable prefix must still get
+	// distinct directories; only the digest distinguishes them.
+	other := `j[p="` + strings.Repeat("x", 400) + `2"]`
+	if variantDirName(other) == name {
+		t.Errorf("ids differing past the prefix mapped to the same directory %q", name)
+	}
+}
+
+func TestVariantDirNameEscapeNotSplit(t *testing.T) {
+	// "ab" then slashes: every slash sanitizes to a three-byte escape, and the
+	// two-byte lead misaligns the prefix cut so it would land mid-escape. The
+	// prefix must hold only whole escapes.
+	name := variantDirName("ab" + strings.Repeat("/", 400))
+	sep := strings.LastIndex(name, "%-")
+	if sep < 0 {
+		t.Fatalf("bounded name %q has no %%- separator", name)
+	}
+	prefix := name[:sep]
+	for i := 0; i < len(prefix); i++ {
+		if prefix[i] == '%' {
+			if i+2 >= len(prefix) {
+				t.Fatalf("prefix %q ends in a split escape", prefix)
+			}
+			i += 2
+		}
+	}
+}
+
+// TestExecuteOversizedVariantID is the regression test for variant ids longer
+// than the filesystem's name limit. Deriving the directory from the raw id used
+// to fail with ENAMETOOLONG, and the failure was swallowed: the job passed
+// while writing no result.json, no trace, and no artifacts.
+func TestExecuteOversizedVariantID(t *testing.T) {
+	runDir := t.TempDir()
+	params := Params{"p": strings.Repeat("x", 300)}
+	a := Assignment{JobID: "wtest.pass", Params: params, Session: SessionConfig{ResultsDir: runDir}}
+
+	res := execute(context.Background(), a, discardSink{})
+	if res.Status != StatusPass {
+		t.Fatalf("status = %v, want PASS", res.Status)
+	}
+	if res.PersistErr != "" {
+		t.Fatalf("PersistErr = %q, want empty", res.PersistErr)
+	}
+
+	entries, err := os.ReadDir(runDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("run dir entries = %v (err %v), want exactly the variant directory", entries, err)
+	}
+	name := entries[0].Name()
+	if len(name) > maxVariantDirName {
+		t.Errorf("variant directory name is %d bytes, want <= %d", len(name), maxVariantDirName)
+	}
+
+	b, err := os.ReadFile(filepath.Join(runDir, name, "result.json"))
+	if err != nil {
+		t.Fatalf("result.json missing: %v", err)
+	}
+	var got JobResult
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("result.json: %v", err)
+	}
+	if want := variantID("wtest.pass", params); got.ID != want {
+		t.Errorf("result.json id = %q, want the full variant id %q", got.ID, want)
+	}
+}
+
+func TestExecuteSurfacesPersistFailure(t *testing.T) {
+	// A results dir that is a regular file: the variant directory cannot be
+	// created underneath it. The job itself still passes; the missing results
+	// must be visible on the result and fail the suite.
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := Assignment{JobID: "wtest.pass", Session: SessionConfig{ResultsDir: file}}
+
+	res := execute(context.Background(), a, discardSink{})
+	if res.Status != StatusPass {
+		t.Fatalf("status = %v, want PASS (the job itself succeeded)", res.Status)
+	}
+	if res.PersistErr == "" {
+		t.Errorf("PersistErr empty though the variant directory could not be created")
+	}
+	if !strings.Contains(res.Render(), "results not persisted") {
+		t.Errorf("Render() does not surface the persistence failure:\n%s", res.Render())
+	}
+	if (SuiteResult{Jobs: []JobResult{res}}).Ok() {
+		t.Errorf("suite with an unpersisted job reported Ok")
 	}
 }
 

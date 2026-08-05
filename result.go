@@ -136,6 +136,11 @@ type JobResult struct {
 	// running or data may be stale. The driver quarantines such a node instead of
 	// returning it to the free set, so it cannot contaminate a later job.
 	Dirty bool `json:"dirty,omitempty"`
+	// PersistErr is set when the run was persisting results but this job's slice
+	// of the tree could not be fully written: its directory, its trace files, or
+	// its result.json failed. Status still reflects what the job itself did, but
+	// the suite is not Ok, since results the run was asked for are missing.
+	PersistErr string `json:"persist_error,omitempty"`
 }
 
 // Duration is the wall-clock time the job took.
@@ -152,6 +157,9 @@ func (r JobResult) Render() string {
 	}
 	if r.Error != nil {
 		fmt.Fprintf(&b, "\n        %s", r.Error.Message)
+	}
+	if r.PersistErr != "" {
+		fmt.Fprintf(&b, "\n        results not persisted: %s", r.PersistErr)
 	}
 	return b.String()
 }
@@ -181,13 +189,15 @@ func (s SuiteResult) Counts() map[Status]int {
 
 // Ok reports whether the run completed with no failures. A cancelled run is
 // never Ok even if every job it managed to run passed, since the rest never ran.
-// Ignored and flaky jobs do not count as failures.
+// Ignored and flaky jobs do not count as failures; a job whose results could not
+// be persisted does, no matter its own status, since results the run was asked
+// for are missing.
 func (s SuiteResult) Ok() bool {
 	if s.Cancelled || s.PersistErr != "" {
 		return false
 	}
 	for _, j := range s.Jobs {
-		if j.Status == StatusFail {
+		if j.Status == StatusFail || j.PersistErr != "" {
 			return false
 		}
 	}
