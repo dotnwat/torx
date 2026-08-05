@@ -157,16 +157,16 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 	var pending []plan
 	for _, req := range requests {
 		if req.discErr != nil {
-			record(failResult(variantID(req.ID, req.Params), req.discErr))
+			record(failResult(variantID(req.ID, req.Params), req.Params, req.discErr))
 			continue
 		}
 		spec, err := sizeJob(req)
 		if err != nil {
-			record(failResult(variantID(req.ID, req.Params), err))
+			record(failResult(variantID(req.ID, req.Params), req.Params, err))
 			continue
 		}
 		if !pool.CanEverFit(spec) {
-			record(failResult(variantID(req.ID, req.Params),
+			record(failResult(variantID(req.ID, req.Params), req.Params,
 				fmt.Errorf("driver: job needs %d node(s), pool cannot satisfy it", spec.Size())))
 			continue
 		}
@@ -195,7 +195,7 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 			pending = append(pending[:idx], pending[idx+1:]...)
 			sub, err := pool.Allocate(p.spec)
 			if err != nil {
-				record(failResult(variantID(p.req.ID, p.req.Params), err))
+				record(failResult(variantID(p.req.ID, p.req.Params), p.req.Params, err))
 				continue
 			}
 			active++
@@ -220,7 +220,7 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 	// failure for those so they are not silently dropped.
 	if !stop {
 		for _, pl := range pending {
-			record(failResult(variantID(pl.req.ID, pl.req.Params),
+			record(failResult(variantID(pl.req.ID, pl.req.Params), pl.req.Params,
 				fmt.Errorf("driver: no clean nodes remain; some were quarantined after teardown could not be confirmed")))
 		}
 	}
@@ -266,7 +266,7 @@ func runOne(ctx context.Context, pool *Pool, launcher WorkerLauncher, req JobReq
 	if err != nil {
 		// A launch-level error means the worker could not be spawned, so the node
 		// was never touched and stays clean.
-		res = failResult(id, err)
+		res = failResult(id, req.Params, err)
 	}
 	// A dirty result is one whose node could not be confirmed clean; quarantine it
 	// rather than returning it to the free set, where it could contaminate a later
@@ -329,6 +329,9 @@ func descriptorOf(n *Node) NodeDescriptor {
 	return d
 }
 
-func failResult(id string, err error) JobResult {
-	return JobResult{ID: id, Status: StatusFail, Error: ErrorInfoFrom(err)}
+// failResult is a result for a variant that failed at the driver, before any
+// worker ran. It still carries the variant's parameters, so even a job that
+// never started yields its machine-readable configuration.
+func failResult(id string, params Params, err error) JobResult {
+	return JobResult{ID: id, Params: params, Status: StatusFail, Error: ErrorInfoFrom(err)}
 }

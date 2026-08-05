@@ -124,7 +124,12 @@ func ErrorInfoFrom(err error) *ErrorInfo {
 // author-written one-line headline for the human report. Large or custom
 // outputs (raw histograms, CSVs) belong in collected artifacts, not Data.
 type JobResult struct {
-	ID      string          `json:"id"`
+	ID string `json:"id"`
+	// Params is the parameter set the variant ran with. It is recorded on every
+	// result, passing or failing -- a variant that failed before its worker even
+	// started still yields its machine-readable configuration -- so a consumer
+	// joins results on recorded parameters rather than parsing the encoded ID.
+	Params  Params          `json:"params,omitempty"`
 	Status  Status          `json:"status"`
 	Start   time.Time       `json:"start"`
 	Stop    time.Time       `json:"stop"`

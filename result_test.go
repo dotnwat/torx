@@ -59,6 +59,7 @@ func TestSuiteResultJSONRoundTrip(t *testing.T) {
 	suite := SuiteResult{Jobs: []JobResult{
 		{
 			ID:      "pkg.Bench",
+			Params:  Params{"clients": 50},
 			Status:  StatusPass,
 			Start:   start,
 			Stop:    start.Add(1200 * time.Millisecond),
@@ -91,6 +92,9 @@ func TestSuiteResultJSONRoundTrip(t *testing.T) {
 	}
 	if got.Jobs[0].Summary != "12345 ops/s" {
 		t.Errorf("summary lost: %q", got.Jobs[0].Summary)
+	}
+	if got.Jobs[0].Params.Int("clients", 0) != 50 {
+		t.Errorf("params lost: %+v", got.Jobs[0].Params)
 	}
 
 	// Data is carried verbatim and stays valid JSON the core never interprets.

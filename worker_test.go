@@ -176,6 +176,30 @@ func TestRunWorkerFail(t *testing.T) {
 	}
 }
 
+func TestRunWorkerResultCarriesParams(t *testing.T) {
+	r := resultOf(runWorker(t, Assignment{JobID: "wtest.pass", Params: Params{"n": 1, "mode": "fast"}}))
+	if r == nil || r.Status != StatusPass {
+		t.Fatalf("result = %+v, want PASS", r)
+	}
+	// Params cross the wire as JSON, so numbers arrive as float64; the typed
+	// getters absorb that.
+	if r.Params.Int("n", 0) != 1 || r.Params.String("mode", "") != "fast" {
+		t.Errorf("result params = %+v, want n=1 mode=fast", r.Params)
+	}
+}
+
+func TestRunWorkerEarlyFailureCarriesParams(t *testing.T) {
+	// Even a variant that fails before its job is constructed records its
+	// configuration, so the result is attributable without decoding the id.
+	r := resultOf(runWorker(t, Assignment{JobID: "wtest.does-not-exist", Params: Params{"n": 2}}))
+	if r == nil || r.Status != StatusFail {
+		t.Fatalf("result = %+v, want FAIL", r)
+	}
+	if r.Params.Int("n", 0) != 2 {
+		t.Errorf("failed result params = %+v, want n=2", r.Params)
+	}
+}
+
 func TestRunWorkerUnknownJob(t *testing.T) {
 	r := resultOf(runWorker(t, Assignment{JobID: "wtest.does-not-exist"}))
 	if r == nil || r.Status != StatusFail {

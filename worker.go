@@ -80,15 +80,19 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 	ctx = WithComponent(WithSink(ctx, sink), "worker")
 
 	// finish closes the trace -- the job's last event has been emitted by the
-	// time any path reaches it -- and stamps the persistence failures seen so
-	// far into the result, then writes result.json. When that write itself
-	// fails, its error cannot land in the file that failed; it is carried on
-	// the streamed result alone, which is how the driver learns of it.
+	// time any path reaches it -- and stamps the variant's parameters and the
+	// persistence failures seen so far into the result, then writes
+	// result.json. Every result carries the parameters, passing or failing, so
+	// a consumer never has to decode them from the id. When the result.json
+	// write itself fails, its error cannot land in the file that failed; it is
+	// carried on the streamed result alone, which is how the driver learns of
+	// it.
 	finish := func(res JobResult) JobResult {
 		if trace != nil {
 			notePersist(trace.Close())
 			trace = nil
 		}
+		res.Params = a.Params
 		res.PersistErr = strings.Join(persistErrs, "; ")
 		if err := writeResultJSON(jobDir, res); err != nil {
 			notePersist(err)

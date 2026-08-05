@@ -122,6 +122,19 @@ func TestRunUnschedulable(t *testing.T) {
 	}
 }
 
+func TestRunFailResultsCarryParams(t *testing.T) {
+	// A variant that fails at the driver, before any worker runs (here: the pool
+	// can never fit it), still records its parameters, so even a job that never
+	// started is attributable without decoding its id.
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{}, sizedRequests(1, 5, nil), RunOptions{})
+	if len(res.Jobs) != 1 || res.Jobs[0].Status != StatusFail {
+		t.Fatalf("result = %+v, want one FAIL", res.Jobs)
+	}
+	if res.Jobs[0].Params.Int("size", 0) != 5 {
+		t.Errorf("failed result params = %+v, want size=5", res.Jobs[0].Params)
+	}
+}
+
 func TestRunUnknownJob(t *testing.T) {
 	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{}, []JobRequest{{ID: "dtest.nope"}}, RunOptions{})
 	if len(res.Jobs) != 1 || res.Jobs[0].Status != StatusFail {

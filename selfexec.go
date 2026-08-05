@@ -124,7 +124,7 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	if !haveResult {
 		// The worker died before reporting a result, so its teardown never
 		// completed: mark the node dirty so the driver quarantines it.
-		res := failResult(variantID(a.JobID, a.Params), fmt.Errorf("driver: worker produced no result: %v", waitErr))
+		res := failResult(variantID(a.JobID, a.Params), a.Params, fmt.Errorf("driver: worker produced no result: %v", waitErr))
 		res.Dirty = true
 		return res, nil
 	}
