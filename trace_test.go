@@ -3,6 +3,7 @@ package torx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -348,6 +349,67 @@ func TestMakeRunDirUnique(t *testing.T) {
 	}
 	if target != filepath.Base(d2) {
 		t.Errorf("latest -> %q, want %q", target, filepath.Base(d2))
+	}
+}
+
+func TestRunUsesExactRunDir(t *testing.T) {
+	// The launcher handshake: the caller creates the run directory and writes
+	// its metadata into it before the run; torx uses the directory exactly as
+	// given and fills in the per-variant subdirectories and run.json.
+	runDir := t.TempDir()
+	marker := filepath.Join(runDir, "invocation.json")
+	if err := os.WriteFile(marker, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{},
+		sizedRequests(1, 1, nil), RunOptions{RunDir: runDir})
+	if !res.Ok() {
+		t.Fatalf("run failed:\n%s", res.Render())
+	}
+
+	if _, err := os.Stat(filepath.Join(runDir, "run.json")); err != nil {
+		t.Errorf("run.json missing from the exact run dir: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(runDir, "latest")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("latest symlink present in run-dir mode (stat err %v)", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("launcher metadata lost: %v", err)
+	}
+	foundJob := false
+	entries, _ := os.ReadDir(runDir)
+	for _, e := range entries {
+		if e.IsDir() {
+			if _, err := os.Stat(filepath.Join(runDir, e.Name(), "result.json")); err == nil {
+				foundJob = true
+			}
+		}
+	}
+	if !foundJob {
+		t.Errorf("no per-variant directory with result.json under %s", runDir)
+	}
+}
+
+func TestRunRejectsMissingRunDir(t *testing.T) {
+	// The launcher creates the run directory before the run; a missing one means
+	// the handshake was not honored, and must be surfaced rather than papered
+	// over by quietly creating the directory.
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{},
+		sizedRequests(1, 1, nil), RunOptions{RunDir: filepath.Join(t.TempDir(), "absent")})
+	if res.PersistErr == "" {
+		t.Errorf("PersistErr empty though the run directory does not exist")
+	}
+	if res.Ok() {
+		t.Errorf("run reported Ok despite an unusable run directory")
+	}
+}
+
+func TestRunRunDirAndResultsDirExclusive(t *testing.T) {
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{},
+		sizedRequests(1, 1, nil), RunOptions{RunDir: t.TempDir(), ResultsDir: t.TempDir()})
+	if res.PersistErr == "" || res.Ok() {
+		t.Errorf("conflicting RunDir+ResultsDir not surfaced: persist=%q ok=%v", res.PersistErr, res.Ok())
 	}
 }
 

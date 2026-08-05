@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +105,28 @@ func TestRunReportsUnschedulable(t *testing.T) {
 
 	if len(rep.reported) != 1 || rep.reported[0].Status != StatusFail {
 		t.Errorf("reported = %+v, want one FAIL", rep.reported)
+	}
+}
+
+func TestRunFinishSeesPersistErr(t *testing.T) {
+	// A run-directory failure must reach the reporters' Finish summary -- the
+	// console's closing line is where an operator learns why the exit status is
+	// non-zero -- not only the suite returned to the caller.
+	rep := &recordingReporter{}
+	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{}, sizedRequests(1, 1, nil),
+		RunOptions{RunDir: filepath.Join(t.TempDir(), "absent"), Reporters: []Reporter{rep}})
+	if res.PersistErr == "" {
+		t.Fatalf("PersistErr empty though the run directory does not exist")
+	}
+	if rep.finished == nil || rep.finished.PersistErr == "" {
+		t.Fatalf("Finish saw no PersistErr though the run directory was unusable: %+v", rep.finished)
+	}
+	var buf bytes.Buffer
+	if err := (ConsoleReporter{W: &buf}).Finish(*rep.finished); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "results not persisted") {
+		t.Errorf("console summary %q does not mention the persistence failure", buf.String())
 	}
 }
 

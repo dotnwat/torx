@@ -253,7 +253,20 @@ go run ./path/to/suite -nodes 3 'my\..*'
 
 Useful flags: `-nodes N` (local pool size), `-parallel N` (concurrent jobs),
 `-results <file>` (newline-delimited JSON results), `-results-dir <dir>` (the
-per-run tree; empty to disable), and `-pool <manifest.json>` (below).
+per-run tree; empty to disable), `-run-dir <dir>` (below), and
+`-pool <manifest.json>` (below).
+
+**Launchers and `-run-dir`.** A tool that wraps a suite — building it, writing
+an invocation record, archiving the run's inputs — needs to know the exact run
+directory before the run starts: resolving the `latest` symlink afterwards
+races concurrent runs, and an interrupted run would leave the metadata with no
+home at all. Such a launcher creates the run directory itself, writes its
+metadata into it, and then invokes the suite with `-run-dir DIR`. torx uses
+the directory exactly as given — no timestamped subdirectory is minted and no
+`latest` symlink is maintained (those conveniences belong to `-results-dir`
+mode) — and fills in the per-variant subdirectories and the final `run.json`.
+The directory must already exist, and `-run-dir` is mutually exclusive with
+`-results-dir`.
 
 **Remote pools.** To run against nodes a provisioner prepared, pass a node
 manifest with `-pool` and blank-import the ssh backend in your suite's `main` so

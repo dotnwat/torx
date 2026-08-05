@@ -59,8 +59,26 @@ func driverMain(args []string) int {
 	parallel := fs.Int("parallel", 1, "maximum concurrent jobs")
 	resultsPath := fs.String("results", "", "write newline-delimited JSON results to this file")
 	resultsDir := fs.String("results-dir", "results", "write the per-run results tree under this directory (empty to disable)")
+	runDir := fs.String("run-dir", "", "write results into exactly this pre-created directory (mutually exclusive with -results-dir)")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	// -run-dir names the run directory itself; -results-dir a root to mint one
+	// under. Passing both is a contradiction, caught here where "set" is
+	// distinguishable from -results-dir's non-empty default.
+	if *runDir != "" {
+		resultsDirSet := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "results-dir" {
+				resultsDirSet = true
+			}
+		})
+		if resultsDirSet {
+			fmt.Fprintln(os.Stderr, "torx: -run-dir and -results-dir are mutually exclusive")
+			return 2
+		}
+		*resultsDir = ""
 	}
 
 	// Positional arguments select jobs by id (regular expressions); with none,
@@ -101,7 +119,7 @@ func driverMain(args []string) int {
 	defer stop()
 
 	res := Run(ctx, pool, SelfExecLauncher{}, requests,
-		RunOptions{MaxParallel: *parallel, Reporters: reporters, ResultsDir: *resultsDir})
+		RunOptions{MaxParallel: *parallel, Reporters: reporters, ResultsDir: *resultsDir, RunDir: *runDir})
 	if !res.Ok() {
 		return 1
 	}

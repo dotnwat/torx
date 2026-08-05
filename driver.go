@@ -15,6 +15,7 @@ package torx
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"time"
 )
@@ -35,9 +36,17 @@ type RunOptions struct {
 	MaxParallel int           // maximum concurrent jobs (default 1)
 	Timeout     time.Duration // per-job timeout; 0 means none
 	ExitFirst   bool          // stop scheduling after the first failure
-	ResultsDir  string        // results root passed to each worker
+	ResultsDir  string        // results root; the run gets a fresh timestamped directory under it
 	Sink        EventSink     // receives every job's events; must be concurrency-safe
 	Reporters   []Reporter    // consume each result as it lands, then the aggregate
+
+	// RunDir, when set, is the run directory itself, used exactly as given: no
+	// timestamped subdirectory is minted and no "latest" symlink is maintained.
+	// It must already exist -- the caller that owns it (a launcher) creates it
+	// and writes its own metadata there before the run starts, so the exact
+	// directory is known and populated even if the run is interrupted.
+	// Mutually exclusive with ResultsDir.
+	RunDir string
 }
 
 // WorkerLauncher runs one job described by an Assignment, forwarding its events
@@ -80,23 +89,40 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 		opts.MaxParallel = 1
 	}
 
-	// Persist the run when a results root is configured: a timestamped run
-	// directory (with a "latest" symlink) whose path workers fill in per job.
+	// Persist the run when a results location is configured: either an exact run
+	// directory handed over by a launcher (RunDir), or a fresh timestamped
+	// directory (with a "latest" symlink) under a results root (ResultsDir).
+	// Failures here do not stop the run -- it proceeds in memory -- but they are
+	// recorded rather than silently turning a requested tree into no results:
+	// Ok() and the CLI exit status must reflect them.
 	runDir := ""
 	persistErr := ""
-	if opts.ResultsDir != "" {
+	switch {
+	case opts.RunDir != "" && opts.ResultsDir != "":
+		// Ambiguous: an exact directory and a minted one were both requested.
+		// Run in memory and surface the conflict rather than guessing.
+		persistErr = "driver: RunDir and ResultsDir are mutually exclusive"
+	case opts.RunDir != "":
+		// The launcher owns this directory and populates it before the run (see
+		// RunOptions.RunDir); a missing one means the handshake was not honored,
+		// not that torx should quietly create it.
+		if fi, err := os.Stat(opts.RunDir); err != nil {
+			persistErr = fmt.Sprintf("run directory: %v", err)
+		} else if !fi.IsDir() {
+			persistErr = fmt.Sprintf("run directory %q is not a directory", opts.RunDir)
+		} else {
+			runDir = opts.RunDir
+		}
+	case opts.ResultsDir != "":
 		stamp := time.Now().UTC().Format("2006-01-02T15-04-05Z")
 		if d, err := makeRunDir(opts.ResultsDir, stamp); err == nil {
 			runDir = d
-			opts.ResultsDir = runDir
 		} else {
-			// The caller asked for a results tree and it could not be created. Run in
-			// memory, but record the failure rather than silently turning a requested
-			// tree into no results: Ok() and the CLI exit status must reflect it.
 			persistErr = fmt.Sprintf("cannot create results tree under %q: %v", opts.ResultsDir, err)
-			opts.ResultsDir = ""
 		}
 	}
+	// Workers receive the run directory itself ("" when the run is in memory).
+	opts.ResultsDir = runDir
 
 	type plan struct {
 		req  JobRequest
@@ -202,8 +228,12 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 	// A cancelled context means scheduling stopped before every request was run,
 	// so the suite is incomplete no matter how the recorded jobs fared. Marking it
 	// here is what keeps Ok() -- and the CLI exit status -- from reporting success
-	// for a run the operator or a deadline cut short.
-	suite := SuiteResult{Jobs: results, Cancelled: ctx.Err() != nil}
+	// for a run the operator or a deadline cut short. The persistence failures
+	// noted so far are stamped before the reporters run, so the console summary
+	// explains a non-zero exit (e.g. an unusable run directory) instead of
+	// closing a run of passing jobs with a clean line; failures from the
+	// reporters themselves are refreshed into the suite afterwards.
+	suite := SuiteResult{Jobs: results, Cancelled: ctx.Err() != nil, PersistErr: persistErr}
 	for _, rep := range opts.Reporters {
 		noteErr(rep.Finish(suite))
 	}
