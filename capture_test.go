@@ -73,6 +73,40 @@ func TestStartCapturedCapturesOutput(t *testing.T) {
 	}
 }
 
+func TestStartCapturedRemovesStaleLog(t *testing.T) {
+	n := captureTestNode(t)
+	svc := NewServiceBase("svc", Homogeneous(1, NodeSpec{}), nil)
+	svc.Bind([]*Node{n})
+
+	// Plant a log at the capture path, as a previous incarnation of the service
+	// would leave behind on a node whose scratch persists across runs.
+	ctx := context.Background()
+	dir := n.ServiceScratch("svc").Root
+	if err := n.Mkdir(ctx, dir); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	logPath := filepath.Join(dir, "stdout.log")
+	if err := n.WriteFile(ctx, logPath, []byte("stale output")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// The launched process produces no output, so any content observed at the
+	// path from here on could only be the stale file.
+	handle, err := svc.StartCaptured(ctx, n, Command("sleep", "30"))
+	if err != nil {
+		t.Fatalf("StartCaptured: %v", err)
+	}
+	defer handle.Close()
+
+	// The stale log is removed before the process is launched, so once
+	// StartCaptured returns a poll of the file must never see a previous
+	// incarnation's output -- only its absence, or the empty file created by
+	// the new process's redirect.
+	if content, err := os.ReadFile(logPath); err == nil && strings.Contains(string(content), "stale output") {
+		t.Errorf("stale log survived StartCaptured: %q", content)
+	}
+}
+
 func TestCollectArtifacts(t *testing.T) {
 	n := captureTestNode(t)
 	ctx := context.Background()

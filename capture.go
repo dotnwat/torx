@@ -21,13 +21,27 @@ import (
 // stdout and stderr redirected to a node-local file (stdout.log under the
 // service's per-node scratch), registers that file as an artifact to collect, and
 // returns a handle whose Close stops and reaps the process. Env, Dir, and Stdin
-// from cmd are applied to the launched process.
+// from cmd are applied to the launched process. A log left at that path by a
+// previous incarnation is removed before the process is launched, so the file
+// only ever holds output of the process just started: a readiness check that
+// polls it (e.g. WaitForLog) cannot be satisfied by stale content, and the
+// collected artifact is never a prior run's output.
 func (b *ServiceBase) StartCaptured(ctx context.Context, n *Node, cmd Cmd) (io.ReadCloser, error) {
 	dir := n.ServiceScratch(b.name).Root
 	if err := n.Mkdir(ctx, dir); err != nil {
 		return nil, err
 	}
 	logPath := filepath.Join(dir, "stdout.log")
+
+	// The removal must complete before the launch: callers may poll the log for
+	// readiness as soon as control returns, while the child performs its
+	// truncating redirect only once the scheduler runs it. A leftover file from
+	// a previous incarnation would satisfy such a poll in that window, letting
+	// the caller proceed (and tear the service down) before the new process has
+	// written anything.
+	if err := n.Rm(ctx, logPath); err != nil {
+		return nil, err
+	}
 
 	Logf(ctx, "info", "exec %s on %s", strings.Join(append([]string{cmd.Path}, cmd.Args...), " "), n.Name())
 
