@@ -2,6 +2,7 @@ package torx
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,8 +74,34 @@ func TestStartCapturedCapturesOutput(t *testing.T) {
 	}
 }
 
+// staleProbeBackend is a Backend whose Stream, instead of launching anything,
+// records whether path still existed at the moment of launch. Checking at the
+// Stream boundary pins StartCaptured's remove-before-launch ordering exactly:
+// a check made after StartCaptured returns could be satisfied by a real
+// child's own truncating redirect and miss a missing removal.
+type staleProbeBackend struct {
+	LocalBackend
+	path          string
+	streamed      bool
+	staleAtLaunch bool
+}
+
+func (b *staleProbeBackend) Stream(ctx context.Context, cmd Cmd) (io.ReadCloser, error) {
+	b.streamed = true
+	if _, err := os.Stat(b.path); err == nil {
+		b.staleAtLaunch = true
+	}
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
 func TestStartCapturedRemovesStaleLog(t *testing.T) {
-	n := captureTestNode(t)
+	probe := &staleProbeBackend{}
+	n := NewNode(NodeConfig{
+		Name:    "n0",
+		Backend: probe,
+		Scratch: MakeScratch(t.TempDir(), "n0"),
+		Ports:   NewPortAllocator(""),
+	})
 	svc := NewServiceBase("svc", Homogeneous(1, NodeSpec{}), nil)
 	svc.Bind([]*Node{n})
 
@@ -85,25 +112,22 @@ func TestStartCapturedRemovesStaleLog(t *testing.T) {
 	if err := n.Mkdir(ctx, dir); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	logPath := filepath.Join(dir, "stdout.log")
-	if err := n.WriteFile(ctx, logPath, []byte("stale output")); err != nil {
+	probe.path = filepath.Join(dir, "stdout.log")
+	if err := n.WriteFile(ctx, probe.path, []byte("stale output")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
-	// The launched process produces no output, so any content observed at the
-	// path from here on could only be the stale file.
-	handle, err := svc.StartCaptured(ctx, n, Command("sleep", "30"))
+	handle, err := svc.StartCaptured(ctx, n, Command("true"))
 	if err != nil {
 		t.Fatalf("StartCaptured: %v", err)
 	}
 	defer handle.Close()
 
-	// The stale log is removed before the process is launched, so once
-	// StartCaptured returns a poll of the file must never see a previous
-	// incarnation's output -- only its absence, or the empty file created by
-	// the new process's redirect.
-	if content, err := os.ReadFile(logPath); err == nil && strings.Contains(string(content), "stale output") {
-		t.Errorf("stale log survived StartCaptured: %q", content)
+	if !probe.streamed {
+		t.Fatalf("StartCaptured returned without launching the process")
+	}
+	if probe.staleAtLaunch {
+		t.Errorf("stale stdout.log still present when the process was launched; StartCaptured must remove it first")
 	}
 }
 
