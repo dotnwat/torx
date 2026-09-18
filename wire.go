@@ -8,6 +8,7 @@
 // handshake that establishes the protocol version for the rest of the exchange.
 // Decoding ignores unknown fields, so a newer peer's extra data does not break
 // an older one.
+
 package torx
 
 import (

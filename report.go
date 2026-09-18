@@ -8,6 +8,7 @@
 // JSONReporter writes a newline-delimited JSON stream that stays parseable even
 // if the run is killed mid-write, and ReadResults reconstructs a SuiteResult
 // from it.
+
 package torx
 
 import (

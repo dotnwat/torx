@@ -8,6 +8,7 @@
 // usable without a Backend and testable in isolation. The rule they support:
 // start a service, then block only until it is verifiably up, never on a bare
 // sleep.
+
 package torx
 
 import (

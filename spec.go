@@ -6,6 +6,7 @@
 // intentionally simple -- richer, heterogeneous allocation builds on these
 // types without changing them. These are pure value types with no other torx
 // dependencies.
+
 package torx
 
 // OS is the operating-system family a node runs. The empty value means

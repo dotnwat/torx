@@ -9,6 +9,7 @@
 // Because the driver and worker are the same binary, both see the same
 // registrations, so a worker rebuilds a job from its id with a registry lookup
 // rather than re-importing code.
+
 package torx
 
 import (
