@@ -6,6 +6,7 @@
 // file does not stop the rest. Finalizers is a LIFO stack of cleanup callbacks a
 // job accumulates and runs on teardown, aggregating their errors the way service
 // teardown does.
+
 package torx
 
 import (

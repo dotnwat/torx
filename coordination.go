@@ -4,6 +4,7 @@
 // multiple services or nodes sharing a host never pick the same one. Scratch
 // computes per-node / per-service working-directory paths. These are in-process
 // helpers; creating the directories happens on the node through its backend.
+
 package torx
 
 import (

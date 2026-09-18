@@ -7,6 +7,7 @@
 // job runs it emits Events (lifecycle transitions and log lines) to an
 // EventSink, which the driver merges into a single timeline; InMemoryEventSink
 // captures them for tests.
+
 package torx
 
 import (

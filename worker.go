@@ -8,6 +8,7 @@
 // context detached from that cancellation so cleanup still completes. A panic in
 // job code is recovered and turned into a failing result with its stack, rather
 // than crashing the worker.
+
 package torx
 
 import (

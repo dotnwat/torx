@@ -7,6 +7,7 @@
 // retrievable with errors.As. MultiError aggregates failures from best-effort
 // steps (such as service teardown) so that one failure does not mask the
 // others.
+
 package torx
 
 import "errors"

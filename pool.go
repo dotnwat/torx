@@ -9,6 +9,7 @@
 // than rejecting a feasible one because a flexible spec greedily took a node a
 // pickier spec needed. OS matching is not yet enforced -- v1 pools are
 // single-OS -- and is future work once nodes carry an OS.
+
 package torx
 
 import (

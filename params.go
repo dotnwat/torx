@@ -10,6 +10,7 @@
 // rejected -- because externally supplied configuration must never degrade
 // silently. torx never interprets a parameter value; the file only decides
 // which opaque parameter sets exist.
+
 package torx
 
 import (

@@ -10,6 +10,7 @@
 // Variants may instead be supplied externally (DiscoverWith, fed by the -params
 // file), and a job may validate and canonicalize each parameter set before ids
 // are formed by implementing ParamResolver.
+
 package torx
 
 import (

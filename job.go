@@ -9,6 +9,7 @@
 // just defaults: a job overrides either to take control, and the override is what
 // the framework calls. There is no separate test/benchmark mode -- a job is a
 // benchmark precisely when it records data.
+
 package torx
 
 import (

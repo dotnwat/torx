@@ -1,5 +1,8 @@
 # torx
 
+[![CI](https://github.com/dotnwat/torx/actions/workflows/ci.yml/badge.svg)](https://github.com/dotnwat/torx/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/dotnwat/torx.svg)](https://pkg.go.dev/github.com/dotnwat/torx)
+
 torx is a distributed testing and benchmarking framework. A **suite** is a Go
 binary that links the torx library and its own jobs; the same binary is both the
 driver and, re-executed, the worker that runs one job. You write two kinds of
@@ -28,8 +31,8 @@ A few concepts you will meet:
   records an opaque `Data` payload plus a one-line `Summary`; torx stores these
   verbatim and never interprets them.
 
-A worked example lives in [`demo/`](demo/): a tiny echo service and job, the
-whole vertical slice in one file.
+A worked example lives in [`examples/echo/`](examples/echo/): a tiny echo
+service and job, the whole vertical slice in one file.
 
 ## Authoring a Service
 
@@ -339,7 +342,7 @@ code path.
 
 Cross-language wire compatibility and full service lifecycles need a live server,
 so a suite is usually exercised by running it end to end and asserting the
-result. The idiom (see [`demo/echo_test.go`](demo/echo_test.go)) is a Go test
+result. The idiom (see [`examples/echo/echo_test.go`](examples/echo/echo_test.go)) is a Go test
 whose `TestMain` lets the test binary double as the torx worker, then runs the
 suite through the real driver/worker split on a small local pool:
 
@@ -362,3 +365,11 @@ Everything else — the pure functions a service and job are built from (readine
 predicates, address handling, result parsing) — is ordinary Go unit-testable, and
 should be: design services and jobs so their logic is reachable without a running
 server wherever possible.
+
+## Status and license
+
+torx is pre-1.0. The API may change between minor versions; pin a tag. It
+drives Unix processes (process groups, POSIX signals, `sh`) and is developed
+on Linux and macOS; Windows is not supported.
+
+Licensed under the [Apache License, Version 2.0](LICENSE).

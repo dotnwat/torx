@@ -8,6 +8,7 @@
 // records the source location it was emitted from, captured at runtime. With no
 // sink on the context (for example while the driver sizes a job) these are
 // no-ops.
+
 package torx
 
 import (
