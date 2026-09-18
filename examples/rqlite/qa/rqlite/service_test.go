@@ -105,3 +105,23 @@ func TestCrashAndRestartRequireAProcessState(t *testing.T) {
 		t.Errorf("StopNode of a never-started node: %v", err)
 	}
 }
+
+func TestPredecessorsAreTheStartedNodesBeforeN(t *testing.T) {
+	s, nodes := bound(t, 3)
+	if got := s.predecessors(nodes[0]); len(got) != 0 {
+		t.Errorf("seed has predecessors %v", got)
+	}
+	// Only node-0 has been started when node-1 starts; node-2 is not a
+	// predecessor of node-1 even once it has a member.
+	s.members["node-0"] = &member{httpPort: 4001, raftPort: 4002}
+	s.members["node-2"] = &member{httpPort: 4005, raftPort: 4006}
+	got := s.predecessors(nodes[1])
+	if len(got) != 1 || got[0].Name() != "node-0" {
+		t.Errorf("predecessors of node-1 = %v, want node-0 only", got)
+	}
+	s.members["node-1"] = &member{httpPort: 4003, raftPort: 4004}
+	got = s.predecessors(nodes[2])
+	if len(got) != 2 || got[0].Name() != "node-0" || got[1].Name() != "node-1" {
+		t.Errorf("predecessors of node-2 = %v, want node-0 then node-1", got)
+	}
+}

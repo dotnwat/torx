@@ -42,14 +42,17 @@ const (
 // Service runs an rqlite cluster of one rqlited per node.
 //
 // The first node bootstraps a one-node cluster and each later node joins
-// through the nodes started before it, which fits ServiceBase's sequential
-// per-node lifecycle: by the time StartNode runs for a node, its predecessors
-// are up. A node's ports are leased when it first starts and kept until the
-// framework stops it, not released with its process, because they are its
-// identity to its peers. Crash and Restart replace the process behind the
-// same addresses, so a restarted node rejoins as the member that went away
-// rather than as a stranger, and the Raft log in its data directory lets it
-// catch up.
+// through the nodes started before it. ServiceBase starts nodes one at a
+// time in order, but it launches every node before the framework waits on
+// any, so a launched predecessor is not a ready one; a joiner gives up after
+// a few join attempts, and one that gives up before the seed is ready exits
+// for good. StartNode therefore waits for a node's predecessors to be ready
+// before launching it, which makes the order a real prerequisite. A node's
+// ports are leased when it first starts and kept until the framework stops
+// it, not released with its process, because they are its identity to its
+// peers. Crash and Restart replace the process behind the same addresses, so
+// a restarted node rejoins as the member that went away rather than as a
+// stranger, and the Raft log in its data directory lets it catch up.
 type Service struct {
 	*torx.ServiceBase
 
@@ -74,10 +77,16 @@ func New(name string, nodes int) *Service {
 	return s
 }
 
-// StartNode leases the node's ports on its first start and launches rqlited
-// behind them. A failed launch leaves the member in place for StopNode to
-// release, which the framework's teardown guarantees.
+// StartNode waits for the node's predecessors to be ready, leases the node's
+// ports on its first start, and launches rqlited behind them. A failed launch
+// leaves the member in place for StopNode to release, which the framework's
+// teardown guarantees.
 func (s *Service) StartNode(ctx context.Context, n *torx.Node) error {
+	for _, p := range s.predecessors(n) {
+		if err := s.WaitNode(ctx, p); err != nil {
+			return fmt.Errorf("rqlite: %s cannot join before %s is ready: %w", n.Name(), p.Name(), err)
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, ok := s.members[n.Name()]
@@ -104,9 +113,12 @@ func (s *Service) WaitNode(ctx context.Context, n *torx.Node) error {
 	return s.waitReady(ctx, n, "/readyz")
 }
 
-// WaitSynced blocks until n is ready and has applied every log entry the
+// WaitSynced blocks until n is ready and has received every log entry the
 // leader had committed when the check began: the test that a restarted node
-// has caught up, not merely rejoined.
+// has caught up with the log, not merely rejoined. Receipt is not
+// application -- the entries may still be applying to the node's SQLite
+// copy when this returns -- so a read of that copy afterwards must poll for
+// what it expects rather than assert it at once.
 func (s *Service) WaitSynced(ctx context.Context, n *torx.Node) error {
 	return s.waitReady(ctx, n, "/readyz?sync&timeout=1s")
 }
@@ -326,6 +338,24 @@ func (s *Service) waitReady(ctx context.Context, n *torx.Node, path string) erro
 	ctx, cancel := context.WithTimeout(ctx, readyTimeout)
 	defer cancel()
 	return torx.WaitForHTTP(ctx, s.Client(n).URL(path))
+}
+
+// predecessors lists the members before n in node order: the nodes n joins
+// through on its first start, which must be ready before it is launched. A
+// node with no member yet was never started and is not waited for.
+func (s *Service) predecessors(n *torx.Node) []*torx.Node {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var before []*torx.Node
+	for _, p := range s.Nodes() {
+		if p.Name() == n.Name() {
+			break
+		}
+		if _, ok := s.members[p.Name()]; ok {
+			before = append(before, p)
+		}
+	}
+	return before
 }
 
 // dataDir is where the node's rqlited keeps its database and Raft log.
