@@ -57,3 +57,31 @@ jobs:
           version: latest
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  # The rqlite example's end-to-end test needs rqlited installed, which the
+  # matrix above does not provide, so it skips there. This job installs a
+  # pinned release, runs the example's tests with the skip turned into a
+  # failure, and then runs every job through the example's harness, which is
+  # the one place the harness's own path is exercised.
+  example-rqlite:
+    name: example (rqlite)
+    runs-on: ubuntu-latest
+    env:
+      RQLITE_VERSION: v10.3.5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - name: install rqlite
+        run: |
+          curl -fsSL "https://github.com/rqlite/rqlite/releases/download/${RQLITE_VERSION}/rqlite-${RQLITE_VERSION}-linux-amd64.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/rqlite-${RQLITE_VERSION}-linux-amd64" >> "$GITHUB_PATH"
+      - name: rqlited is on PATH
+        run: rqlited -version
+      - name: example tests (rqlited required)
+        run: go test -race -count=1 ./examples/rqlite/...
+        env:
+          TORX_RQLITE_REQUIRED: "1"
+      - name: run the suite through the harness
+        run: go run ./examples/rqlite/harness
