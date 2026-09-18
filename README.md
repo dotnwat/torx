@@ -1,5 +1,8 @@
 # torx
 
+[![CI](https://github.com/dotnwat/torx/actions/workflows/ci.yml/badge.svg)](https://github.com/dotnwat/torx/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/dotnwat/torx.svg)](https://pkg.go.dev/github.com/dotnwat/torx)
+
 torx is a distributed testing and benchmarking framework. A **suite** is a Go
 binary that links the torx library and its own jobs; the same binary is both the
 driver and, re-executed, the worker that runs one job. You write two kinds of
@@ -362,3 +365,11 @@ Everything else — the pure functions a service and job are built from (readine
 predicates, address handling, result parsing) — is ordinary Go unit-testable, and
 should be: design services and jobs so their logic is reachable without a running
 server wherever possible.
+
+## Status and license
+
+torx is pre-1.0. The API may change between minor versions; pin a tag. It
+drives Unix processes (process groups, POSIX signals, `sh`) and is developed
+on Linux and macOS; Windows is not supported.
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
