@@ -176,7 +176,9 @@ the node to receive everything the leader had committed; applying those
 entries to the node's SQLite copy comes after, so a job reading that copy
 polls for what it expects (`awaitRows`) instead of asserting it. Every wait
 is bounded by a deadline inside the service, so a node that never comes up
-fails the job rather than hanging it.
+fails the job rather than hanging it, and torx bounds each probe on its own,
+so a probe that stalls costs one attempt rather than the node's whole
+readiness window.
 
 **Output is an artifact.** `StartCaptured` sends each `rqlited`'s output to
 `stdout.log` on its node and collects it after the job. It truncates that file
