@@ -15,9 +15,6 @@ const (
 	// clusterRows is how many rows the cluster job writes at the leader and
 	// expects to see from a follower.
 	clusterRows = 100
-	// convergeTimeout bounds how far a none-level read may trail a write the
-	// leader has acknowledged.
-	convergeTimeout = 10 * time.Second
 	// membershipProbe bounds each reachability probe behind a membership view.
 	membershipProbe = 2 * time.Second
 )
@@ -88,40 +85,24 @@ func (j *clusterJob) Run(ctx context.Context, jc *torx.JobContext) error {
 			break
 		}
 	}
-	count := func(ctx context.Context) (int64, error) {
-		return j.db.Client(reader).QueryInt(ctx, j.level, rqlite.Stmt("SELECT COUNT(*) FROM kv"))
-	}
-	var got int64
+	count := rqlite.Stmt("SELECT COUNT(*) FROM kv")
 	if j.level == rqlite.LevelNone && reader != leader {
 		// A none read is served from the follower's own copy with no cluster
-		// check, so it may trail a write the leader has acknowledged -- so far
-		// behind that the table does not exist there yet, which surfaces as a
-		// query error rather than a short count. The guarantee under test is
-		// that the copy converges, so both are "not yet" until convergeTimeout
-		// says otherwise; the last error is kept for the failure message.
-		wctx, cancel := context.WithTimeout(ctx, convergeTimeout)
-		defer cancel()
-		var lastErr error
-		err = torx.WaitUntil(wctx, func(ctx context.Context) (bool, error) {
-			n, err := count(ctx)
-			if err != nil {
-				lastErr = err
-				return false, nil
-			}
-			got = n
-			return n == clusterRows, nil
-		}, 0)
-		if err != nil && lastErr != nil {
-			err = fmt.Errorf("%w (last read: %w)", err, lastErr)
+		// check, so it may trail a write the leader has acknowledged. The
+		// guarantee under test is that the copy converges, so the assertion
+		// is a bounded poll rather than a single read.
+		if err := awaitRows(ctx, j.db.Client(reader), j.level, count, clusterRows); err != nil {
+			return fmt.Errorf("reading %s at level %s: %w", reader.Name(), j.level, err)
 		}
 	} else {
-		got, err = count(ctx)
-	}
-	if err != nil {
-		return fmt.Errorf("reading %s at level %s: %w", reader.Name(), j.level, err)
-	}
-	if got != clusterRows {
-		return fmt.Errorf("%s at level %s sees %d rows, want %d", reader.Name(), j.level, got, clusterRows)
+		// Every other level guarantees the write is visible now.
+		got, err := j.db.Client(reader).QueryInt(ctx, j.level, count)
+		if err != nil {
+			return fmt.Errorf("reading %s at level %s: %w", reader.Name(), j.level, err)
+		}
+		if got != clusterRows {
+			return fmt.Errorf("%s at level %s sees %d rows, want %d", reader.Name(), j.level, got, clusterRows)
+		}
 	}
 
 	if err := jc.Record(map[string]any{

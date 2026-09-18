@@ -13,8 +13,8 @@ import (
 
 const (
 	failoverNodes = 3
-	rowsBefore    = 10 // written before the leader is crashed
-	rowsAfter     = 10 // written to the successor while the old leader is down
+	rowsBefore    = 100  // written before the leader is crashed
+	rowsAfter     = 1000 // written to the successor while the old leader is down
 )
 
 // failoverJob is rqlite.failover: the cluster survives losing its leader. The
@@ -86,8 +86,10 @@ func (j *failoverJob) Run(ctx context.Context, jc *torx.JobContext) error {
 	}
 
 	// The crashed node comes back as the same member and catches up. A none
-	// read after WaitSynced proves the rows reached its own copy, not that a
-	// forwarded request found them elsewhere.
+	// read proves the rows reached its own copy, not that a forwarded request
+	// found them elsewhere. WaitSynced establishes that the node has received
+	// the log it missed; applying it to the node's SQLite copy comes after,
+	// so the read polls for the count instead of asserting it at once.
 	jc.Log("info", "restarting "+leader.Name())
 	if err := j.db.Restart(ctx, leader); err != nil {
 		return err
@@ -95,12 +97,8 @@ func (j *failoverJob) Run(ctx context.Context, jc *torx.JobContext) error {
 	if err := j.db.WaitSynced(ctx, leader); err != nil {
 		return err
 	}
-	got, err := j.db.Client(leader).QueryInt(ctx, rqlite.LevelNone, count)
-	if err != nil {
-		return fmt.Errorf("reading restarted %s: %w", leader.Name(), err)
-	}
-	if got != want {
-		return fmt.Errorf("restarted %s sees %d rows locally, want %d", leader.Name(), got, want)
+	if err := awaitRows(ctx, j.db.Client(leader), rqlite.LevelNone, count, want); err != nil {
+		return fmt.Errorf("restarted %s applying its backlog: %w", leader.Name(), err)
 	}
 	view, err := j.db.Client(successor).Nodes(ctx, membershipProbe)
 	if err != nil {
