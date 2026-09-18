@@ -32,7 +32,10 @@ A few concepts you will meet:
   verbatim and never interprets them.
 
 A worked example lives in [`examples/echo/`](examples/echo/): a tiny echo
-service and job, the whole vertical slice in one file.
+service and job, the whole vertical slice in one file. A fuller one,
+[`examples/rqlite/`](examples/rqlite/), tests a real distributed database:
+a multi-node service, parametrized and fault-injection jobs, and the launcher
+harness a project builds around torx to run its suite.
 
 ## Authoring a Service
 
@@ -305,7 +308,8 @@ resolve to the same configuration are rejected as duplicates.
 
 **Launchers and `-run-dir`.** A tool that wraps a suite — building it, writing
 an invocation record, archiving the run's inputs — needs to know the exact run
-directory before the run starts: resolving the `latest` symlink afterwards
+directory before the run starts ([`examples/rqlite/harness`](examples/rqlite/harness/)
+is one such tool): resolving the `latest` symlink afterwards
 races concurrent runs, and an interrupted run would leave the metadata with no
 home at all. Such a launcher creates the run directory itself, writes its
 metadata into it, and then invokes the suite with `-run-dir DIR`. torx uses

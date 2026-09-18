@@ -7,6 +7,8 @@
 *.out
 *.prof
 /examples/echo/echo
+/examples/rqlite/qa/qa
+/examples/rqlite/harness/harness
 
 # Editor and OS noise
 .DS_Store
