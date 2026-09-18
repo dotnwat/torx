@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -105,6 +106,52 @@ func TestWaitForHTTP(t *testing.T) {
 	defer cancel2()
 	if err := WaitForHTTP(ctx2, busy.URL); !errors.Is(err, ErrReadinessTimeout) {
 		t.Errorf("WaitForHTTP on a 503 server: err = %v, want ErrReadinessTimeout", err)
+	}
+}
+
+// stallingServer serves a handler that holds each of the first stalls
+// requests open until the client gives up, then answers 200. It returns the
+// server and a count of requests seen.
+func stallingServer(t *testing.T, stalls int32) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) <= stalls {
+			<-r.Context().Done()
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// A probe that stalls costs one attempt, not the whole wait: a server that
+// holds its first request open and answers the next one is ready.
+func TestWaitForHTTPStalledProbeCostsOneAttempt(t *testing.T) {
+	srv, hits := stallingServer(t, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := waitForHTTP(ctx, srv.URL, 20*time.Millisecond); err != nil {
+		t.Fatalf("WaitForHTTP after one stalled probe: %v", err)
+	}
+	if n := hits.Load(); n < 2 {
+		t.Errorf("server saw %d probes, want the wait to move past the stalled one", n)
+	}
+}
+
+// A server that never answers still times out at the wait's deadline, and the
+// wait keeps probing until then rather than hanging on the first request.
+func TestWaitForHTTPAlwaysStalledTimesOut(t *testing.T) {
+	srv, hits := stallingServer(t, 1<<30)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err := waitForHTTP(ctx, srv.URL, 20*time.Millisecond)
+	if !errors.Is(err, ErrReadinessTimeout) {
+		t.Fatalf("err = %v, want ErrReadinessTimeout", err)
+	}
+	if n := hits.Load(); n < 2 {
+		t.Errorf("server saw %d probes, want repeated attempts within the deadline", n)
 	}
 }
 
