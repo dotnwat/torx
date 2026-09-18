@@ -1,3 +1,5 @@
+//go:build unix
+
 // Collecting artifacts and running finalizers on teardown.
 //
 // An Artifact names a file on a node to gather after a job runs. Collect copies

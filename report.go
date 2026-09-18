@@ -1,3 +1,5 @@
+//go:build unix
+
 // Reporters: where a run's results go as they land.
 //
 // A Reporter is the results plane, distinct from the EventSink timeline of

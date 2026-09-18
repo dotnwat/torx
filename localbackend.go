@@ -1,3 +1,5 @@
+//go:build unix
+
 package torx
 
 import (
@@ -185,7 +187,7 @@ func (b LocalBackend) Rm(ctx context.Context, path string) error {
 	return nil
 }
 
-func (b LocalBackend) Signal(ctx context.Context, pid int, sig syscall.Signal) error {
+func (b LocalBackend) Signal(ctx context.Context, pid int, sig os.Signal) error {
 	if pid < minSignalablePID {
 		// os.FindProcess never fails on Unix, so a non-positive pid would reach
 		// kill(2) verbatim: 0 targets the caller's whole process group, -1 every

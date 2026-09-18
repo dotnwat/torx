@@ -1,3 +1,5 @@
+//go:build unix
+
 // Discovery and parametrization: turning the registered jobs into the concrete
 // list of variants to run.
 //

@@ -1,3 +1,5 @@
+//go:build unix
+
 // The job registry: jobs register themselves by id so the framework can
 // discover them and a worker can reconstruct one from its id. A job file
 // registers a factory in an init function:

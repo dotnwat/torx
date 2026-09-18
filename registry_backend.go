@@ -1,3 +1,5 @@
+//go:build unix
+
 // The backend registry: backend kinds register a builder by name.
 //
 // A backend whose transport pulls in heavy dependencies (SSH, Docker, ...) lives

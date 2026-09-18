@@ -1,3 +1,5 @@
+//go:build unix
+
 // The node manifest: the boundary between provisioning and torx.
 //
 // A manifest describes the nodes a run executes against -- nodes an out-of-band

@@ -1,3 +1,5 @@
+//go:build unix
+
 // Pool: the finite set of nodes a session owns, and per-job allocation.
 //
 // Allocate carves a SubPool out of the pool to satisfy a job's PoolSpec, all or

@@ -1,3 +1,5 @@
+//go:build unix
+
 // Capturing a service process's output to a node-local file.
 //
 // StartCaptured is the simple path for a service that just wants its console

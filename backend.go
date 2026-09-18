@@ -1,3 +1,5 @@
+//go:build unix
+
 // The Backend seam: how torx acts on a single node.
 //
 // A Backend runs commands, moves files, signals processes, and streams output
@@ -14,7 +16,7 @@ package torx
 import (
 	"context"
 	"io"
-	"syscall"
+	"os"
 )
 
 // Cmd describes a command to run on a node. Path plus Args is an argv -- no
@@ -68,6 +70,9 @@ type Backend interface {
 	// Rm removes a path on the node, recursively and without error if absent
 	// (rm -rf).
 	Rm(ctx context.Context, path string) error
-	// Signal sends sig to the process with the given pid on the node.
-	Signal(ctx context.Context, pid int, sig syscall.Signal) error
+	// Signal sends sig to the process with the given pid on the node. sig is
+	// one of the syscall.Signal values (syscall.SIGTERM, syscall.SIGKILL, ...);
+	// a backend that cannot deliver the given os.Signal reports it as an
+	// ErrBackend error.
+	Signal(ctx context.Context, pid int, sig os.Signal) error
 }

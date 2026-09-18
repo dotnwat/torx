@@ -1,3 +1,5 @@
+//go:build unix
+
 // The driver<->worker wire protocol.
 //
 // The driver sends the worker one Assignment -- the job to run, its parameters,

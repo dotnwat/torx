@@ -1,3 +1,5 @@
+//go:build unix
+
 // Demo: a self-contained vertical slice of torx.
 //
 // One executable plays three roles. With no special first argument it is the

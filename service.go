@@ -1,3 +1,5 @@
+//go:build unix
+
 // Service: a group of processes deployed across a set of nodes.
 //
 // The framework drives a service only through the coarse Service lifecycle

@@ -1,3 +1,5 @@
+//go:build unix
+
 // Results and the event stream.
 //
 // A job produces a JobResult -- its status, timing, an optional opaque data

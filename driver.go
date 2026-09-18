@@ -1,3 +1,5 @@
+//go:build unix
+
 // The driver: schedule jobs onto a pool and run them through workers.
 //
 // Run sizes each requested job by calling its Declare, fails the ones that can

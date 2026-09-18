@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package torx is a distributed testing and benchmarking framework.
 //
 // It takes the architecture, data model, and programming model of the

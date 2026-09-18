@@ -1,3 +1,5 @@
+//go:build unix
+
 // Externally supplied parametrization: the -params file.
 //
 // A benchmarking or testing user arrives with a specific configuration or
