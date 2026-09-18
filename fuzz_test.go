@@ -36,7 +36,8 @@ func FuzzParseParamsOverrides(f *testing.F) {
 		`[]`,
 		`{"j": {"matrix": {"a": [[1, 2]]}}}`,
 		`{"j": {"matrix": {"a": [{"nested": {"deep": [1]}}]}}}`,
-		// 30 two-value dimensions parse cheaply but expand to 2^30 variants.
+		// 30 two-value dimensions parse cheaply but expand to 2^30 variants,
+		// which the parser must refuse.
 		`{"j": {"matrix": {` + thirtyBinaryDims + `}}}`,
 	} {
 		f.Add([]byte(seed))
@@ -68,18 +69,25 @@ func FuzzParseParamsOverrides(f *testing.F) {
 					}
 				}
 			}
+			// The parser must have refused anything past MaxVariants.
+			if n, _ := o.size(); n > MaxVariants {
+				t.Fatalf("%q: accepted an override of %d variants; the limit is %d", id, n, MaxVariants)
+			}
 			// Expansion is every matrix point plus every config, nothing more or less.
-			// The product of a few dozen two-value dimensions is astronomical for a
-			// tiny input, and materializing it here would only exhaust the fuzzer's
-			// memory, so the expansion itself is checked for small matrices only;
+			// Materializing even MaxVariants per iteration would slow the fuzzer to a
+			// crawl, so the expansion itself is checked for small matrices only;
 			// parsing and the round trip below still cover every accepted input.
 			want := len(o.Configs)
 			if len(o.Matrix) > 0 {
 				want += product(o.Matrix, maxExpansion)
 			}
 			if want <= maxExpansion {
-				if got := len(o.variants()); got != want {
-					t.Fatalf("%q: variants() = %d, want %d", id, got, want)
+				got, err := o.variants()
+				if err != nil {
+					t.Fatalf("%q: variants() of an accepted override: %v", id, err)
+				}
+				if len(got) != want {
+					t.Fatalf("%q: variants() = %d, want %d", id, len(got), want)
 				}
 			}
 		}
