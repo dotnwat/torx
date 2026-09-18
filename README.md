@@ -28,8 +28,8 @@ A few concepts you will meet:
   records an opaque `Data` payload plus a one-line `Summary`; torx stores these
   verbatim and never interprets them.
 
-A worked example lives in [`demo/`](demo/): a tiny echo service and job, the
-whole vertical slice in one file.
+A worked example lives in [`examples/echo/`](examples/echo/): a tiny echo
+service and job, the whole vertical slice in one file.
 
 ## Authoring a Service
 
@@ -339,7 +339,7 @@ code path.
 
 Cross-language wire compatibility and full service lifecycles need a live server,
 so a suite is usually exercised by running it end to end and asserting the
-result. The idiom (see [`demo/echo_test.go`](demo/echo_test.go)) is a Go test
+result. The idiom (see [`examples/echo/echo_test.go`](examples/echo/echo_test.go)) is a Go test
 whose `TestMain` lets the test binary double as the torx worker, then runs the
 suite through the real driver/worker split on a small local pool:
 
