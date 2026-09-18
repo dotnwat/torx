@@ -14,11 +14,15 @@ concurrency:
 
 jobs:
   test:
-    name: test (go ${{ matrix.go }})
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }}, go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # Linux is the deployment target; macOS is where suites are developed.
+        # The ssh backend tests run commands on the host through an in-process
+        # server, so both exercise the remote-side shell code paths natively.
+        os: [ubuntu-latest, macos-latest]
         # oldstable is the minimum go.mod allows; stable is what contributors run.
         go: [oldstable, stable]
     steps:
@@ -36,7 +40,6 @@ jobs:
           fi
       - run: go build ./...
       - run: go vet ./...
-      # The ssh backend tests need setsid and a POSIX sh on the host; ubuntu has both.
       - run: go test -race -count=1 ./...
 
   lint:

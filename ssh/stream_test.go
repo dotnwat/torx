@@ -234,6 +234,97 @@ func TestStreamCloseKillsSignalIgnoringGroup(t *testing.T) {
 	}
 }
 
+// TestStreamKillsGroupWhenLoginShellForks covers a login shell that forks the
+// command instead of exec'ing it (dash, Debian's /bin/sh): the wrapper is then
+// not the session leader and must move the command into a group of its own, so
+// Close still kills the whole tree.
+func TestStreamKillsGroupWhenLoginShellForks(t *testing.T) {
+	b := dialBackendWith(t, func(s *testServer) { s.forkDepth = 1 })
+	assertCloseKillsService(t, b)
+}
+
+// TestStreamIsolatesNestedWrappers covers a forking login shell under a forking
+// ForceCommand or audit wrapper: the session is still the command's own, and
+// Stream must run it and kill it on Close, however many layers sit above it.
+func TestStreamIsolatesNestedWrappers(t *testing.T) {
+	b := dialBackendWith(t, func(s *testServer) { s.forkDepth = 2 })
+	assertCloseKillsService(t, b)
+}
+
+// TestStreamIsolatesCommandInSharedGroup covers an sshd that does not start
+// commands in a new session (Dropbear's shape): the command begins in the
+// server's own process group -- here, this test binary's. The wrapper must move
+// it into a group of its own, so Close kills the service and nothing else; the
+// server is still serving afterwards, and so is this process.
+func TestStreamIsolatesCommandInSharedGroup(t *testing.T) {
+	b := dialBackendWith(t, func(s *testServer) { s.sharedGroup = true })
+	assertCloseKillsService(t, b)
+	if _, err := b.Exec(context.Background(), torx.Command("sh", "-c", ":")); err != nil {
+		t.Fatalf("server no longer serving after Close: %v", err)
+	}
+}
+
+// TestStreamIsolatesWithPerl forces the perl fallback by hiding setsid: on a
+// Linux host the util-linux tool would otherwise always win, leaving the path
+// macOS depends on untested there.
+func TestStreamIsolatesWithPerl(t *testing.T) {
+	path := toolsPATH(t, "sh", "cat", "tr", "ps", "sleep", "perl")
+	b := dialBackendWith(t, func(s *testServer) { s.forkDepth = 1; s.path = path })
+	assertCloseKillsService(t, b)
+}
+
+// TestStreamRefusesWhenIsolationImpossible is the guard: a command that begins
+// in the server's group, on a node with neither setsid nor perl, cannot be given
+// a group of its own, and killing the shared group would kill the sshd (here,
+// this test binary). Stream must fail before the command runs, say what would
+// fix it, and leave the server serving.
+func TestStreamRefusesWhenIsolationImpossible(t *testing.T) {
+	path := toolsPATH(t, "sh", "cat", "tr", "ps")
+	b := dialBackendWith(t, func(s *testServer) { s.sharedGroup = true; s.path = path })
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran")
+
+	stream, err := b.Stream(context.Background(), torx.Command("sh", "-c", "echo > "+marker+"; sleep 30"))
+	if err == nil {
+		_ = stream.Close()
+		t.Fatal("Stream ran a command it could not isolate from the server's process group")
+	}
+	if !strings.Contains(err.Error(), "shares process group") || !strings.Contains(err.Error(), "setsid") {
+		t.Errorf("error does not explain the refusal: %v", err)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Error("the command ran despite the refusal")
+	}
+	if _, err := b.Exec(context.Background(), torx.Command("sh", "-c", ":")); err != nil {
+		t.Fatalf("server no longer serving after refusal: %v", err)
+	}
+}
+
+// assertCloseKillsService streams a service that ignores SIGHUP and SIGTERM and
+// records its pid, then checks that Close kills it: only a SIGKILL to the whole
+// process group can, so the service surviving means the wrapper reported a
+// group the service was not in.
+func assertCloseKillsService(t *testing.T, b *backend) {
+	t.Helper()
+	pidfile := filepath.Join(t.TempDir(), "pid")
+	script := fmt.Sprintf("trap '' HUP TERM; echo $$ > %s; while true; do sleep 1; done", pidfile)
+
+	stream, err := b.Stream(context.Background(), torx.Command("sh", "-c", script))
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	pid := waitForPid(t, pidfile)
+	if !processAlive(pid) {
+		t.Fatalf("service pid %d should be running", pid)
+	}
+	if err := stream.Close(); err != nil {
+		t.Errorf("close: %v", err)
+	}
+	if !eventuallyDead(pid, 2*time.Second) {
+		t.Errorf("service pid %d survived Close: teardown did not kill its group", pid)
+	}
+}
+
 // TestStreamCloseSurfacesKillFailure checks that Close reports a remote kill it
 // could not deliver, instead of returning success while the service may still be
 // running. The node is made unreachable before Close, so the kill cannot run.

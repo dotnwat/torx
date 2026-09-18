@@ -9,6 +9,14 @@
 // a known_hosts file (see Config). The heavy dependencies this brings --
 // golang.org/x/crypto/ssh and github.com/pkg/sftp -- stay out of the torx core
 // by living behind the registered BackendBuilder here.
+//
+// A node needs a POSIX sh. To kill a service's whole process group on
+// teardown, Stream runs each command as the leader of its own group: sshd
+// usually provides that already (OpenSSH starts every command in a new
+// session, and bash and zsh exec a lone -c command in place), and otherwise
+// the wrapper creates one with setsid(1) -- util-linux or busybox -- or perl,
+// whichever the node has. A node with neither, under an sshd that leaves
+// commands in its own group (Dropbear), cannot stream; the error says so.
 package ssh
 
 import (
@@ -203,12 +211,11 @@ const pgidMarker = "TORX_PGID:"
 const killGroupTimeout = 8 * time.Second
 
 // Stream starts cmd on the node and returns its combined output; Close kills the
-// command and reaps it. The command runs as the leader of a new session (via
-// setsid) so Close can SIGKILL the whole process group -- tearing down a service
-// and its children even if they ignore SIGTERM or SIGHUP, and leaving the node's
-// sshd untouched. setsid -w keeps the SSH session open for the command's
-// lifetime rather than detaching it, and the leader prints its pid (the group
-// id) before exec'ing the command in place.
+// command and reaps it. The command runs as the leader of its own process group,
+// so Close can SIGKILL that group -- tearing down a service and its children even
+// if they ignore SIGTERM or SIGHUP -- without touching the node's sshd. The
+// remote wrapper (see wrapForStream) arranges the group, prints its id as the
+// first line, and then exec's the command in place.
 func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (io.ReadCloser, error) {
 	client, err := b.conn(ctx)
 	if err != nil {
@@ -227,7 +234,7 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (io.ReadCloser, erro
 	sess.Stderr = pw
 	if cmd.Stdin != nil {
 		// Feed stdin to the wrapped command, matching Exec and the LocalBackend.
-		// The setsid wrapper exec's the command in place, so it inherits this stdin.
+		// The wrapper exec's the command in place, so it inherits this stdin.
 		sess.Stdin = bytes.NewReader(cmd.Stdin)
 	}
 	if err := sess.Start(wrapForStream(cmd)); err != nil {
@@ -317,9 +324,9 @@ func (s *sshStream) teardown() error {
 // whether the kill could be carried out. A transport failure -- an unreachable
 // node, a session that would not open -- is returned so the caller can treat the
 // node as not confirmed clean rather than silently reused. Once the kill actually
-// runs its exit status is not inspected: the group is one this backend created (a
-// setsid leader over its own session), so a non-zero exit means the group is
-// already gone, which is success for teardown. kill(1) cannot distinguish that
+// runs its exit status is not inspected: the group is led by this stream's own
+// command (see wrapForStream), so a non-zero exit means the group is already
+// gone, which is success for teardown. kill(1) cannot distinguish that
 // from other failures by exit code anyway, and its diagnostic text is locale- and
 // implementation-dependent, so relying on either would be less reliable than the
 // transport error the run-or-not signal already provides.
@@ -340,18 +347,54 @@ func (b *backend) killGroup(pgid int) error {
 	return nil
 }
 
-// wrapForStream builds the remote command line for Stream. setsid -w runs the
-// command as a new session/group leader (so Close can kill the group) while
-// waiting for it (so the SSH session lives as long as the command). The leader
-// prints its pid -- the group id -- then exec's the command in place (via
-// remoteCommand's exec form), so the command inherits that pid and stays the
-// group leader. echo appends a trailing newline, so the marker is a complete
-// line readPGID can read before exec runs the command: the handshake never
-// waits on the command's own output. Keep the echo (or anything else that
-// terminates the marker with a newline), or readPGID will block.
+// streamPrologue is the POSIX sh that runs on the node ahead of a streamed
+// command, once $c holds the command line to exec (see wrapForStream). It makes
+// the command the leader of its own process group, prints that group's id as the
+// marker line, and exec's the command -- so the group Close kills never contains
+// anything but the command and its descendants.
+//
+// It first reads the process group it is in: from /proc/$$/stat on Linux (present
+// in every container, and busybox ps has no -p), stripping through the last ") "
+// before splitting because the comm field may itself contain spaces or
+// parentheses, and from ps elsewhere (macOS, BSD). Then, in order:
+//
+//   - If this shell already leads its group, it just runs the command. That is
+//     the common case under OpenSSH, whose do_exec_no_pty calls setsid() before
+//     exec'ing the login shell, when the login shell exec's a lone -c command in
+//     place (bash, zsh).
+//   - Otherwise this shell is not a group leader, so setsid(2) will succeed for
+//     it directly: setsid(1) then exec's without forking, needs no -w, and the
+//     command keeps the pid the login shell above is waiting on. util-linux and
+//     busybox both provide it. This handles a login shell that forks (dash,
+//     Debian's /bin/sh), any depth of ForceCommand or audit wrappers, and an
+//     sshd that does not isolate commands at all (Dropbear).
+//   - Failing that, perl's setpgrp(0,0) does the same with a new process group;
+//     macOS has perl but no setsid(1).
+//   - With none of these, it refuses and says what would fix it. It also refuses
+//     when the group cannot be read at all, since without knowing whether it is
+//     a leader it cannot tell whether setsid would fork and detach the session.
+//
+// echo appends a trailing newline, so the marker is a complete line readPGID
+// can read before exec runs the command: the handshake never waits on the
+// command's own output. Keep the echo (or anything else that terminates the
+// marker with a newline), or readPGID will block.
+const streamPrologue = `if [ -r /proc/$$/stat ]; then s=$(cat /proc/$$/stat); s=${s##*\) }; set -- $s; pgid=$3; ` +
+	`else pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d " "); fi; ` +
+	`if [ -z "$pgid" ]; then echo "torx: cannot determine the process group of pid $$: the node has neither /proc nor ps"; exit 1; fi; ` +
+	`if [ "$pgid" = "$$" ]; then echo ` + pgidMarker + `$$; eval "$c"; fi; ` +
+	`if command -v setsid >/dev/null 2>&1; then exec setsid sh -c "echo ` + pgidMarker + `\$\$; $c"; fi; ` +
+	`if command -v perl >/dev/null 2>&1; then exec perl -e 'setpgrp(0,0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' -- sh -c "echo ` + pgidMarker + `\$\$; $c"; fi; ` +
+	`echo "torx: pid $$ shares process group $pgid with the sshd or a wrapper above it and cannot start one of its own:` +
+	` install util-linux setsid (or perl) on the node, or use an sshd that starts each command in a new session, as OpenSSH does"; exit 1`
+
+// wrapForStream builds the remote command line for Stream: a sh that stores the
+// command line (remoteCommand's exec form, so the command replaces the shell
+// that runs it) in $c and then runs streamPrologue. $c is expanded once, inside
+// double quotes, into the -c string of the shell setsid or perl starts, and the
+// result of a variable expansion is not rescanned, so the single-quoted words
+// remoteCommand produced reach that shell intact.
 func wrapForStream(cmd torx.Cmd) string {
-	payload := "echo " + pgidMarker + "$$; " + remoteCommand(cmd, true)
-	return "setsid -w sh -c " + shQuote(payload)
+	return "sh -c " + shQuote("c="+shQuote(remoteCommand(cmd, true))+"; "+streamPrologue)
 }
 
 // readPGID reads the process-group id the stream wrapper prints on its first

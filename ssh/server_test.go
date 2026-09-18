@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -47,6 +48,27 @@ type testServer struct {
 	// server, so the client's version negotiation hangs -- a wedged SFTP subsystem
 	// that only a cancelled context can unblock.
 	stallSFTP bool
+
+	// forkDepth is how many forking shell layers serveExec puts between the
+	// session leader it creates and the command, standing in for login shells
+	// and wrappers that place the command differently. 0 exec's the command in
+	// place, as bash or zsh do for a single -c command, so the command is the
+	// session leader. 1 makes the leader fork the command, as dash (Debian's
+	// /bin/sh) does for any -c command; 2 adds a forking wrapper (a ForceCommand
+	// or audit script) between them. Whatever the depth, the session is the
+	// command's own, and Stream must run it.
+	forkDepth int
+
+	// sharedGroup makes serveExec run the command in this test process's own
+	// session and process group instead of a new session: the shape an sshd that
+	// does not isolate commands (Dropbear) produces, where the group is shared
+	// with the server itself. Stream must either move the command into a group of
+	// its own or refuse; killing the shared group would kill this test binary.
+	sharedGroup bool
+
+	// path, when set, replaces PATH in the command's environment, to stand in
+	// for nodes missing the tools Stream's wrapper can fall back on.
+	path string
 }
 
 // newTestServer starts a server on the loopback and returns a handle whose
@@ -151,6 +173,22 @@ func dialBackend(t *testing.T) *backend {
 	return b
 }
 
+// dialBackendWith is dialBackend with a hook to adjust the server (e.g. its
+// forkDepth) before it starts accepting connections.
+func dialBackendWith(t *testing.T, configure func(*testServer)) *backend {
+	t.Helper()
+	s := buildTestServer(t)
+	configure(s)
+	go s.serve()
+	be, err := build(s.descriptor(t))
+	if err != nil {
+		t.Fatalf("build backend: %v", err)
+	}
+	b := be.(*backend)
+	t.Cleanup(b.close)
+	return b
+}
+
 func (s *testServer) serve() {
 	for {
 		conn, err := s.ln.Accept()
@@ -201,7 +239,7 @@ func (s *testServer) serveSession(ch cryptossh.Channel, reqs <-chan *cryptossh.R
 				// remote that never emits the pgid marker.
 				continue
 			}
-			go serveExec(ch, payload.Command)
+			go s.serveExec(ch, payload.Command)
 		case "subsystem":
 			var payload struct{ Name string }
 			_ = cryptossh.Unmarshal(req.Payload, &payload)
@@ -224,19 +262,71 @@ func (s *testServer) serveSession(ch cryptossh.Channel, reqs <-chan *cryptossh.R
 	}
 }
 
-// serveExec runs line as a local subprocess in its own process group, wiring the
-// channel to its stdin/stdout/stderr the way sshd does and reporting its exit
-// status. Connecting stdin lets the client's Cmd.Stdin reach the command. It
-// runs to completion; a client that cancels simply closes its session, which
-// unblocks the client side.
-func serveExec(ch cryptossh.Channel, line string) {
+// serveExec runs line as a local subprocess -- in a new session, as OpenSSH's
+// do_exec_no_pty does, unless sharedGroup -- wiring the channel to its
+// stdin/stdout/stderr and reporting its exit status. Connecting stdin lets the
+// client's Cmd.Stdin reach the command. It runs to completion; a client that
+// cancels simply closes its session, which unblocks the client side.
+//
+// Only Stream's wrapper (recognizable by its marker) has its process shape set
+// by forkDepth; the shape is irrelevant to Exec, whose lines begin with cd or env
+// and could not take a leading exec anyway.
+func (s *testServer) serveExec(ch cryptossh.Channel, line string) {
+	if strings.Contains(line, pgidMarker) {
+		line = shapeStream(line, s.forkDepth)
+	}
 	cmd := exec.Command("sh", "-c", line)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if !s.sharedGroup {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	}
+	if s.path != "" {
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, "PATH=") {
+				cmd.Env = append(cmd.Env, kv)
+			}
+		}
+		cmd.Env = append(cmd.Env, "PATH="+s.path)
+	}
 	cmd.Stdin = ch
 	cmd.Stdout = ch
 	cmd.Stderr = ch.Stderr()
 	sendExit(ch, exitCode(cmd.Run()))
 	_ = ch.Close()
+}
+
+// shapeStream places forkDepth forking shell layers between the session leader
+// and the stream wrapper line. The shape is made explicit rather than left to
+// the host's sh, because shells differ on whether a lone -c command is exec'd in
+// place (bash, zsh, and macOS's dash do; Debian's dash forks): depth 0 exec's
+// line so the wrapper is the leader; otherwise each layer runs line and then
+// another command, which forces a fork at that layer.
+func shapeStream(line string, forkDepth int) string {
+	if forkDepth == 0 {
+		return "exec " + line
+	}
+	line += "; :"
+	for i := 1; i < forkDepth; i++ {
+		line = "sh -c " + shQuote(line) + "; :"
+	}
+	return line
+}
+
+// toolsPATH returns a directory holding only the named tools (as symlinks to
+// wherever PATH finds them now), for use as a command's whole PATH. It skips the
+// test if a tool is not installed on this host.
+func toolsPATH(t *testing.T, names ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range names {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			t.Skipf("%s not installed: %v", name, err)
+		}
+		if err := os.Symlink(path, filepath.Join(dir, name)); err != nil {
+			t.Fatalf("symlink %s: %v", name, err)
+		}
+	}
+	return dir
 }
 
 func exitCode(err error) int {

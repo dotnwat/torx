@@ -334,6 +334,16 @@ import _ "github.com/dotnwat/torx/ssh"
 }
 ```
 
+A node needs a POSIX `sh`. To kill a service's whole process group on
+teardown, torx runs each streamed command as the leader of its own group.
+Under OpenSSH (macOS Remote Login included) with a `bash` or `zsh` login shell
+that is already so, and nothing else is needed; otherwise the wrapper creates
+the group with `setsid` (util-linux or busybox) or `perl`, whichever the node
+has -- which also covers a login shell that forks (`dash`), `ForceCommand`
+wrappers, and sshds that do not isolate commands at all (Dropbear). A node
+with none of those refuses to stream, and the error says what to install,
+rather than risk signalling the sshd itself.
+
 Because a suite is one static binary, production and multi-node runs invoke it
 directly; `go run`/`go test` is one way to invoke the same binary, not a second
 code path.
