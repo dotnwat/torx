@@ -19,8 +19,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
-	"sort"
+	"slices"
 )
 
 // ParamsOverride replaces one job's compiled-in variants with externally
@@ -71,11 +72,7 @@ func ParseParamsOverrides(data []byte) (ParamsOverrides, error) {
 		return nil, errors.New("params: top level must be a JSON object keyed by job id")
 	}
 	// Walk entries in sorted order so which error surfaces is deterministic.
-	ids := make([]string, 0, len(top))
-	for id := range top {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
+	ids := slices.Sorted(maps.Keys(top))
 	out := make(ParamsOverrides, len(top))
 	for _, id := range ids {
 		ov, err := parseOverride(top[id])

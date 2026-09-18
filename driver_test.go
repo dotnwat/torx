@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -63,9 +64,7 @@ func sizedRequests(n, size int, extra Params) []JobRequest {
 	reqs := make([]JobRequest, n)
 	for i := range reqs {
 		p := Params{"size": size}
-		for k, v := range extra {
-			p[k] = v
-		}
+		maps.Copy(p, extra)
 		reqs[i] = JobRequest{ID: "dtest.job", Params: p}
 	}
 	return reqs

@@ -108,8 +108,7 @@ func ErrorInfoFrom(err error) *ErrorInfo {
 		return nil
 	}
 	info := &ErrorInfo{Message: err.Error()}
-	var te *Error
-	if errors.As(err, &te) {
+	if te, ok := errors.AsType[*Error](err); ok {
 		info.Kind = te.Kind.Error()
 	}
 	return info

@@ -16,10 +16,11 @@
 package torx
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -176,7 +177,7 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 		pending = append(pending, plan{req: req, spec: spec})
 	}
 	// Largest first.
-	sort.SliceStable(pending, func(i, j int) bool { return pending[i].spec.Size() > pending[j].spec.Size() })
+	slices.SortStableFunc(pending, func(a, b plan) int { return cmp.Compare(b.spec.Size(), a.spec.Size()) })
 
 	done := make(chan JobResult)
 	active := 0
@@ -195,7 +196,7 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 				break
 			}
 			p := pending[idx]
-			pending = append(pending[:idx], pending[idx+1:]...)
+			pending = slices.Delete(pending, idx, idx+1)
 			sub, err := pool.Allocate(p.spec)
 			if err != nil {
 				record(failResult(variantID(p.req.ID, p.req.Params), p.req.Params, err))

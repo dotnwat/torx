@@ -1,0 +1,27 @@
+version: "2"
+
+linters:
+  # errcheck, govet, ineffassign, staticcheck, unused
+  default: standard
+  enable:
+    - errorlint   # %w, errors.Is/As instead of == and type switches
+    - misspell
+    - modernize   # newer stdlib idioms (slices, maps, errors.AsType, ...)
+    - nolintlint  # every //nolint names a linter and is still needed
+    - thelper     # test helpers call t.Helper()
+    - unconvert
+  settings:
+    errcheck:
+      # Closing something we only read from, or a listener or connection we are
+      # done with, has no error worth acting on. Closing a file we wrote must
+      # still be checked, so *os.File is deliberately not listed.
+      exclude-functions:
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (net.Listener).Close
+        - (net.Conn).Close
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

@@ -15,8 +15,9 @@
 package torx
 
 import (
+	"cmp"
 	"fmt"
-	"sort"
+	"slices"
 	"sync"
 )
 
@@ -243,8 +244,8 @@ func constraintOrder(specs []NodeSpec) []int {
 	for i := range order {
 		order[i] = i
 	}
-	sort.SliceStable(order, func(a, b int) bool {
-		return specScore(specs[order[a]]) > specScore(specs[order[b]])
+	slices.SortStableFunc(order, func(a, b int) int {
+		return cmp.Compare(specScore(specs[b]), specScore(specs[a]))
 	})
 	return order
 }

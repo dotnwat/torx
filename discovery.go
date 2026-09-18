@@ -18,8 +18,9 @@ package torx
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -51,11 +52,7 @@ type ParamResolver interface {
 // taking dimensions in sorted name order so the result is deterministic. With no
 // dimensions it returns a single empty parameter set.
 func Matrix(dims map[string][]any) []Params {
-	keys := make([]string, 0, len(dims))
-	for k := range dims {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(dims))
 
 	result := []Params{{}}
 	for _, k := range keys {
@@ -63,9 +60,7 @@ func Matrix(dims map[string][]any) []Params {
 		for _, base := range result {
 			for _, v := range dims[k] {
 				p := make(Params, len(base)+1)
-				for bk, bv := range base {
-					p[bk] = bv
-				}
+				maps.Copy(p, base)
 				p[k] = v
 				next = append(next, p)
 			}
@@ -143,7 +138,7 @@ func DiscoverWith(overrides ParamsOverrides, patterns ...string) ([]JobRequest, 
 		}
 	}
 	if len(unselected) > 0 {
-		sort.Strings(unselected)
+		slices.Sort(unselected)
 		return nil, fmt.Errorf("discover: params override selects no variant of: %s", strings.Join(unselected, ", "))
 	}
 	return requests, nil
@@ -264,11 +259,7 @@ func variantID(base string, params Params) string {
 	if len(params) == 0 {
 		return base
 	}
-	keys := make([]string, 0, len(params))
-	for k := range params {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(params))
 	parts := make([]string, len(keys))
 	for i, k := range keys {
 		parts[i] = k + "=" + encodeParamValue(params[k])

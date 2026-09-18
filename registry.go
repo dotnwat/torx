@@ -15,7 +15,8 @@
 package torx
 
 import (
-	"sort"
+	"maps"
+	"slices"
 	"sync"
 )
 
@@ -40,12 +41,7 @@ func Register(id string, factory func() Job) {
 func RegisteredJobs() []string {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	ids := make([]string, 0, len(registry.factories))
-	for id := range registry.factories {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
+	return slices.Sorted(maps.Keys(registry.factories))
 }
 
 // lookupJob returns the factory registered for id.

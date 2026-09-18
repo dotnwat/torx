@@ -266,8 +266,7 @@ func errorInfo(err error) *ErrorInfo {
 	if info == nil {
 		return nil
 	}
-	var pe *panicError
-	if errors.As(err, &pe) {
+	if pe, ok := errors.AsType[*panicError](err); ok {
 		info.Stack = pe.stack
 	}
 	return info

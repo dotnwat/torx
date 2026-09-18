@@ -66,8 +66,7 @@ func (b LocalBackend) Exec(ctx context.Context, cmd Cmd) (ExecResult, error) {
 		return res, Wrap(ErrBackend, "backend: exec "+cmd.Path, ctxErr)
 	}
 	if err != nil {
-		var exit *exec.ExitError
-		if errors.As(err, &exit) {
+		if exit, ok := errors.AsType[*exec.ExitError](err); ok {
 			res.ExitCode = exit.ExitCode()
 			return res, nil
 		}
@@ -128,7 +127,7 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return Wrap(ErrBackend, "backend: copy", err)
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	info, err := in.Stat()
 	if err != nil {
 		return Wrap(ErrBackend, "backend: copy", err)

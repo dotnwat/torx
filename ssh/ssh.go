@@ -176,7 +176,7 @@ func (b *backend) Exec(ctx context.Context, cmd torx.Cmd) (torx.ExecResult, erro
 	if err != nil {
 		return torx.ExecResult{}, torx.Wrap(torx.ErrBackend, "ssh: session", err)
 	}
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	var stdout, stderr bytes.Buffer
 	sess.Stdout = &stdout
@@ -191,8 +191,7 @@ func (b *backend) Exec(ctx context.Context, cmd torx.Cmd) (torx.ExecResult, erro
 		return res, torx.Wrap(torx.ErrBackend, "ssh: exec "+cmd.Path, ctx.Err())
 	}
 	if runErr != nil {
-		var exit *cryptossh.ExitError
-		if errors.As(runErr, &exit) {
+		if exit, ok := errors.AsType[*cryptossh.ExitError](runErr); ok {
 			res.ExitCode = exit.ExitStatus()
 			return res, nil
 		}

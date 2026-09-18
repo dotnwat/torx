@@ -74,6 +74,7 @@ type testServer struct {
 // newTestServer starts a server on the loopback and returns a handle whose
 // descriptor builds a backend that authenticates to and trusts it.
 func newTestServer(t *testing.T) *testServer {
+	t.Helper()
 	s := buildTestServer(t)
 	go s.serve()
 	return s
@@ -205,7 +206,7 @@ func (s *testServer) handleConn(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	defer sshConn.Close()
+	defer func() { _ = sshConn.Close() }()
 	go cryptossh.DiscardRequests(reqs)
 	for nc := range chans {
 		if nc.ChannelType() != "session" {

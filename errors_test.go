@@ -30,7 +30,7 @@ func TestErrorAsExtractsStructured(t *testing.T) {
 	if te.Op != "service: start" {
 		t.Errorf("Op = %q, want %q", te.Op, "service: start")
 	}
-	if te.Kind != ErrService {
+	if !errors.Is(te.Kind, ErrService) {
 		t.Errorf("Kind = %v, want ErrService", te.Kind)
 	}
 }
