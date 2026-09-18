@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package ssh is torx's SSH backend: it drives a node over an SSH connection,
 // running commands through exec sessions and moving files over SFTP. It
 // registers itself under the "ssh" backend kind, so a suite blank-imports this
@@ -174,7 +176,7 @@ func (b *backend) Exec(ctx context.Context, cmd torx.Cmd) (torx.ExecResult, erro
 	if err != nil {
 		return torx.ExecResult{}, torx.Wrap(torx.ErrBackend, "ssh: session", err)
 	}
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	var stdout, stderr bytes.Buffer
 	sess.Stdout = &stdout
@@ -189,8 +191,7 @@ func (b *backend) Exec(ctx context.Context, cmd torx.Cmd) (torx.ExecResult, erro
 		return res, torx.Wrap(torx.ErrBackend, "ssh: exec "+cmd.Path, ctx.Err())
 	}
 	if runErr != nil {
-		var exit *cryptossh.ExitError
-		if errors.As(runErr, &exit) {
+		if exit, ok := errors.AsType[*cryptossh.ExitError](runErr); ok {
 			res.ExitCode = exit.ExitStatus()
 			return res, nil
 		}
@@ -433,14 +434,19 @@ func readPGID(r *bufio.Reader) (int, error) {
 // that pid crosses the wire from a node-side file, it is validated before use:
 // kill treats a non-positive operand as a process group or a broadcast, so a
 // stale or hostile pidfile holding 0 or -1 must never become "kill -KILL -1".
-func (b *backend) Signal(ctx context.Context, pid int, sig syscall.Signal) error {
+// kill(1) takes the signal by number, so sig must be a syscall.Signal.
+func (b *backend) Signal(ctx context.Context, pid int, sig os.Signal) error {
+	num, ok := sig.(syscall.Signal)
+	if !ok {
+		return torx.Wrap(torx.ErrBackend, "ssh: signal", fmt.Errorf("unsupported signal %v (%T)", sig, sig))
+	}
 	if pid < 2 {
 		// 1 is init, 0 is the caller's process group, and negatives target a group
 		// or every process the user may signal. Only a specific process is allowed,
 		// matching the pgid guard in killGroup and readPGID.
 		return torx.Wrap(torx.ErrBackend, "ssh: signal", fmt.Errorf("refusing to signal unsafe pid %d", pid))
 	}
-	res, err := b.Exec(ctx, torx.Command("kill", "-"+strconv.Itoa(int(sig)), strconv.Itoa(pid)))
+	res, err := b.Exec(ctx, torx.Command("kill", "-"+strconv.Itoa(int(num)), strconv.Itoa(pid)))
 	if err != nil {
 		return err
 	}

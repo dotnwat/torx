@@ -1,3 +1,5 @@
+//go:build unix
+
 // Readiness primitives: wait for a condition to hold before proceeding.
 //
 // WaitUntil is the polling core; WaitForPort, WaitForHTTP, and WaitForLog build

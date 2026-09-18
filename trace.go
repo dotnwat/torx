@@ -1,3 +1,5 @@
+//go:build unix
+
 // Persisting a run to a results tree on disk.
 //
 // A run gets a timestamped directory under the results root, with a "latest"

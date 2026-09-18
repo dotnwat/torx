@@ -1,3 +1,5 @@
+//go:build unix
+
 // Collecting artifacts and running finalizers on teardown.
 //
 // An Artifact names a file on a node to gather after a job runs. Collect copies
@@ -13,6 +15,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 )
 
@@ -86,8 +89,8 @@ func (f *Finalizers) Run(ctx context.Context) error {
 	f.mu.Unlock()
 
 	var errs MultiError
-	for i := len(fns) - 1; i >= 0; i-- {
-		errs.Append(fns[i](ctx))
+	for _, fn := range slices.Backward(fns) {
+		errs.Append(fn(ctx))
 	}
 	return errs.Err()
 }

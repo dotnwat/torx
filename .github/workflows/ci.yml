@@ -50,7 +50,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: stable
-      - name: staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+      # Linters and settings live in .golangci.yml (staticcheck is in its
+      # standard set); run the same thing locally with `golangci-lint run`.
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

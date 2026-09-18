@@ -1,3 +1,5 @@
+//go:build unix
+
 // Pool: the finite set of nodes a session owns, and per-job allocation.
 //
 // Allocate carves a SubPool out of the pool to satisfy a job's PoolSpec, all or
@@ -13,8 +15,9 @@
 package torx
 
 import (
+	"cmp"
 	"fmt"
-	"sort"
+	"slices"
 	"sync"
 )
 
@@ -241,8 +244,8 @@ func constraintOrder(specs []NodeSpec) []int {
 	for i := range order {
 		order[i] = i
 	}
-	sort.SliceStable(order, func(a, b int) bool {
-		return specScore(specs[order[a]]) > specScore(specs[order[b]])
+	slices.SortStableFunc(order, func(a, b int) int {
+		return cmp.Compare(specScore(specs[b]), specScore(specs[a]))
 	})
 	return order
 }

@@ -1,3 +1,5 @@
+//go:build unix
+
 // Discovery and parametrization: turning the registered jobs into the concrete
 // list of variants to run.
 //
@@ -16,12 +18,15 @@ package torx
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"math"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 )
 
 // Parametrized is implemented by a job that runs as several parameter variants.
+// Matrix may return at most MaxVariants of them.
 type Parametrized interface {
 	Matrix() []Params
 }
@@ -45,15 +50,65 @@ type ParamResolver interface {
 	ResolveParams(p Params) (Params, error)
 }
 
+// MaxVariants is the most variants one job may run as, however they are
+// declared: through Matrix, a job's own Matrix method, or a -params entry's
+// matrix and configs together. It bounds what discovery materializes before any
+// node is allocated. A matrix is cheap to write and expensive to expand -- thirty
+// two-value dimensions is a few hundred bytes and a billion variants -- and
+// nothing near this size is a test plan, so exceeding it is an error that names
+// the count, never a truncation: Matrix panics (discovery recovers that into the
+// job's failure), a -params file is rejected when parsed, and a job whose Matrix
+// method returns more fails discovery.
+const MaxVariants = 1 << 16
+
+// matrixSize is the number of points in dims' cross product, computed without
+// building it. It saturates at math.MaxInt instead of overflowing and reports
+// exact as false when it did.
+func matrixSize(dims map[string][]any) (n int, exact bool) {
+	// An empty dimension makes the product zero whatever the others hold. Settle
+	// that first, over every dimension: the saturating pass below stops at the
+	// first overflow, and map iteration order would otherwise decide whether it
+	// had seen the empty one by then.
+	for _, values := range dims {
+		if len(values) == 0 {
+			return 0, true
+		}
+	}
+	n = 1
+	for _, values := range dims {
+		if n > math.MaxInt/len(values) {
+			return math.MaxInt, false
+		}
+		n *= len(values)
+	}
+	return n, true
+}
+
+// tooManyVariants is the error for a declaration exceeding MaxVariants.
+func tooManyVariants(n int, exact bool) error {
+	if !exact {
+		return fmt.Errorf("expands to more than %d variants; the limit is %d", n, MaxVariants)
+	}
+	return fmt.Errorf("expands to %d variants; the limit is %d", n, MaxVariants)
+}
+
 // Matrix expands named dimensions into the cross product of parameter sets,
 // taking dimensions in sorted name order so the result is deterministic. With no
-// dimensions it returns a single empty parameter set.
+// dimensions it returns a single empty parameter set; with an empty dimension it
+// returns no parameter sets. A product larger than MaxVariants is a programming
+// error in the job that declared it, so Matrix panics before allocating
+// anything; discovery recovers the panic and fails that job alone.
 func Matrix(dims map[string][]any) []Params {
-	keys := make([]string, 0, len(dims))
-	for k := range dims {
-		keys = append(keys, k)
+	n, exact := matrixSize(dims)
+	if n > MaxVariants {
+		panic("torx: matrix " + tooManyVariants(n, exact).Error())
 	}
-	sort.Strings(keys)
+	if n == 0 {
+		// An empty dimension empties the product. Return now rather than build
+		// the cross product of everything sorted before it only to discard it.
+		return nil
+	}
+	keys := slices.Sorted(maps.Keys(dims))
 
 	result := []Params{{}}
 	for _, k := range keys {
@@ -61,9 +116,7 @@ func Matrix(dims map[string][]any) []Params {
 		for _, base := range result {
 			for _, v := range dims[k] {
 				p := make(Params, len(base)+1)
-				for bk, bv := range base {
-					p[bk] = bv
-				}
+				maps.Copy(p, base)
 				p[k] = v
 				next = append(next, p)
 			}
@@ -141,7 +194,7 @@ func DiscoverWith(overrides ParamsOverrides, patterns ...string) ([]JobRequest, 
 		}
 	}
 	if len(unselected) > 0 {
-		sort.Strings(unselected)
+		slices.Sort(unselected)
 		return nil, fmt.Errorf("discover: params override selects no variant of: %s", strings.Join(unselected, ", "))
 	}
 	return requests, nil
@@ -163,9 +216,15 @@ func discoverJob(id string, factory func() Job, override ParamsOverride, hasOver
 	err := recovered(func() error {
 		job = factory()
 		if hasOverride {
-			raw = override.variants()
-		} else {
-			raw = variantsOf(job)
+			var verr error
+			raw, verr = override.variants()
+			return verr
+		}
+		raw = variantsOf(job)
+		if len(raw) > MaxVariants {
+			// A Matrix method that builds its own slice bypasses Matrix's check;
+			// hold it to the same limit, if only after the fact.
+			return fmt.Errorf("declares %d variants; the limit is %d", len(raw), MaxVariants)
 		}
 		return nil
 	})
@@ -262,11 +321,7 @@ func variantID(base string, params Params) string {
 	if len(params) == 0 {
 		return base
 	}
-	keys := make([]string, 0, len(params))
-	for k := range params {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(params))
 	parts := make([]string, len(keys))
 	for i, k := range keys {
 		parts[i] = k + "=" + encodeParamValue(params[k])

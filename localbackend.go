@@ -1,3 +1,5 @@
+//go:build unix
+
 package torx
 
 import (
@@ -64,8 +66,7 @@ func (b LocalBackend) Exec(ctx context.Context, cmd Cmd) (ExecResult, error) {
 		return res, Wrap(ErrBackend, "backend: exec "+cmd.Path, ctxErr)
 	}
 	if err != nil {
-		var exit *exec.ExitError
-		if errors.As(err, &exit) {
+		if exit, ok := errors.AsType[*exec.ExitError](err); ok {
 			res.ExitCode = exit.ExitCode()
 			return res, nil
 		}
@@ -126,7 +127,7 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return Wrap(ErrBackend, "backend: copy", err)
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	info, err := in.Stat()
 	if err != nil {
 		return Wrap(ErrBackend, "backend: copy", err)
@@ -185,7 +186,7 @@ func (b LocalBackend) Rm(ctx context.Context, path string) error {
 	return nil
 }
 
-func (b LocalBackend) Signal(ctx context.Context, pid int, sig syscall.Signal) error {
+func (b LocalBackend) Signal(ctx context.Context, pid int, sig os.Signal) error {
 	if pid < minSignalablePID {
 		// os.FindProcess never fails on Unix, so a non-positive pid would reach
 		// kill(2) verbatim: 0 targets the caller's whole process group, -1 every

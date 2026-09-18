@@ -1,7 +1,10 @@
+//go:build unix
+
 package torx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -123,8 +126,13 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 
 	if !haveResult {
 		// The worker died before reporting a result, so its teardown never
-		// completed: mark the node dirty so the driver quarantines it.
-		res := failResult(variantID(a.JobID, a.Params), a.Params, fmt.Errorf("driver: worker produced no result: %v", waitErr))
+		// completed: mark the node dirty so the driver quarantines it. waitErr is
+		// nil when the worker exited zero without ever sending a result.
+		err := errors.New("driver: worker produced no result")
+		if waitErr != nil {
+			err = fmt.Errorf("driver: worker produced no result: %w", waitErr)
+		}
+		res := failResult(variantID(a.JobID, a.Params), a.Params, err)
 		res.Dirty = true
 		return res, nil
 	}

@@ -1,3 +1,5 @@
+//go:build unix
+
 package torx
 
 import (
@@ -38,7 +40,7 @@ func workerMain() int {
 		fmt.Fprintln(os.Stderr, "torx worker: no event pipe on fd 3")
 		return 1
 	}
-	defer events.Close()
+	defer func() { _ = events.Close() }()
 	// The driver handed us this pipe via ExtraFiles, which clears close-on-exec;
 	// restore it so the services this worker spawns do not inherit it. A service
 	// that kept the write end open would stop the driver's reader from ever
@@ -110,13 +112,14 @@ func driverMain(args []string) int {
 	}
 
 	reporters := []Reporter{ConsoleReporter{W: os.Stdout}}
+	var resultsFile *os.File
 	if *resultsPath != "" {
 		f, err := os.Create(*resultsPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "torx:", err)
 			return 2
 		}
-		defer f.Close()
+		resultsFile = f
 		reporters = append(reporters, NewJSONReporter(f))
 	}
 
@@ -130,7 +133,16 @@ func driverMain(args []string) int {
 
 	res := Run(ctx, pool, SelfExecLauncher{}, requests,
 		RunOptions{MaxParallel: *parallel, Reporters: reporters, ResultsDir: *resultsDir, RunDir: *runDir})
-	if !res.Ok() {
+	ok := res.Ok()
+	if resultsFile != nil {
+		// The reporter has written every result by now; a close that fails is
+		// results lost, and must fail the run rather than pass silently.
+		if err := resultsFile.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "torx: results file:", err)
+			ok = false
+		}
+	}
+	if !ok {
 		return 1
 	}
 	return 0
@@ -156,13 +168,13 @@ func selectPool(poolFile string, nodes int, requests []JobRequest) (*Pool, error
 
 // maxDemand returns the largest node demand among the requests, at least 1.
 func maxDemand(requests []JobRequest) int {
-	max := 1
+	demand := 1
 	for _, req := range requests {
-		if spec, err := sizeJob(req); err == nil && spec.Size() > max {
-			max = spec.Size()
+		if spec, err := sizeJob(req); err == nil {
+			demand = max(demand, spec.Size())
 		}
 	}
-	return max
+	return demand
 }
 
 // localPool builds a pool of n local nodes sharing one port allocator.

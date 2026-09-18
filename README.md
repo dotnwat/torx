@@ -296,9 +296,10 @@ plus the configs):
 
 Entries replace a job's compiled-in variants entirely; nothing is merged. The
 envelope is strict — unknown fields, empty forms, empty dimensions, and null
-values are rejected, and naming a job that is unknown or whose variants end up
-entirely unselected is an error — because externally supplied configuration
-must never degrade silently. Each supplied parameter set still passes through
+values are rejected, an entry expanding to more than `torx.MaxVariants`
+(65536) variants is refused with the count named, and naming a job that is
+unknown or whose variants end up entirely unselected is an error — because
+externally supplied configuration must never degrade silently. Each supplied parameter set still passes through
 the job's `ResolveParams` (above), so ids stay canonical and two entries that
 resolve to the same configuration are rejected as duplicates.
 

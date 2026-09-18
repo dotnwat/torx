@@ -1,3 +1,5 @@
+//go:build unix
+
 package ssh
 
 import (
@@ -106,7 +108,7 @@ func (b *backend) Put(ctx context.Context, localPath, nodePath string) error {
 		if err != nil {
 			return err
 		}
-		defer in.Close()
+		defer func() { _ = in.Close() }()
 		out, err := sc.Create(nodePath)
 		if err != nil {
 			return err
@@ -126,7 +128,7 @@ func (b *backend) Get(ctx context.Context, nodePath, localPath string) error {
 		if err != nil {
 			return err
 		}
-		defer in.Close()
+		defer func() { _ = in.Close() }()
 		out, err := os.Create(localPath)
 		if err != nil {
 			return err
@@ -147,7 +149,7 @@ func (b *backend) ReadFile(ctx context.Context, path string) ([]byte, error) {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		d, err := io.ReadAll(f)
 		if err != nil {
 			return err

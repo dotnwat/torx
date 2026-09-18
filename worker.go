@@ -1,3 +1,5 @@
+//go:build unix
+
 // The worker: run one job from an assignment and stream the result back.
 //
 // RunWorker reads an Assignment, reconstructs the job from its id (look it up,
@@ -264,8 +266,7 @@ func errorInfo(err error) *ErrorInfo {
 	if info == nil {
 		return nil
 	}
-	var pe *panicError
-	if errors.As(err, &pe) {
+	if pe, ok := errors.AsType[*panicError](err); ok {
 		info.Stack = pe.stack
 	}
 	return info

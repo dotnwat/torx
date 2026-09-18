@@ -1,3 +1,5 @@
+//go:build unix
+
 // Node: a logical execution target.
 //
 // A Node bundles a Backend (the transport that runs commands and moves files)

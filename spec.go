@@ -1,3 +1,5 @@
+//go:build unix
+
 // Resource specifications: what a job asks of the nodes it allocates.
 //
 // A NodeSpec states the hard Required resources a node must provide, plus an

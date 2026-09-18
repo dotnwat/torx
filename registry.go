@@ -1,3 +1,5 @@
+//go:build unix
+
 // The job registry: jobs register themselves by id so the framework can
 // discover them and a worker can reconstruct one from its id. A job file
 // registers a factory in an init function:
@@ -13,7 +15,8 @@
 package torx
 
 import (
-	"sort"
+	"maps"
+	"slices"
 	"sync"
 )
 
@@ -38,12 +41,7 @@ func Register(id string, factory func() Job) {
 func RegisteredJobs() []string {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	ids := make([]string, 0, len(registry.factories))
-	for id := range registry.factories {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
+	return slices.Sorted(maps.Keys(registry.factories))
 }
 
 // lookupJob returns the factory registered for id.

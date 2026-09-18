@@ -1,3 +1,5 @@
+//go:build unix
+
 // Error taxonomy for torx.
 //
 // Every error torx surfaces wraps exactly one category sentinel

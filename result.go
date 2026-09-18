@@ -1,3 +1,5 @@
+//go:build unix
+
 // Results and the event stream.
 //
 // A job produces a JobResult -- its status, timing, an optional opaque data
@@ -106,8 +108,7 @@ func ErrorInfoFrom(err error) *ErrorInfo {
 		return nil
 	}
 	info := &ErrorInfo{Message: err.Error()}
-	var te *Error
-	if errors.As(err, &te) {
+	if te, ok := errors.AsType[*Error](err); ok {
 		info.Kind = te.Kind.Error()
 	}
 	return info

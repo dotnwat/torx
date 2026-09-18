@@ -16,9 +16,9 @@ func TestConsoleReporter(t *testing.T) {
 	var buf bytes.Buffer
 	r := ConsoleReporter{W: &buf}
 
-	r.Report(JobResult{ID: "a", Status: StatusPass, Start: t0, Stop: t0.Add(time.Second)})
-	r.Report(JobResult{ID: "b", Status: StatusFail, Start: t0, Stop: t0, Error: &ErrorInfo{Message: "boom"}})
-	r.Finish(SuiteResult{Jobs: []JobResult{{Status: StatusPass}, {Status: StatusFail}}})
+	_ = r.Report(JobResult{ID: "a", Status: StatusPass, Start: t0, Stop: t0.Add(time.Second)})
+	_ = r.Report(JobResult{ID: "b", Status: StatusFail, Start: t0, Stop: t0, Error: &ErrorInfo{Message: "boom"}})
+	_ = r.Finish(SuiteResult{Jobs: []JobResult{{Status: StatusPass}, {Status: StatusFail}}})
 
 	out := buf.String()
 	for _, want := range []string{"PASS", "a", "FAIL", "b", "boom", "2 jobs: 1 passed, 1 failed"} {
@@ -33,9 +33,9 @@ func TestJSONReporterRoundTrip(t *testing.T) {
 	r := NewJSONReporter(&buf)
 	in := []JobResult{{ID: "a", Status: StatusPass}, {ID: "b", Status: StatusFail}}
 	for _, res := range in {
-		r.Report(res)
+		_ = r.Report(res)
 	}
-	r.Finish(SuiteResult{Jobs: in})
+	_ = r.Finish(SuiteResult{Jobs: in})
 
 	// One JSON object per line.
 	if n := strings.Count(buf.String(), "\n"); n != 2 {

@@ -1,3 +1,5 @@
+//go:build unix
+
 // Coordination primitives for work co-located on a single host.
 //
 // PortAllocator hands out distinct free TCP ports and remembers them, so

@@ -382,3 +382,93 @@ func TestRunReportsDiscoveryPanicAsFailure(t *testing.T) {
 		t.Errorf("healthy job status = %v, want PASS (a broken sibling must not block it)", byID["disc.plain"])
 	}
 }
+
+// binaryDims builds n two-value dimensions, so the cross product is 2^n.
+func binaryDims(n int) map[string][]any {
+	dims := make(map[string][]any, n)
+	for i := range n {
+		dims[fmt.Sprintf("d%02d", i)] = []any{0, 1}
+	}
+	return dims
+}
+
+func TestMatrixLimit(t *testing.T) {
+	// Exactly MaxVariants is allowed; MaxVariants is a power of two.
+	if got := len(Matrix(binaryDims(16))); got != MaxVariants {
+		t.Fatalf("Matrix at the limit produced %d variants, want %d", got, MaxVariants)
+	}
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Matrix past the limit did not panic")
+		}
+		msg := fmt.Sprint(r)
+		if !strings.Contains(msg, "131072 variants") || !strings.Contains(msg, fmt.Sprint(MaxVariants)) {
+			t.Fatalf("panic does not name the count and the limit: %s", msg)
+		}
+	}()
+	Matrix(binaryDims(17))
+}
+
+func TestMatrixSizeSaturates(t *testing.T) {
+	// 70 binary dimensions overflow an int; the count must saturate, not wrap
+	// to something small that would pass the limit.
+	n, exact := matrixSize(binaryDims(70))
+	if exact || n <= MaxVariants {
+		t.Fatalf("matrixSize(2^70) = %d, exact=%v; want saturated above the limit", n, exact)
+	}
+	if n, exact := matrixSize(map[string][]any{"a": {1, 2}, "b": {}}); n != 0 || !exact {
+		t.Fatalf("matrixSize with an empty dimension = %d, %v; want 0, true", n, exact)
+	}
+}
+
+func TestMatrixEmptyDimensionBeatsOverflow(t *testing.T) {
+	// An empty dimension makes the product zero even when the other dimensions
+	// alone would overflow. Map iteration order varies per call, so the empty
+	// one may come after the point of saturation; the size must not depend on
+	// that. Each call is cheap, so many iterations cover the orders.
+	dims := binaryDims(70)
+	dims["a"] = nil
+	for range 500 {
+		if n, exact := matrixSize(dims); n != 0 || !exact {
+			t.Fatalf("matrixSize(2^70 with an empty dimension) = %d, %v; want 0, true", n, exact)
+		}
+		if got := Matrix(dims); len(got) != 0 {
+			t.Fatalf("Matrix with an empty dimension produced %d variants, want none", len(got))
+		}
+	}
+	// Sorted last, the empty dimension must not cost building the prefix either:
+	// 16 binary dimensions plus an empty "z" returns immediately.
+	dims = binaryDims(16)
+	dims["z"] = []any{}
+	if got := Matrix(dims); len(got) != 0 {
+		t.Fatalf("Matrix with a trailing empty dimension produced %d variants, want none", len(got))
+	}
+	// With no dimensions at all the product is one: a single empty parameter set.
+	if got := Matrix(map[string][]any{}); len(got) != 1 || len(got[0]) != 0 {
+		t.Fatalf("Matrix(empty map) = %v, want one empty params", got)
+	}
+}
+
+// oversizeJob returns more variants than MaxVariants from its own Matrix method
+// without going through torx.Matrix, so only discovery's check can catch it.
+type oversizeJob struct{ JobBase }
+
+func (*oversizeJob) Declare(*JobContext)                    {}
+func (*oversizeJob) Run(context.Context, *JobContext) error { return nil }
+func (*oversizeJob) Matrix() []Params                       { return make([]Params, MaxVariants+1) }
+
+func TestDiscoverConfinesOversizeMatrix(t *testing.T) {
+	Register("discoversize.job", func() Job { return &oversizeJob{} })
+	reqs, err := Discover("^discoversize[.]job$")
+	if err != nil {
+		t.Fatalf("Discover failed outright on an oversize job instead of confining it: %v", err)
+	}
+	if len(reqs) != 1 || reqs[0].discErr == nil {
+		t.Fatalf("got %+v, want one request carrying a discovery error", reqs)
+	}
+	if msg := reqs[0].discErr.Error(); !strings.Contains(msg, fmt.Sprintf("%d variants", MaxVariants+1)) {
+		t.Fatalf("discovery error does not name the count: %s", msg)
+	}
+}

@@ -1,3 +1,5 @@
+//go:build unix
+
 // Externally supplied parametrization: the -params file.
 //
 // A benchmarking or testing user arrives with a specific configuration or
@@ -6,8 +8,9 @@
 // discovery time: a "matrix" of dimensions expanded to its cross product, an
 // explicit "configs" list for curated points a cross product cannot express,
 // or both (the expanded matrix plus the configs). The envelope is strict --
-// unknown fields, empty forms, empty dimensions, and null values are all
-// rejected -- because externally supplied configuration must never degrade
+// unknown fields, empty forms, empty dimensions, null values, and entries
+// expanding past MaxVariants are all rejected -- because externally supplied
+// configuration must never degrade
 // silently. torx never interprets a parameter value; the file only decides
 // which opaque parameter sets exist.
 
@@ -17,8 +20,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"math"
 	"os"
-	"sort"
+	"slices"
 )
 
 // ParamsOverride replaces one job's compiled-in variants with externally
@@ -30,13 +35,33 @@ type ParamsOverride struct {
 	Configs []Params         `json:"configs,omitempty"`
 }
 
-// variants expands the override into the parameter sets it describes.
-func (o ParamsOverride) variants() []Params {
+// size is the number of variants the override expands to -- its matrix's cross
+// product plus its configs -- computed without expanding. It saturates at
+// math.MaxInt and reports exact as false when it did.
+func (o ParamsOverride) size() (n int, exact bool) {
+	n = len(o.Configs)
+	if len(o.Matrix) == 0 {
+		return n, true
+	}
+	m, mexact := matrixSize(o.Matrix)
+	if !mexact || m > math.MaxInt-n {
+		return math.MaxInt, false
+	}
+	return n + m, true
+}
+
+// variants expands the override into the parameter sets it describes. An
+// override past MaxVariants is refused before anything is built; parsed
+// overrides never are, but the fields are public.
+func (o ParamsOverride) variants() ([]Params, error) {
+	if n, exact := o.size(); n > MaxVariants {
+		return nil, tooManyVariants(n, exact)
+	}
 	var out []Params
 	if len(o.Matrix) > 0 {
 		out = append(out, Matrix(o.Matrix)...)
 	}
-	return append(out, o.Configs...)
+	return append(out, o.Configs...), nil
 }
 
 // ParamsOverrides is the parsed form of a -params file: job id to override.
@@ -69,11 +94,7 @@ func ParseParamsOverrides(data []byte) (ParamsOverrides, error) {
 		return nil, errors.New("params: top level must be a JSON object keyed by job id")
 	}
 	// Walk entries in sorted order so which error surfaces is deterministic.
-	ids := make([]string, 0, len(top))
-	for id := range top {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
+	ids := slices.Sorted(maps.Keys(top))
 	out := make(ParamsOverrides, len(top))
 	for _, id := range ids {
 		ov, err := parseOverride(top[id])
@@ -114,6 +135,12 @@ func parseOverride(raw json.RawMessage) (ParamsOverride, error) {
 			return ParamsOverride{}, err
 		}
 		ov.Configs = c
+	}
+	// The entry is well-formed; make sure it is also a size anyone means to run.
+	// This is checked here, at load, so an oversize file fails before discovery
+	// and with the job id attached, rather than while expanding.
+	if n, exact := ov.size(); n > MaxVariants {
+		return ParamsOverride{}, tooManyVariants(n, exact)
 	}
 	return ov, nil
 }

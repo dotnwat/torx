@@ -1,3 +1,5 @@
+//go:build unix
+
 // Emitting trace events from anywhere in a job's execution.
 //
 // A job's event sink is carried on its context so framework and service code can

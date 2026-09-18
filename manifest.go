@@ -1,3 +1,5 @@
+//go:build unix
+
 // The node manifest: the boundary between provisioning and torx.
 //
 // A manifest describes the nodes a run executes against -- nodes an out-of-band
@@ -27,7 +29,7 @@ type ManifestNode struct {
 	Name      string            `json:"name"`
 	Role      string            `json:"role,omitempty"`
 	Address   string            `json:"address,omitempty"`
-	Resources ManifestResources `json:"resources,omitempty"`
+	Resources ManifestResources `json:"resources"`
 	Scratch   string            `json:"scratch"`
 	Backend   BackendDescriptor `json:"backend"`
 	Ports     *PortRange        `json:"ports,omitempty"`

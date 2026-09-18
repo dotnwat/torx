@@ -1,3 +1,5 @@
+//go:build unix
+
 // Job: one test or benchmark.
 //
 // A job Declares the services it needs (pure: it constructs and configures them
