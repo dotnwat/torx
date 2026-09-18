@@ -125,12 +125,14 @@ guarantee and pass.
 
 **`rqlite.failover`** starts three nodes, writes at the leader, crashes the
 leader outright (SIGKILL, so no graceful stepdown), waits for the survivors to
-elect a successor, writes through the successor, and checks every survivor
-sees all the rows at `linearizable`. Then it restarts the crashed node,
-waits until it reports itself caught up (`/readyz?sync`), reads its own local
-copy at `none` to prove the rows reached its disk rather than being forwarded
-from elsewhere, and checks the membership is whole again. The election time
-is recorded in the result's data.
+elect a successor, writes a thousand rows through the successor, and checks
+every survivor sees all the rows at `linearizable`. Then it restarts the
+crashed node, waits until it reports it has received the log it missed
+(`/readyz?sync`), polls its own local copy at `none` until every row is
+there -- receiving the log and applying it to SQLite are separate steps, so
+the count converges rather than being current the moment the node is synced
+-- and checks the membership is whole again. The election time is recorded in
+the result's data.
 
 ## How the service is built
 
@@ -140,9 +142,13 @@ are the ones that matter for any multi-node service on torx.
 **A cluster is one service, not N.** `rqlite.New(name, nodes)` asks for
 `nodes` nodes and runs one `rqlited` on each. The first node bootstraps a
 one-node cluster and every later node joins through the nodes started before
-it. That fits `ServiceBase`'s default lifecycle, which starts nodes one at a
-time in order: by the time `StartNode` runs for a node, its predecessors are
-up and their addresses known. (rqlite's order-independent alternative,
+it. `ServiceBase`'s default lifecycle starts nodes one at a time in order,
+but it launches every node before the framework waits on any of them, so a
+predecessor that has been launched is not one that is ready -- and a joiner
+that cannot reach a ready seed gives up after a few attempts and exits for
+good. The service therefore waits for a node's predecessors to be ready
+inside `StartNode`, before launching it, which turns the start order into a
+real prerequisite. (rqlite's order-independent alternative,
 `-bootstrap-expect`, needs every node's Raft address before the first start,
 so a service using it would allocate all ports up front in an overridden
 `Start`.)
@@ -166,9 +172,11 @@ change between the two.
 **Readiness is a real check.** `WaitNode` polls `/readyz` with
 `torx.WaitForHTTP`, which treats the 503 rqlite serves until it knows a leader
 as "not yet". `WaitSynced` polls `/readyz?sync`, which additionally waits for
-the node to apply everything the leader had committed. Every wait is bounded
-by a deadline inside the service, so a node that never comes up fails the job
-rather than hanging it.
+the node to receive everything the leader had committed; applying those
+entries to the node's SQLite copy comes after, so a job reading that copy
+polls for what it expects (`awaitRows`) instead of asserting it. Every wait
+is bounded by a deadline inside the service, so a node that never comes up
+fails the job rather than hanging it.
 
 **Output is an artifact.** `StartCaptured` sends each `rqlited`'s output to
 `stdout.log` on its node and collects it after the job. It truncates that file
