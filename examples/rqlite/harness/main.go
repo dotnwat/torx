@@ -12,11 +12,12 @@
 //   - build the suite binary from the current tree;
 //   - check that rqlited, which the service resolves from PATH by name, is
 //     installed and of the major version the suite is written against;
-//   - create the run directory and record the invocation in it -- argv, git
-//     identity, the suite binary and its exact arguments, the rqlited found, a
-//     verbatim copy of any -params file -- before the suite starts, so a
-//     results tree always says what produced it, even for a run that was
-//     interrupted;
+//   - mint the run directory, through torx so it is named and linked the way
+//     the suite's own -results-dir mode would, and record the invocation in
+//     it -- argv, git identity, the suite binary and its exact arguments, the
+//     rqlited found, a verbatim copy of any -params file -- before the suite
+//     starts, so a results tree always says what produced it, even for a run
+//     that was interrupted;
 //   - exec the suite with -run-dir pointing at that directory, so the suite's
 //     exit status is the harness's.
 //
@@ -41,6 +42,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+
+	"github.com/dotnwat/torx"
 )
 
 func main() {
@@ -97,7 +100,7 @@ func run(args []string) int {
 	if root == "" {
 		root = filepath.Join(repo, defaultResultsDir)
 	}
-	runDir, err := makeRunDir(root)
+	runDir, err := torx.MakeRunDir(root)
 	if err != nil {
 		return die(fmt.Errorf("run directory: %w", err))
 	}

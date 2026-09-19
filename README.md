@@ -321,7 +321,10 @@ the directory exactly as given — no timestamped subdirectory is minted and no
 `latest` symlink is maintained (those conveniences belong to `-results-dir`
 mode) — and fills in the per-variant subdirectories and the final `run.json`.
 The directory must already exist, and `-run-dir` is mutually exclusive with
-`-results-dir`.
+`-results-dir`. A launcher that wants its runs named and linked the way
+`-results-dir` mode does it mints the directory with `torx.MakeRunDir(root)`,
+the same call the driver makes: a UTC timestamp plus a random suffix, unique
+under same-second starts, with `latest` swapped in atomically.
 
 **Remote pools.** To run against nodes a provisioner prepared, pass a node
 manifest with `-pool` and blank-import the ssh backend in your suite's `main` so

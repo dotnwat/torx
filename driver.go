@@ -40,7 +40,7 @@ type RunOptions struct {
 	MaxParallel int           // maximum concurrent jobs (default 1)
 	Timeout     time.Duration // per-job timeout; 0 means none
 	ExitFirst   bool          // stop scheduling after the first failure
-	ResultsDir  string        // results root; the run gets a fresh timestamped directory under it
+	ResultsDir  string        // results root; the run gets a fresh directory under it (see MakeRunDir)
 	Sink        EventSink     // receives every job's events; must be concurrency-safe
 	Reporters   []Reporter    // consume each result as it lands, then the aggregate
 
@@ -48,8 +48,9 @@ type RunOptions struct {
 	// timestamped subdirectory is minted and no "latest" symlink is maintained.
 	// It must already exist -- the caller that owns it (a launcher) creates it
 	// and writes its own metadata there before the run starts, so the exact
-	// directory is known and populated even if the run is interrupted.
-	// Mutually exclusive with ResultsDir.
+	// directory is known and populated even if the run is interrupted. A
+	// launcher that wants the directory named and linked the way ResultsDir
+	// mode does it mints it with MakeRunDir. Mutually exclusive with ResultsDir.
 	RunDir string
 }
 
@@ -118,8 +119,7 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 			runDir = opts.RunDir
 		}
 	case opts.ResultsDir != "":
-		stamp := time.Now().UTC().Format("2006-01-02T15-04-05Z")
-		if d, err := makeRunDir(opts.ResultsDir, stamp); err == nil {
+		if d, err := MakeRunDir(opts.ResultsDir); err == nil {
 			runDir = d
 		} else {
 			persistErr = fmt.Sprintf("cannot create results tree under %q: %v", opts.ResultsDir, err)

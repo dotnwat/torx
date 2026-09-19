@@ -140,34 +140,6 @@ func goBuild(repo, out string) error {
 	return nil
 }
 
-// makeRunDir creates a unique run directory under root and repoints
-// root/latest at it, the way torx itself does in -results-dir mode: a UTC
-// timestamp names the run, a random suffix keeps two runs started in the same
-// second apart, and the latest link is a best-effort convenience swapped in
-// by rename so it is never seen half-written.
-func makeRunDir(root string) (string, error) {
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return "", err
-	}
-	stamp := time.Now().UTC().Format("2006-01-02T15-04-05Z")
-	dir, err := os.MkdirTemp(root, stamp+"-")
-	if err != nil {
-		return "", err
-	}
-	if err := os.Chmod(dir, 0o755); err != nil {
-		return "", err
-	}
-	name := filepath.Base(dir)
-	tmp := filepath.Join(root, ".latest."+name)
-	_ = os.Remove(tmp)
-	if err := os.Symlink(name, tmp); err == nil {
-		if err := os.Rename(tmp, filepath.Join(root, "latest")); err != nil {
-			_ = os.Remove(tmp)
-		}
-	}
-	return dir, nil
-}
-
 // archiveParams copies the -params file verbatim into runDir under a fixed
 // name and returns the copy's path.
 func archiveParams(src, runDir string) (string, error) {

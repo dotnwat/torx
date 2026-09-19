@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/dotnwat/torx"
@@ -120,6 +122,38 @@ func ExampleNewServiceBase() {
 	// Output:
 	// store needs 2 nodes
 	// nvme required: true
+}
+
+// A launcher that wraps a suite needs the run directory before the run starts,
+// to write its own record into it. MakeRunDir mints one the way the driver does
+// for RunOptions.ResultsDir -- timestamped, unique, with root/latest repointed
+// at it -- and the launcher then runs the suite with RunOptions.RunDir (or the
+// -run-dir flag) naming it, so the tree looks the same either way.
+func ExampleMakeRunDir() {
+	root, err := os.MkdirTemp("", "results")
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	defer func() { _ = os.RemoveAll(root) }()
+
+	runDir, err := torx.MakeRunDir(root)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	// The launcher's record lands before anything runs, so even an interrupted
+	// run says what produced it.
+	if err := os.WriteFile(filepath.Join(runDir, "invocation.json"), []byte("{}\n"), 0o644); err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	// ... then torx.Run(ctx, pool, launcher, reqs, torx.RunOptions{RunDir: runDir}).
+
+	latest, _ := os.Readlink(filepath.Join(root, "latest"))
+	fmt.Println("latest points at the run:", latest == filepath.Base(runDir))
+	// Output:
+	// latest points at the run: true
 }
 
 // Readiness is a real check, never a sleep. WaitForPort returns once something

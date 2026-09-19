@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // teeSink fans each event out to several sinks.
@@ -212,18 +213,48 @@ func writeResultJSON(dir string, res JobResult) error {
 	return nil
 }
 
+// runStamp is the layout of the timestamp that names a minted run directory:
+// UTC to the second, in characters no filesystem or shell objects to.
+const runStamp = "2006-01-02T15-04-05Z"
+
+// MakeRunDir creates a fresh run directory under root and returns its path. It
+// is what the driver does for RunOptions.ResultsDir, exported for a launcher
+// that must know the run directory before the run starts (see
+// RunOptions.RunDir): the launcher mints the directory here, writes its own
+// record into it, and then runs the suite with RunDir set to the result, so its
+// results tree is the same shape as a bare ResultsDir run's.
+//
+// The directory is named after the UTC time to the second plus a random suffix,
+// so two runs started in the same second under the same root never share one,
+// and root/latest is repointed at it by an atomic rename, so a concurrent
+// reader never sees the link missing or half-written. Repointing is a
+// best-effort convenience and never fails the mint. root is created if it does
+// not exist.
+func MakeRunDir(root string) (string, error) {
+	return makeRunDir(root, time.Now().UTC().Format(runStamp))
+}
+
 // makeRunDir creates a unique run directory under root, names it after stamp,
 // repoints a "latest" symlink at it, and returns it. A one-second timestamp is
 // not unique on its own: two runs started in the same second under the same root
 // would otherwise share a directory and truncate each other's traces, results,
 // and run.json. MkdirTemp appends a random suffix and creates the directory
-// exclusively, so each run gets its own.
+// exclusively, so each run gets its own. It is the seam under MakeRunDir that
+// tests use to force a shared stamp.
 func makeRunDir(root, stamp string) (string, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return "", err
 	}
 	dir, err := os.MkdirTemp(root, stamp+"-")
 	if err != nil {
+		return "", err
+	}
+	// MkdirTemp creates the directory 0700, the right default for a temporary
+	// file and the wrong one here: the root above and the per-variant
+	// directories below are 0755, and a results tree is meant to be read by
+	// others (a CI artifact, a shared results host), so the run directory must
+	// not be the one closed node in it.
+	if err := os.Chmod(dir, 0o755); err != nil {
 		return "", err
 	}
 	repointLatest(root, filepath.Base(dir))
