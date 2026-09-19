@@ -304,6 +304,23 @@ func TestLocalBackendStreamContextCancelTerminatesCommand(t *testing.T) {
 	}
 }
 
+// TestLocalBackendStreamRefusesDoneContext checks that a context already done
+// fails Stream, with the context's error, rather than starting a command only
+// for the watcher to kill it: a cancelled setup must not launch anything.
+func TestLocalBackendStreamRefusesDoneContext(t *testing.T) {
+	var b LocalBackend
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p, err := b.Stream(ctx, Command("sh", "-c", "true"))
+	if p != nil {
+		_ = p.Close()
+		t.Fatal("Stream under a done context returned a handle: the command was started")
+	}
+	if !errors.Is(err, ErrBackend) || !errors.Is(err, context.Canceled) {
+		t.Errorf("Stream err = %v, want ErrBackend wrapping the cancellation", err)
+	}
+}
+
 // TestLocalBackendStreamContextCancelAfterWait checks that cancellation still
 // kills the group once Wait has reaped the command: the leader's exit says
 // nothing about its children, and exec's own context watcher, which ends with

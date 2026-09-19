@@ -123,7 +123,14 @@ func (b LocalBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
 		}
 		c.Stdin = stdinR
 	}
-	if err := c.Start(); err != nil {
+	// Refuse a context already done before starting anything, as exec would
+	// under CommandContext: a cancelled setup must fail without launching the
+	// command, not launch it and kill it a moment later.
+	err = ctx.Err()
+	if err == nil {
+		err = c.Start()
+	}
+	if err != nil {
 		_ = pw.Close()
 		_ = pr.Close()
 		if stdinR != nil {
