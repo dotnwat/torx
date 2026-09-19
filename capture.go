@@ -21,7 +21,6 @@ package torx
 import (
 	"context"
 	"fmt"
-	"io"
 	"path/filepath"
 	"strings"
 )
@@ -61,8 +60,10 @@ func (b *ServiceBase) SetCapturePolicy(p CapturePolicy) {
 // StartCaptured starts cmd on n as a long-running process with its combined
 // stdout and stderr redirected to a node-local file (stdout.log under the
 // service's per-node scratch), registers that file as an artifact to collect, and
-// returns a handle whose Close stops and reaps the process. Env, Dir, and Stdin
-// from cmd are applied to the launched process.
+// returns the process: Signal and Wait address the program itself, Close kills
+// it and reaps it, and Shutdown composes the three into a graceful stop. Its
+// reader carries nothing, since the output goes to the file. Env, Dir, and
+// Stdin from cmd are applied to the launched process.
 //
 // The file only ever holds output of the process just started. A log left at
 // that path by an earlier run is removed before the first launch on a node,
@@ -70,7 +71,7 @@ func (b *ServiceBase) SetCapturePolicy(p CapturePolicy) {
 // stale content and the collected artifact is never a prior run's output. On a
 // later launch on the same node, the previous process's output is discarded or
 // kept as a separate artifact according to the service's CapturePolicy.
-func (b *ServiceBase) StartCaptured(ctx context.Context, n *Node, cmd Cmd) (io.ReadCloser, error) {
+func (b *ServiceBase) StartCaptured(ctx context.Context, n *Node, cmd Cmd) (Process, error) {
 	dir := n.ServiceScratch(b.name).Root
 	if err := n.Mkdir(ctx, dir); err != nil {
 		return nil, err
@@ -93,8 +94,8 @@ func (b *ServiceBase) StartCaptured(ctx context.Context, n *Node, cmd Cmd) (io.R
 
 	Logf(ctx, "info", "exec %s on %s", strings.Join(append([]string{cmd.Path}, cmd.Args...), " "), n.Name())
 
-	// exec so the shell is replaced by the service: signals reach it directly and
-	// no extra shell process lingers in the group.
+	// exec so the shell is replaced by the service: the handle's Signal reaches
+	// it directly and no extra shell process lingers in the group.
 	script := "exec " + shJoin(cmd.Path, cmd.Args) + " > " + shQuote(logPath) + " 2>&1"
 	handle, err := n.Stream(ctx, Cmd{
 		Path:  "sh",

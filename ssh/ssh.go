@@ -25,6 +25,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -208,50 +209,65 @@ const pgidMarker = "TORX_PGID:"
 // cannot block indefinitely on a wedged node. It is kept below the driver's
 // worker grace period (torx.workerGracePeriod, 10s) so a cancelled worker's kill
 // attempt can finish -- and a failure be observed -- before the worker itself is
-// force-killed.
+// force-killed. The wait for the exit report that follows a kill shares the
+// same deadline, so it cannot stretch teardown past it.
 const killGroupTimeout = 8 * time.Second
 
-// Stream starts cmd on the node and returns its combined output; Close kills the
-// command and reaps it. The command runs as the leader of its own process group,
-// so Close can SIGKILL that group -- tearing down a service and its children even
+// exitReportTimeout bounds how long teardown waits, after a kill it delivered,
+// for the node to report the command's death. sshd reports it as soon as it
+// reaps the command, which a SIGKILL of the whole group makes a matter of
+// milliseconds; the bound is for a node slow to reap, or an sshd that never
+// reports, and teardown must not hang on that.
+const exitReportTimeout = 2 * time.Second
+
+// Stream starts cmd on the node and returns the handle to it: its combined
+// output, and the means to signal it, wait for it, and close it, which kills it
+// and reaps it. The command runs as the leader of its own process group, so
+// Close can SIGKILL that group -- tearing down a service and its children even
 // if they ignore SIGTERM or SIGHUP -- without touching the node's sshd. The
 // remote wrapper (see wrapForStream) arranges the group, prints its id as the
-// first line, and then exec's the command in place.
-func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (io.ReadCloser, error) {
+// first line, and then exec's the command in place, so the group id is also the
+// command's own pid, which is what Signal targets.
+//
+// The session is driven as a raw channel rather than through a
+// cryptossh.Session, because the command's exit has to be observed on its own.
+// sshd reports it (an exit-status or exit-signal request) as soon as it reaps
+// the command, but closes the channel only once the command's output pipes
+// have drained, and a child that inherited them holds them open past the exit.
+// Session.Wait returns only on the close, so through it a command that exited
+// promptly on a signal would look like one still running until its children
+// were killed -- and Shutdown would report a timeout for a clean exit.
+func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (torx.Process, error) {
 	client, err := b.conn(ctx)
 	if err != nil {
 		return nil, err
 	}
-	sess, err := client.NewSession()
+	ch, reqs, err := client.OpenChannel("session", nil)
 	if err != nil {
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream session", err)
 	}
 	pr, pw, err := os.Pipe()
 	if err != nil {
-		_ = sess.Close()
+		_ = ch.Close()
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream", err)
 	}
-	sess.Stdout = pw
-	sess.Stderr = pw
-	if cmd.Stdin != nil {
-		// Feed stdin to the wrapped command, matching Exec and the LocalBackend.
-		// The wrapper exec's the command in place, so it inherits this stdin.
-		sess.Stdin = bytes.NewReader(cmd.Stdin)
-	}
-	if err := sess.Start(wrapForStream(cmd)); err != nil {
+	s := &sshStream{backend: b, ch: ch, pr: pr, exited: make(chan struct{}), done: make(chan struct{})}
+	// Watch the session's requests from the start: the exit report is one of
+	// them, and crypto/ssh delivers them on a bounded queue that stalls the
+	// whole connection if nobody drains it.
+	go s.watchRequests(reqs)
+	if err := s.exec(cmd); err != nil {
+		_ = ch.Close()
 		_ = pw.Close()
 		_ = pr.Close()
-		_ = sess.Close()
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, err)
 	}
-	// Close the write end once the command exits so the reader sees EOF. This
-	// must start before reading the marker: if the remote dies before emitting
-	// it, this goroutine's pw.Close is what unblocks readPGID with EOF instead of
-	// leaving it to block forever on a marker that will never arrive.
-	go func() {
-		_ = sess.Wait()
-		_ = pw.Close()
-	}()
+	// Copy the command's output into the pipe and close the write end once
+	// both streams have ended, so the reader sees EOF. This must start before
+	// reading the marker: if the remote dies before emitting it, that close is
+	// what unblocks readPGID with EOF instead of leaving it to block forever on
+	// a marker that will never arrive.
+	go s.copyOutput(pw)
 	// Read the group id off the first line before handing back the stream, so
 	// Close knows what to kill. Bound that read by ctx -- a deadline or a plain
 	// cancellation -- with a watcher that trips an immediate read deadline once ctx
@@ -265,15 +281,15 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (io.ReadCloser, erro
 	stopWatch()
 	_ = pr.SetReadDeadline(time.Time{})
 	if err != nil {
-		_ = sess.Close()
-		_ = pw.Close()
+		_ = ch.Close()
 		_ = pr.Close()
 		if ctx.Err() != nil {
 			return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, ctx.Err())
 		}
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, err)
 	}
-	s := &sshStream{backend: b, sess: sess, pr: pr, r: br, pgid: pgid}
+	s.r = br
+	s.pgid = pgid
 	// Match the LocalBackend, whose command dies with the context that started it:
 	// once Stream returns, nothing else watches ctx, so without this a cancelled
 	// run would leave the command running on the node. The watcher and Close share
@@ -283,21 +299,140 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (io.ReadCloser, erro
 }
 
 // sshStream is the handle Stream returns: reading it yields the command's
-// combined output, and Close kills the remote process group and reaps the
+// combined output, Signal and Wait address the remote command by the pid the
+// wrapper reported, and Close kills the remote process group and reaps the
 // session. Cancelling the context that started the stream tears it down the same
 // way, through the shared teardown.
 type sshStream struct {
 	backend   *backend
-	sess      *cryptossh.Session
+	ch        cryptossh.Channel
 	pr        *os.File
 	r         *bufio.Reader
 	pgid      int
 	stopWatch func() bool
 	once      sync.Once
 	killErr   error
+	exited    chan struct{} // closed once the node has reported the command's exit
+	code      int           // the reported exit status, valid once exited is closed: the code, or -1 for a signal death
+	done      chan struct{} // closed once the session has ended, with the exit reported or without it
+}
+
+// exec starts cmd on the session, through the stream wrapper, feeding it
+// Cmd.Stdin as Exec and the LocalBackend do: the wrapper exec's the command in
+// place, so it inherits the session's stdin.
+func (s *sshStream) exec(cmd torx.Cmd) error {
+	ok, err := s.ch.SendRequest("exec", true, cryptossh.Marshal(struct{ Command string }{wrapForStream(cmd)}))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("the node refused the exec request")
+	}
+	go func() {
+		if cmd.Stdin != nil {
+			_, _ = io.Copy(s.ch, bytes.NewReader(cmd.Stdin))
+		}
+		_ = s.ch.CloseWrite()
+	}()
+	return nil
+}
+
+// watchRequests handles the session's requests until the channel closes,
+// recording the command's exit when the node reports it -- an exit-status
+// request with the code, or an exit-signal request for a signal death, which
+// the Process contract renders as -1 -- and refusing whatever else wants a
+// reply, as OpenSSH's client does. The exit is reported at most once, so the
+// first report is the command's.
+func (s *sshStream) watchRequests(reqs <-chan *cryptossh.Request) {
+	reported := false
+	report := func(code int) {
+		if reported {
+			return
+		}
+		reported = true
+		s.code = code
+		close(s.exited)
+	}
+	for req := range reqs {
+		switch req.Type {
+		case "exit-status":
+			if len(req.Payload) >= 4 {
+				report(int(binary.BigEndian.Uint32(req.Payload)))
+			}
+		case "exit-signal":
+			report(-1)
+		default:
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+		}
+	}
+	close(s.done)
+}
+
+// copyOutput copies the command's stdout and stderr into pw, interleaved as
+// they arrive, and closes pw once both have ended -- when the node has closed
+// the channel, or the connection has dropped.
+func (s *sshStream) copyOutput(pw *os.File) {
+	var wg sync.WaitGroup
+	for _, r := range []io.Reader{s.ch, s.ch.Stderr()} {
+		wg.Go(func() { _, _ = io.Copy(pw, r) })
+	}
+	wg.Wait()
+	_ = pw.Close()
 }
 
 func (s *sshStream) Read(p []byte) (int, error) { return s.r.Read(p) }
+
+// Signal sends sig to the remote command, by the pid the wrapper reported: the
+// command was exec'd in place, so that pid is the command's own, not a shell's.
+// Once the node has reported the command's exit it is refused, as the
+// LocalBackend refuses it, rather than sent to whatever process may hold the
+// pid by now. A session that ended without reporting the exit -- the connection
+// dropped -- says nothing about the command, which may well still be running,
+// so the signal is sent as usual and fails only if the node cannot be reached.
+func (s *sshStream) Signal(ctx context.Context, sig os.Signal) error {
+	select {
+	case <-s.exited:
+		return torx.Wrap(torx.ErrBackend, "ssh: signal", os.ErrProcessDone)
+	default:
+	}
+	return s.backend.Signal(ctx, s.pgid, sig)
+}
+
+// Wait blocks until the node reports the command's exit or ctx is done. sshd
+// reaps the command itself, so Wait only observes the exit; the status is what
+// the node reported: the exit code, or -1 for a command terminated by a signal.
+// The node reports a signal death as such only when the command was the
+// session's own process, which it is under OpenSSH with a login shell that
+// exec's its command (bash, zsh); a login shell that forks it (dash) reports
+// its own exit instead, 128 plus the signal number, as a shell does. The report
+// is observed on its own, not through the session's end: the command's output
+// pipes may stay open past its exit, held by a child, and the exit counts all
+// the same.
+func (s *sshStream) Wait(ctx context.Context) (int, error) {
+	select {
+	case <-s.exited:
+	case <-s.done:
+	case <-ctx.Done():
+		select {
+		case <-s.exited:
+		case <-s.done:
+			// Exited as ctx ran out: the outcome is the better answer.
+		default:
+			return -1, torx.Wrap(torx.ErrBackend, "ssh: wait", ctx.Err())
+		}
+	}
+	select {
+	case <-s.exited:
+		return s.code, nil
+	default:
+	}
+	// The session ended without an exit report: the connection dropped, or the
+	// node closed the channel without sending one. A report never follows a
+	// close, so this is final.
+	return -1, torx.Wrap(torx.ErrBackend, "ssh: wait", errors.New("the session ended without reporting the command's exit"))
+}
 
 // Close tears the stream down and reports whether the remote kill succeeded. A
 // failed kill means a service believed stopped may still be running, which must
@@ -311,11 +446,40 @@ func (s *sshStream) Close() error {
 
 // teardown kills the remote process group and reaps the session exactly once,
 // whether it is Close or the context watcher that reaches it first. It records
-// the kill outcome so Close can return it.
+// the kill outcome so Close can return it. The group is killed even once the
+// session has ended: an exit the session reported is the command's alone, and
+// its children may outlive it, while a session that failed reported nothing
+// at all. Only once the group has emptied could its id name another group on
+// the node, and then only after the node's pid space has wrapped around in
+// between; a caller that closes soon after its wait, as Shutdown does, keeps
+// that window negligible.
+//
+// A kill that ran is followed by a bounded wait for the node's report of the
+// command's death, so that it reaches the handle -- and a Wait after the Close
+// can say how the command died -- before the session is closed from this side.
+// Closing it first would race the report: a close that reaches sshd before it
+// has reaped the command discards the report, and Wait could then only say
+// the exit went unobserved. The wait is for the report, not for the session
+// to end: a pipe held open by a process outside the group -- a daemon the
+// command double-forked -- keeps the session open past the report, and
+// nothing reads the output once the handle is closed.
 func (s *sshStream) teardown() error {
 	s.once.Do(func() {
-		s.killErr = s.backend.killGroup(s.pgid)
-		_ = s.sess.Close()
+		// Close carries no context, so bound the teardown here: a wedged node
+		// must not hang it forever.
+		ctx, cancel := context.WithTimeout(context.Background(), killGroupTimeout)
+		defer cancel()
+		s.killErr = s.backend.killGroup(ctx, s.pgid)
+		if s.killErr == nil {
+			wctx, wcancel := context.WithTimeout(ctx, exitReportTimeout)
+			select {
+			case <-s.exited:
+			case <-s.done:
+			case <-wctx.Done():
+			}
+			wcancel()
+		}
+		_ = s.ch.Close()
 		_ = s.pr.Close()
 	})
 	return s.killErr
@@ -323,25 +487,22 @@ func (s *sshStream) teardown() error {
 
 // killGroup SIGKILLs a remote process group over a fresh session and reports
 // whether the kill could be carried out. A transport failure -- an unreachable
-// node, a session that would not open -- is returned so the caller can treat the
-// node as not confirmed clean rather than silently reused. Once the kill actually
-// runs its exit status is not inspected: the group is led by this stream's own
-// command (see wrapForStream), so a non-zero exit means the group is already
-// gone, which is success for teardown. kill(1) cannot distinguish that
-// from other failures by exit code anyway, and its diagnostic text is locale- and
-// implementation-dependent, so relying on either would be less reliable than the
-// transport error the run-or-not signal already provides.
-func (b *backend) killGroup(pgid int) error {
+// node, a session that would not open, ctx running out -- is returned so the
+// caller can treat the node as not confirmed clean rather than silently reused.
+// Once the kill actually runs its exit status is not inspected: the group is
+// led by this stream's own command (see wrapForStream), so a non-zero exit
+// means the group is already gone, which is success for teardown. kill(1)
+// cannot distinguish that from other failures by exit code anyway, and its
+// diagnostic text is locale- and implementation-dependent, so relying on
+// either would be less reliable than the transport error the run-or-not
+// signal already provides.
+func (b *backend) killGroup(ctx context.Context, pgid int) error {
 	if pgid < 2 {
 		// Never signal group 1 (every process the caller may signal) or 0 (the
 		// caller's own group). readPGID already rejects these, but Close must not
 		// turn a stray id into kill -KILL -1 either.
 		return nil
 	}
-	// Close carries no context, so bound the kill here: a wedged node must not
-	// hang teardown forever.
-	ctx, cancel := context.WithTimeout(context.Background(), killGroupTimeout)
-	defer cancel()
 	if _, err := b.Exec(ctx, torx.Command("kill", "-KILL", "-"+strconv.Itoa(pgid))); err != nil {
 		return torx.Wrap(torx.ErrBackend, "ssh: kill group", err)
 	}

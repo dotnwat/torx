@@ -66,15 +66,15 @@ type EchoService struct {
 	*torx.ServiceBase
 
 	mu      sync.Mutex
-	servers map[string]io.ReadCloser // node name -> running server handle
-	addrs   map[string]string        // node name -> host:port
-	ports   map[string]int           // node name -> leased port
+	servers map[string]torx.Process // node name -> running server
+	addrs   map[string]string       // node name -> host:port
+	ports   map[string]int          // node name -> leased port
 }
 
 // NewEchoService builds an EchoService named name that needs one node.
 func NewEchoService(name string) *EchoService {
 	s := &EchoService{
-		servers: map[string]io.ReadCloser{},
+		servers: map[string]torx.Process{},
 		addrs:   map[string]string{},
 		ports:   map[string]int{},
 	}

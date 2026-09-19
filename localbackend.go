@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -75,7 +76,7 @@ func (b LocalBackend) Exec(ctx context.Context, cmd Cmd) (ExecResult, error) {
 	return res, nil
 }
 
-func (b LocalBackend) Stream(ctx context.Context, cmd Cmd) (io.ReadCloser, error) {
+func (b LocalBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
 	c := b.command(ctx, cmd)
 	pr, pw, err := os.Pipe()
 	if err != nil {
@@ -91,27 +92,94 @@ func (b LocalBackend) Stream(ctx context.Context, cmd Cmd) (io.ReadCloser, error
 	// The child holds its own dup of the write end; close the parent's copy so
 	// the reader sees EOF once the child exits.
 	_ = pw.Close()
-	return &procStream{cmd: c, r: pr}, nil
+	return &procStream{cmd: c, r: pr, done: make(chan struct{})}, nil
 }
 
-// procStream streams a running command's output and terminates it on Close.
+// procStream is the Process a LocalBackend's Stream returns: it streams the
+// command's output, signals the command, waits for it, and terminates it on
+// Close.
+//
+// The command is reaped lazily, by the first Wait or Close, not the moment it
+// exits. Until then an exited command stays a zombie, which pins its pid and
+// its process-group id: a Signal cannot reach a process that inherited the pid,
+// and Close's group kill cannot hit a group that inherited the id. Once reaped,
+// os.Process refuses further signals, but Close still kills the group: the
+// leader's exit says nothing about its children, and the group lives on while
+// any of them does. Only once the group has emptied could its id name another
+// group, and then only after the pid space has wrapped around in between; a
+// caller that closes soon after its wait, as Shutdown does, keeps that window
+// negligible.
 type procStream struct {
 	cmd *exec.Cmd
 	r   *os.File
+
+	reapOnce sync.Once
+	done     chan struct{} // closed once the command has been reaped
+	waitErr  error         // cmd.Wait's result, valid once done is closed
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (s *procStream) Read(p []byte) (int, error) {
 	return s.r.Read(p)
 }
 
-func (s *procStream) Close() error {
-	if s.cmd.Process != nil {
-		// Kill the whole process group, matching how the command was started.
-		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+// Signal sends sig to the command. os.Process delivers it to the exact process
+// started -- through a pidfd where the platform has one -- and refuses once the
+// command has been reaped.
+func (s *procStream) Signal(ctx context.Context, sig os.Signal) error {
+	if err := s.cmd.Process.Signal(sig); err != nil {
+		return Wrap(ErrBackend, "backend: signal", err)
 	}
-	err := s.r.Close()
-	_ = s.cmd.Wait()
-	return err
+	return nil
+}
+
+// Wait blocks until the command has exited or ctx is done. The first call
+// starts the reaper; a call cut short by ctx leaves it running, so a later Wait
+// or Close still observes the exit.
+func (s *procStream) Wait(ctx context.Context) (int, error) {
+	s.reap()
+	select {
+	case <-s.done:
+	case <-ctx.Done():
+		select {
+		case <-s.done:
+			// Exited as ctx ran out: the status is the better answer.
+		default:
+			return -1, Wrap(ErrBackend, "backend: wait", ctx.Err())
+		}
+	}
+	if s.cmd.ProcessState == nil {
+		return -1, Wrap(ErrBackend, "backend: wait", s.waitErr)
+	}
+	// ExitCode is the exit code, or -1 for a command terminated by a signal.
+	return s.cmd.ProcessState.ExitCode(), nil
+}
+
+// reap starts reaping the command, once; done is closed when it has been.
+func (s *procStream) reap() {
+	s.reapOnce.Do(func() {
+		go func() {
+			s.waitErr = s.cmd.Wait()
+			close(s.done)
+		}()
+	})
+}
+
+// Close kills the command's whole process group, matching how the command was
+// started, and reaps it. The group is killed whether or not the command has
+// already exited and been reaped: its children may outlive it, and the group
+// lives on while any of them does. A group already gone makes the kill fail
+// with ESRCH, which is success for teardown.
+func (s *procStream) Close() error {
+	s.closeOnce.Do(func() {
+		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+		s.closeErr = s.r.Close()
+		s.reap()
+		<-s.done
+	})
+	return s.closeErr
 }
 
 func (b LocalBackend) Put(ctx context.Context, localPath, nodePath string) error {

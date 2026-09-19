@@ -186,3 +186,86 @@ func TestLocalBackendSignalRejectsUnsafePID(t *testing.T) {
 		}
 	}
 }
+
+// TestLocalBackendStreamSignalAndWait checks the handle's signal and wait: the
+// signal reaches the command, Wait reports the exit status it chose, and once
+// the command has been reaped a further signal is refused rather than sent to
+// a pid the kernel may have reused.
+func TestLocalBackendStreamSignalAndWait(t *testing.T) {
+	var b LocalBackend
+	p, err := b.Stream(context.Background(), exitingOnTERM(3))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer p.Close()
+	if got := readLine(t, p); got != "ready" {
+		t.Fatalf("first line = %q, want ready", got)
+	}
+
+	if err := p.Signal(context.Background(), syscall.SIGTERM); err != nil {
+		t.Fatalf("Signal: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if code, err := p.Wait(ctx); err != nil || code != 3 {
+		t.Fatalf("Wait = (%d, %v), want (3, nil)", code, err)
+	}
+	// A second Wait reports the same exit.
+	if code, err := p.Wait(ctx); err != nil || code != 3 {
+		t.Errorf("second Wait = (%d, %v), want (3, nil)", code, err)
+	}
+	err = p.Signal(context.Background(), syscall.SIGTERM)
+	if !errors.Is(err, ErrBackend) || !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("Signal after exit = %v, want ErrBackend wrapping os.ErrProcessDone", err)
+	}
+	// Close after the exit is clean, and repeatable.
+	for range 2 {
+		if err := p.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}
+}
+
+// TestLocalBackendStreamWaitHonorsContext checks that Wait returns when its
+// context is done, leaving the command running for Close to kill, and that a
+// Wait after the Close reports the kill.
+func TestLocalBackendStreamWaitHonorsContext(t *testing.T) {
+	var b LocalBackend
+	dir := t.TempDir()
+	pidfile, childfile := filepath.Join(dir, "pid"), filepath.Join(dir, "child")
+	// The command ignores SIGTERM and holds a child, so only Close's group kill
+	// ends it -- and the child going with it shows the group was killed.
+	p, err := b.Stream(context.Background(), Command("sh", "-c",
+		"trap '' TERM; echo $$ > "+pidfile+"; sleep 30 & echo $! > "+childfile+"; wait"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	pid, child := waitForPidfile(t, pidfile), waitForPidfile(t, childfile)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = p.Wait(ctx)
+	if !errors.Is(err, ErrBackend) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Wait err = %v, want ErrBackend wrapping the deadline", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("Wait took %v: it ignored its context", time.Since(start))
+	}
+	if !processAlive(pid) {
+		t.Fatalf("pid %d is gone: a Wait cut short must not stop the command", pid)
+	}
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !eventuallyDead(pid, 2*time.Second) {
+		t.Errorf("pid %d survived Close", pid)
+	}
+	if code, err := p.Wait(context.Background()); err != nil || code != -1 {
+		t.Errorf("Wait after Close = (%d, %v), want (-1, nil): killed by a signal", code, err)
+	}
+	if !eventuallyDead(child, 2*time.Second) {
+		t.Errorf("child %d of pid %d survived Close: the group was not killed", child, pid)
+	}
+}

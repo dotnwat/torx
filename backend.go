@@ -15,7 +15,6 @@ package torx
 
 import (
 	"context"
-	"io"
 	"os"
 )
 
@@ -52,9 +51,12 @@ type ExecResult struct {
 type Backend interface {
 	// Exec runs cmd to completion and returns its captured result.
 	Exec(ctx context.Context, cmd Cmd) (ExecResult, error)
-	// Stream starts cmd and returns its combined stdout and stderr as a stream;
-	// closing the reader terminates the command and reaps it.
-	Stream(ctx context.Context, cmd Cmd) (io.ReadCloser, error)
+	// Stream starts cmd as a long-running command and returns the handle to it:
+	// its combined stdout and stderr as a stream, plus the means to signal it,
+	// wait for its exit, and close it, which kills it and reaps it. The command
+	// dies with ctx: cancelling the context that started it kills it as Close
+	// would.
+	Stream(ctx context.Context, cmd Cmd) (Process, error)
 	// Put copies a local file to a path on the node.
 	Put(ctx context.Context, localPath, nodePath string) error
 	// Get copies a file from the node to a local path.

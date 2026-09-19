@@ -44,9 +44,9 @@ func requireRqlited(t *testing.T) {
 	t.Skip(msg)
 }
 
-// largestJob is the node demand of the biggest job here, which sizes the
+// largestJob is the node demand of the biggest jobs here, which sizes the
 // local pool. A job that grows past it fails allocation loudly.
-const largestJob = failoverNodes
+const largestJob = max(failoverNodes, rollingNodes)
 
 func TestSuiteEndToEnd(t *testing.T) {
 	requireRqlited(t)
@@ -67,10 +67,19 @@ func TestSuiteEndToEnd(t *testing.T) {
 		}
 		byID[r.ID] = r
 	}
-	for _, id := range []string{"rqlite.smoke", "rqlite.failover", `rqlite.cluster[level="none",nodes=3]`} {
+	for _, id := range []string{"rqlite.smoke", "rqlite.failover", "rqlite.rolling", `rqlite.cluster[level="none",nodes=3]`} {
 		if _, ok := byID[id]; !ok {
 			t.Errorf("no result for %s; ran %v", id, res.Jobs)
 		}
+	}
+
+	// The rolling restart stopped the leader at least once -- the initial
+	// leader is one of the nodes it goes through -- and recorded the handoff.
+	var rolling struct {
+		Handoffs []int64 `json:"handoffs_ms"`
+	}
+	if err := json.Unmarshal(byID["rqlite.rolling"].Data, &rolling); err != nil || len(rolling.Handoffs) == 0 {
+		t.Errorf("rolling result data %s: %v; want at least one leader handoff", byID["rqlite.rolling"].Data, err)
 	}
 
 	// The crashed leader ran twice, and both incarnations' output reached the

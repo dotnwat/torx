@@ -3,12 +3,12 @@
 // Error taxonomy for torx.
 //
 // Every error torx surfaces wraps exactly one category sentinel
-// (ErrAllocation, ErrBackend, ErrReadinessTimeout, ErrService), so callers
-// classify failures with errors.Is(err, ErrX) without depending on concrete
-// error types. *Error attaches operation context to a sentinel and is
-// retrievable with errors.As. MultiError aggregates failures from best-effort
-// steps (such as service teardown) so that one failure does not mask the
-// others.
+// (ErrAllocation, ErrBackend, ErrReadinessTimeout, ErrShutdownTimeout,
+// ErrService), so callers classify failures with errors.Is(err, ErrX) without
+// depending on concrete error types. *Error attaches operation context to a
+// sentinel and is retrievable with errors.As. MultiError aggregates failures
+// from best-effort steps (such as service teardown) so that one failure does
+// not mask the others.
 
 package torx
 
@@ -24,6 +24,9 @@ var (
 	// ErrReadinessTimeout indicates a readiness condition did not hold within
 	// its deadline.
 	ErrReadinessTimeout = errors.New("torx: readiness timed out")
+	// ErrShutdownTimeout indicates a process did not exit within the grace
+	// period of a graceful stop and was killed instead (see Shutdown).
+	ErrShutdownTimeout = errors.New("torx: shutdown timed out")
 	// ErrService indicates a service lifecycle operation (start, stop, clean)
 	// failed.
 	ErrService = errors.New("torx: service lifecycle operation failed")

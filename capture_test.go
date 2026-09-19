@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -96,6 +97,35 @@ func TestStartCapturedCapturesOutput(t *testing.T) {
 	waitForLog(t, arts[0].Path, "hello from svc")
 }
 
+// TestStartCapturedSignalReachesCommand checks that the handle's Signal reaches
+// the program StartCaptured launched, not the shell that redirected its output:
+// the program traps SIGTERM and says so before exiting cleanly, which a shell
+// receiving the signal in its place would not do.
+func TestStartCapturedSignalReachesCommand(t *testing.T) {
+	n := captureTestNode(t)
+	svc := NewServiceBase("svc", Homogeneous(1, NodeSpec{}), nil)
+	svc.Bind([]*Node{n})
+
+	p, err := svc.StartCaptured(context.Background(), n, Command("sh", "-c",
+		"trap 'echo got-term; exit 0' TERM; echo ready; while true; do sleep 0.1; done"))
+	if err != nil {
+		t.Fatalf("StartCaptured: %v", err)
+	}
+	defer p.Close()
+	logPath := filepath.Join(n.ServiceScratch("svc").Root, "stdout.log")
+	waitForLog(t, logPath, "ready")
+
+	if err := p.Signal(context.Background(), syscall.SIGTERM); err != nil {
+		t.Fatalf("Signal: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if code, err := p.Wait(ctx); err != nil || code != 0 {
+		t.Fatalf("Wait = (%d, %v), want (0, nil): the program's own exit", code, err)
+	}
+	waitForLog(t, logPath, "got-term")
+}
+
 // TestStartCapturedRelaunch launches several processes in turn on one node and
 // checks what each policy leaves for collection: truncate keeps only the last
 // process's output, under a single registration of stdout.log; rotate keeps
@@ -166,13 +196,20 @@ type staleProbeBackend struct {
 	staleAtLaunch bool
 }
 
-func (b *staleProbeBackend) Stream(ctx context.Context, cmd Cmd) (io.ReadCloser, error) {
+func (b *staleProbeBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
 	b.streamed = true
 	if _, err := os.Stat(b.path); err == nil {
 		b.staleAtLaunch = true
 	}
-	return io.NopCloser(strings.NewReader("")), nil
+	return fakeProcess{io.NopCloser(strings.NewReader(""))}, nil
 }
+
+// fakeProcess is a Process that stands in for a command that was never
+// launched: nothing to signal, and an exit of 0 to report.
+type fakeProcess struct{ io.ReadCloser }
+
+func (fakeProcess) Signal(context.Context, os.Signal) error { return nil }
+func (fakeProcess) Wait(context.Context) (int, error)       { return 0, nil }
 
 // probeNode builds a node on a staleProbeBackend watching the service's
 // capture path, with the service scratch directory already created.

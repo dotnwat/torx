@@ -7,14 +7,17 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/pkg/sftp"
 	cryptossh "golang.org/x/crypto/ssh"
@@ -69,6 +72,14 @@ type testServer struct {
 	// path, when set, replaces PATH in the command's environment, to stand in
 	// for nodes missing the tools Stream's wrapper can fall back on.
 	path string
+
+	// exitDelay makes serveExec hold a streamed command's exit report back for
+	// that long after the command has ended, standing in for an sshd slower to
+	// reap and report than the client is to close: the shape in which a close
+	// sent straight after a kill reaches the server first and the report is
+	// discarded with the channel. Exec sessions, the kill among them, are not
+	// delayed, so the kill returns while the report is still pending.
+	exitDelay time.Duration
 }
 
 // newTestServer starts a server on the loopback and returns a handle whose
@@ -265,15 +276,22 @@ func (s *testServer) serveSession(ch cryptossh.Channel, reqs <-chan *cryptossh.R
 
 // serveExec runs line as a local subprocess -- in a new session, as OpenSSH's
 // do_exec_no_pty does, unless sharedGroup -- wiring the channel to its
-// stdin/stdout/stderr and reporting its exit status. Connecting stdin lets the
+// stdin/stdout/stderr and reporting how it ended. Connecting stdin lets the
 // client's Cmd.Stdin reach the command. It runs to completion; a client that
 // cancels simply closes its session, which unblocks the client side.
+//
+// The exit is reported as sshd reports it: as soon as the command is reaped,
+// while the channel closes only once its output pipes have drained. The two
+// part when a child the command left behind holds the pipes open, and a client
+// must take the report for the exit it is. That needs pipes of the server's
+// own for the output: os/exec's Wait would otherwise wait for the pipes too.
 //
 // Only Stream's wrapper (recognizable by its marker) has its process shape set
 // by forkDepth; the shape is irrelevant to Exec, whose lines begin with cd or env
 // and could not take a leading exec anyway.
 func (s *testServer) serveExec(ch cryptossh.Channel, line string) {
-	if strings.Contains(line, pgidMarker) {
+	streamed := strings.Contains(line, pgidMarker)
+	if streamed {
 		line = shapeStream(line, s.forkDepth)
 	}
 	cmd := exec.Command("sh", "-c", line)
@@ -289,10 +307,74 @@ func (s *testServer) serveExec(ch cryptossh.Channel, line string) {
 		cmd.Env = append(cmd.Env, "PATH="+s.path)
 	}
 	cmd.Stdin = ch
-	cmd.Stdout = ch
-	cmd.Stderr = ch.Stderr()
-	sendExit(ch, exitCode(cmd.Run()))
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		sendExit(ch, 255)
+		_ = ch.Close()
+		return
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		_ = outR.Close()
+		_ = outW.Close()
+		sendExit(ch, 255)
+		_ = ch.Close()
+		return
+	}
+	cmd.Stdout = outW
+	cmd.Stderr = errW
+	var drained sync.WaitGroup
+	drained.Go(func() { _, _ = io.Copy(ch, outR); _ = outR.Close() })
+	drained.Go(func() { _, _ = io.Copy(ch.Stderr(), errR); _ = errR.Close() })
+	err = cmd.Start()
+	// The command holds its own copies of the write ends; drop the server's so
+	// the pipes drain once every holder is gone.
+	_ = outW.Close()
+	_ = errW.Close()
+	if err == nil {
+		err = cmd.Wait()
+	}
+	if streamed && s.exitDelay > 0 {
+		time.Sleep(s.exitDelay)
+	}
+	reportExit(ch, err)
+	drained.Wait()
 	_ = ch.Close()
+}
+
+// reportExit tells the client how the command ended, as OpenSSH's
+// session_exit_message does: an exit-signal request naming the signal that
+// killed it, or else an exit-status request with its exit code. A signal
+// crypto/ssh has no name for is reported by its exit code, 255, as exec
+// renders a signal death.
+func reportExit(ch cryptossh.Channel, err error) {
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+		if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			if name, ok := signalNames[ws.Signal()]; ok {
+				sendExitSignal(ch, name)
+				return
+			}
+		}
+	}
+	sendExit(ch, exitCode(err))
+}
+
+// signalNames maps the signals crypto/ssh names to the names an exit-signal
+// request carries (RFC 4254, section 6.10: the signal name without SIG).
+var signalNames = map[syscall.Signal]cryptossh.Signal{
+	syscall.SIGABRT: cryptossh.SIGABRT,
+	syscall.SIGALRM: cryptossh.SIGALRM,
+	syscall.SIGFPE:  cryptossh.SIGFPE,
+	syscall.SIGHUP:  cryptossh.SIGHUP,
+	syscall.SIGILL:  cryptossh.SIGILL,
+	syscall.SIGINT:  cryptossh.SIGINT,
+	syscall.SIGKILL: cryptossh.SIGKILL,
+	syscall.SIGPIPE: cryptossh.SIGPIPE,
+	syscall.SIGQUIT: cryptossh.SIGQUIT,
+	syscall.SIGSEGV: cryptossh.SIGSEGV,
+	syscall.SIGTERM: cryptossh.SIGTERM,
+	syscall.SIGUSR1: cryptossh.SIGUSR1,
+	syscall.SIGUSR2: cryptossh.SIGUSR2,
 }
 
 // shapeStream places forkDepth forking shell layers between the session leader
@@ -343,6 +425,15 @@ func exitCode(err error) int {
 
 func sendExit(ch cryptossh.Channel, code int) {
 	_, _ = ch.SendRequest("exit-status", false, cryptossh.Marshal(struct{ Code uint32 }{uint32(code)}))
+}
+
+func sendExitSignal(ch cryptossh.Channel, sig cryptossh.Signal) {
+	_, _ = ch.SendRequest("exit-signal", false, cryptossh.Marshal(struct {
+		Signal     string
+		CoreDumped bool
+		Error      string
+		Lang       string
+	}{Signal: string(sig)}))
 }
 
 func serveSFTP(ch cryptossh.Channel) {
