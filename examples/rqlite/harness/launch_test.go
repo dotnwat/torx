@@ -22,33 +22,6 @@ func TestParseVersion(t *testing.T) {
 	}
 }
 
-func TestMakeRunDirIsUniqueAndRepointsLatest(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "results")
-	d1, err := makeRunDir(root)
-	if err != nil {
-		t.Fatalf("first run dir: %v", err)
-	}
-	d2, err := makeRunDir(root)
-	if err != nil {
-		t.Fatalf("second run dir: %v", err)
-	}
-	if d1 == d2 {
-		t.Fatalf("two runs got the same directory %s", d1)
-	}
-	for _, d := range []string{d1, d2} {
-		if info, err := os.Stat(d); err != nil || !info.IsDir() {
-			t.Errorf("%s is not a directory: %v", d, err)
-		}
-	}
-	latest, err := os.Readlink(filepath.Join(root, "latest"))
-	if err != nil {
-		t.Fatalf("latest: %v", err)
-	}
-	if latest != filepath.Base(d2) {
-		t.Errorf("latest -> %s, want the second run %s", latest, filepath.Base(d2))
-	}
-}
-
 func TestArchiveParamsCopiesVerbatimUnderFixedName(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "sweep.json")
 	if err := os.WriteFile(src, []byte(`{"rqlite.cluster": {"matrix": {"nodes": [5]}}}`), 0o600); err != nil {

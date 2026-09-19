@@ -53,7 +53,9 @@ go run ./examples/rqlite/harness 'rqlite\.cluster'  # every variant of one job
 The harness prints one line, `run directory: <path>`, and then the suite's own
 output; its exit status is the suite's. The run directory lands under
 `results/rqlite/` in the repository (`-results-dir` moves it) with `latest`
-pointing at the newest run:
+pointing at the newest run. The harness mints it through `torx.MakeRunDir`, so
+apart from what the harness adds the tree is the one a bare `-results-dir` run
+of the suite would leave:
 
 ```
 results/rqlite/2026-09-18T17-38-54Z-3312641955/
@@ -191,9 +193,8 @@ a crashed leader logged up to its crash beside what its replacement logged.
 `go test ./examples/rqlite/...` runs unit tests for the pure parts -- the
 client's request and response handling against rqlite's real response
 bodies, the command line the service builds, parameter resolution, membership
-checks, the harness's version parsing and run-directory minting -- and one
-end-to-end test that runs the whole suite through the real driver/worker
-split on a local pool.
+checks, the harness's version parsing -- and one end-to-end test that runs the
+whole suite through the real driver/worker split on a local pool.
 
 The end-to-end test needs `rqlited`. Without it the test skips, saying so;
 with `TORX_RQLITE_REQUIRED=1` in the environment a missing binary fails it

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -349,6 +350,61 @@ func TestMakeRunDirUnique(t *testing.T) {
 	}
 	if target != filepath.Base(d2) {
 		t.Errorf("latest -> %q, want %q", target, filepath.Base(d2))
+	}
+}
+
+func TestMakeRunDirShape(t *testing.T) {
+	// The exported mint is the launcher's half of the -run-dir handshake: the
+	// tree it produces must be indistinguishable from one the driver minted, so
+	// the name, the mode, and the latest link are the contract, not just
+	// uniqueness (covered above through the same seam).
+	root := filepath.Join(t.TempDir(), "results")
+
+	before := time.Now().UTC().Truncate(time.Second)
+	dir, err := MakeRunDir(root)
+	if err != nil {
+		t.Fatalf("MakeRunDir: %v", err)
+	}
+	if filepath.Dir(dir) != root {
+		t.Errorf("run dir %s is not directly under the root %s", dir, root)
+	}
+
+	// A missing root is created, like ResultsDir mode does.
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		t.Fatalf("root not created: %v", err)
+	}
+
+	// <UTC stamp to the second>-<random suffix>, and the stamp is now.
+	name := filepath.Base(dir)
+	stamped := regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)-\d+$`)
+	m := stamped.FindStringSubmatch(name)
+	if m == nil {
+		t.Fatalf("run dir name %q does not match <stamp>-<suffix>", name)
+	}
+	at, err := time.Parse(runStamp, m[1])
+	if err != nil {
+		t.Fatalf("stamp %q in %q: %v", m[1], name, err)
+	}
+	if at.Before(before) || at.After(time.Now().UTC()) {
+		t.Errorf("stamp %v is not the mint time (started %v)", at, before)
+	}
+
+	// Readable by others, like the root and the per-variant directories, not
+	// MkdirTemp's 0700.
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat run dir: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o755 {
+		t.Errorf("run dir mode %o, want 755", perm)
+	}
+
+	target, err := os.Readlink(filepath.Join(root, "latest"))
+	if err != nil {
+		t.Fatalf("readlink latest: %v", err)
+	}
+	if target != name {
+		t.Errorf("latest -> %q, want %q", target, name)
 	}
 }
 
