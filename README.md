@@ -156,7 +156,11 @@ Guidelines that keep a service portable across the local and ssh backends:
 - **Capture output with `StartCaptured`.** It redirects the process's stdout and
   stderr to a node-local file and collects it into the results tree. For any
   other output (a `--log-file`, a data dump) call `s.AddArtifact(n,
-  torx.Artifact{Name: ..., Path: ..., CollectOnPass: true})`.
+  torx.Artifact{Name: ..., Path: ..., CollectOnPass: true})`. A service that
+  launches more than one process on a node over a job -- a crash-and-restart
+  test -- calls `s.SetCapturePolicy(torx.CaptureRotate)` at construction so each
+  launch moves the previous process's log aside as `stdout.<k>.log` and
+  collects it too, instead of discarding it (the default, `CaptureTruncate`).
 - **One-shot commands** (a load generator that runs and exits) use
   `n.Exec(ctx, cmd)` instead of `StartCaptured`; it runs to completion and
   returns the captured `ExecResult` (exit code, stdout, stderr).
@@ -272,7 +276,7 @@ go run ./path/to/suite -nodes 3 'my\..*'
 
 # Results land under ./results/<timestamp>/ with a `latest` symlink:
 #   results/<ts>/<jobVariant>/{events.ndjson, test_log, result.json,
-#                              <service>/<node>/stdout.log}
+#                              <service>/<node>/stdout.log[, stdout.<k>.log]}
 ```
 
 Useful flags: `-nodes N` (local pool size), `-parallel N` (concurrent jobs),

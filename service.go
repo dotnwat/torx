@@ -69,6 +69,8 @@ type ServiceBase struct {
 
 	mu        sync.Mutex
 	artifacts map[string][]Artifact // node name -> artifacts to collect
+	capture   CapturePolicy         // what StartCaptured does with a prior incarnation's log
+	launches  map[string]int        // node name -> processes StartCaptured has launched there
 }
 
 // NewServiceBase builds a ServiceBase. hooks is the concrete service, driven by
