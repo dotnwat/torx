@@ -37,6 +37,11 @@ const (
 	// caller's whole wait.
 	probeTimeout = 2 * time.Second
 	viewTimeout  = 5 * time.Second
+	// syncTimeout is how long rqlite holds a synced readiness check open
+	// before answering 503 for a node still behind the leader. It must stay
+	// under the bound torx puts on each readiness probe, or the probe gives
+	// up first and the node never reports synced.
+	syncTimeout = time.Second
 )
 
 // Service runs an rqlite cluster of one rqlited per node.
@@ -120,7 +125,7 @@ func (s *Service) WaitNode(ctx context.Context, n *torx.Node) error {
 // copy when this returns -- so a read of that copy afterwards must poll for
 // what it expects rather than assert it at once.
 func (s *Service) WaitSynced(ctx context.Context, n *torx.Node) error {
-	return s.waitReady(ctx, n, "/readyz?sync&timeout=1s")
+	return s.waitReady(ctx, n, "/readyz?sync&timeout="+syncTimeout.String())
 }
 
 // StopNode terminates the node's rqlited, if one is running, and releases its
@@ -333,7 +338,9 @@ func (s *Service) rotateLog(ctx context.Context, n *torx.Node, k int) error {
 	return nil
 }
 
-// waitReady polls path on n until it answers below 500, bounded by readyTimeout.
+// waitReady polls path on n until it answers below 500, bounded by
+// readyTimeout for the whole wait; torx bounds each probe on its own, so a
+// probe that stalls costs one attempt rather than the node's readiness window.
 func (s *Service) waitReady(ctx context.Context, n *torx.Node, path string) error {
 	ctx, cancel := context.WithTimeout(ctx, readyTimeout)
 	defer cancel()

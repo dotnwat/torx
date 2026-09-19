@@ -48,9 +48,11 @@ func ValidLevel(level string) bool {
 const (
 	// requestTimeout bounds one HTTP request. It is far longer than any request
 	// the suite makes needs -- a membership view probes each member for at
-	// most a couple of seconds, a synced readiness check waits one -- and
-	// shorter than the waits the service builds from repeated requests, so a
-	// request that stalls costs one attempt, not the whole wait.
+	// most a couple of seconds -- and shorter than the waits the service
+	// builds from repeated requests, so a request that stalls costs one
+	// attempt, not the whole wait. Readiness probes do not go through this
+	// client: the service hands torx.WaitForHTTP a URL, and torx bounds each
+	// probe itself.
 	requestTimeout = 10 * time.Second
 	maxResponse    = 8 << 20
 )
