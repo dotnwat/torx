@@ -23,8 +23,9 @@ type LocalBackend struct{}
 
 var _ Backend = LocalBackend{}
 
-// localWaitDelay bounds how long Wait blocks for a command's I/O after the
-// process is cancelled, a backstop in case a process escapes the killed group.
+// localWaitDelay bounds how long Exec waits for a command's I/O once the
+// command has exited or been cancelled, a backstop in case a process escapes
+// the killed group and holds the pipes.
 const localWaitDelay = 2 * time.Second
 
 // minSignalablePID is the lowest pid Signal will target. A pid below 2 is never
@@ -33,31 +34,41 @@ const localWaitDelay = 2 * time.Second
 // stale or malformed pid from turning a signal into a group- or system-wide one.
 const minSignalablePID = 2
 
-func (b LocalBackend) command(ctx context.Context, cmd Cmd) *exec.Cmd {
-	c := exec.CommandContext(ctx, cmd.Path, cmd.Args...)
+// configure applies cmd's directory and environment to c and puts the command
+// in a process group of its own, so that a kill of the group takes the whole
+// tree and not just the direct child: a shell's grandchildren would otherwise
+// outlive it and keep its output pipes open (a sleep under sh -c would hold
+// Exec for its full duration). Stdin and cancellation are left to the caller.
+// Exec hands exec a reader and lets Wait cover the copy along with the output,
+// and runs the command under its context so that exec kills it; Stream feeds
+// a pipe of its own so the copy cannot hold up the exit report, and watches
+// the context itself so that the kill outlives the reap (see Stream).
+func configure(c *exec.Cmd, cmd Cmd) {
 	c.Dir = cmd.Dir
 	if len(cmd.Env) > 0 {
 		c.Env = append(os.Environ(), cmd.Env...)
 	}
-	// Stdin is left to the caller: Exec hands exec a reader and lets Wait cover
-	// the copy along with the output, while Stream feeds a pipe of its own so
-	// the copy cannot hold up the exit report (see Stream).
-	//
-	// Run each command in its own process group so cancellation kills the whole
-	// tree, not just the direct child: a shell's grandchildren would otherwise
-	// keep the output pipes open and block Wait (a sleep under sh -c would hold
-	// Wait for its full duration). WaitDelay bounds that wait as a backstop.
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	c.Cancel = func() error {
-		_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
-		return nil
-	}
-	c.WaitDelay = localWaitDelay
-	return c
+}
+
+// killGroup SIGKILLs the process group led by pid, the one configure gave the
+// command. A group already gone makes the kill fail with ESRCH, which is
+// success for a teardown, so the error is not reported.
+func killGroup(pid int) {
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
 }
 
 func (b LocalBackend) Exec(ctx context.Context, cmd Cmd) (ExecResult, error) {
-	c := b.command(ctx, cmd)
+	c := exec.CommandContext(ctx, cmd.Path, cmd.Args...)
+	configure(c, cmd)
+	// Cancellation kills the whole group, and WaitDelay bounds how long Run
+	// then waits for the output copies as a backstop, in case a process
+	// escaped the group and still holds the pipes.
+	c.Cancel = func() error {
+		killGroup(c.Process.Pid)
+		return nil
+	}
+	c.WaitDelay = localWaitDelay
 	if cmd.Stdin != nil {
 		c.Stdin = bytes.NewReader(cmd.Stdin)
 	}
@@ -81,7 +92,13 @@ func (b LocalBackend) Exec(ctx context.Context, cmd Cmd) (ExecResult, error) {
 }
 
 func (b LocalBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
-	c := b.command(ctx, cmd)
+	// The command is built without exec's own context watcher: that watcher
+	// ends with the reap, once the leader has been waited for, while the
+	// stream's promise -- cancelling ctx kills the command as Close would --
+	// has to hold until Close, for the children the leader may have left in
+	// the group. The stream watches ctx itself, below.
+	c := exec.Command(cmd.Path, cmd.Args...)
+	configure(c, cmd)
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return nil, Wrap(ErrBackend, "backend: stream "+cmd.Path, err)
@@ -126,12 +143,17 @@ func (b LocalBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
 			_ = stdinW.Close()
 		}()
 	}
-	return &procStream{cmd: c, r: pr, stdinW: stdinW, done: make(chan struct{})}, nil
+	s := &procStream{cmd: c, r: pr, stdinW: stdinW, done: make(chan struct{})}
+	// Match the ssh backend: the watcher and Close share one teardown, run at
+	// most once, and Close stops the watcher.
+	s.stopWatch = context.AfterFunc(ctx, func() { _ = s.teardown() })
+	return s, nil
 }
 
 // procStream is the Process a LocalBackend's Stream returns: it streams the
 // command's output, signals the command, waits for it, and terminates it on
-// Close.
+// Close. Cancelling the context that started the stream terminates it the
+// same way, through the shared teardown.
 //
 // The command is reaped lazily, by the first Wait or Close, not the moment it
 // exits. Until then an exited command stays a zombie, which pins its pid and
@@ -144,9 +166,10 @@ func (b LocalBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
 // caller that closes soon after its wait, as Shutdown does, keeps that window
 // negligible.
 type procStream struct {
-	cmd    *exec.Cmd
-	r      *os.File
-	stdinW *os.File // the input pipe's write end, nil without Cmd.Stdin
+	cmd       *exec.Cmd
+	r         *os.File
+	stdinW    *os.File // the input pipe's write end, nil without Cmd.Stdin
+	stopWatch func() bool
 
 	reapOnce sync.Once
 	done     chan struct{} // closed once the command has been reaped
@@ -203,15 +226,22 @@ func (s *procStream) reap() {
 }
 
 // Close kills the command's whole process group, matching how the command was
-// started, and reaps it. The group is killed whether or not the command has
-// already exited and been reaped: its children may outlive it, and the group
-// lives on while any of them does. A group already gone makes the kill fail
-// with ESRCH, which is success for teardown. Closing the input pipe ends a
-// stdin copy still blocked on it -- one held up by a process that escaped the
-// group -- rather than leaking the goroutine.
+// started, and reaps it.
 func (s *procStream) Close() error {
+	s.stopWatch()
+	return s.teardown()
+}
+
+// teardown kills the command's process group and reaps the command exactly
+// once, whether it is Close or the context watcher that reaches it first. The
+// group is killed whether or not the command has already exited and been
+// reaped: its children may outlive it, and the group lives on while any of
+// them does. Closing the input pipe ends a stdin copy still blocked on it --
+// one held up by a process that escaped the group -- rather than leaking the
+// goroutine.
+func (s *procStream) teardown() error {
 	s.closeOnce.Do(func() {
-		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+		killGroup(s.cmd.Process.Pid)
 		s.closeErr = s.r.Close()
 		if s.stdinW != nil {
 			_ = s.stdinW.Close()

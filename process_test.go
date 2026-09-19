@@ -234,6 +234,45 @@ func TestShutdownPreservesWaitError(t *testing.T) {
 	}
 }
 
+// stubbornProcess is a Process that never exits on its own: Wait returns only
+// when its context is done, with that context's error, and Close takes
+// closeTakes to succeed, as an ssh close that waits for the node's report of
+// the death does.
+type stubbornProcess struct {
+	closeTakes time.Duration
+}
+
+func (p *stubbornProcess) Read([]byte) (int, error)                { return 0, io.EOF }
+func (p *stubbornProcess) Signal(context.Context, os.Signal) error { return nil }
+func (p *stubbornProcess) Close() error {
+	time.Sleep(p.closeTakes)
+	return nil
+}
+func (p *stubbornProcess) Wait(ctx context.Context) (int, error) {
+	<-ctx.Done()
+	return -1, Wrap(ErrBackend, "backend: wait", ctx.Err())
+}
+
+// TestShutdownKeepsTimeoutAcrossSlowClose checks that a grace period which ran
+// out is reported as a timeout even when the caller's own deadline expires
+// during the close that follows: the wait was ended by the grace period, and
+// the kill went through, so the caller's context has no say in the outcome.
+// A service that treats a caller's cancellation as a stop it could not
+// confirm would otherwise quarantine a node its shutdown had cleaned up.
+func TestShutdownKeepsTimeoutAcrossSlowClose(t *testing.T) {
+	const grace, callerDeadline, closeTakes = 20 * time.Millisecond, 100 * time.Millisecond, 250 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), callerDeadline)
+	defer cancel()
+	p := &stubbornProcess{closeTakes: closeTakes}
+	code, err := Shutdown(ctx, p, syscall.SIGTERM, grace)
+	if ctx.Err() == nil {
+		t.Fatal("the caller's deadline had not expired by the time Shutdown returned: the test did not exercise the race")
+	}
+	if code != -1 || !errors.Is(err, ErrShutdownTimeout) {
+		t.Errorf("Shutdown = (%d, %v), want (-1, ErrShutdownTimeout)", code, err)
+	}
+}
+
 // TestShutdownReportsCloseFailureOverWaitError checks the precedence when both
 // the wait and the close fail: the kill that could not be carried out is the
 // answer, since the command may still be running.

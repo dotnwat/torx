@@ -69,6 +69,11 @@ func Shutdown(ctx context.Context, p Process, sig os.Signal, grace time.Duration
 	// what makes Signal fail most often, and its status is the answer then.
 	wctx, cancel := context.WithTimeout(ctx, grace)
 	code, waitErr := p.Wait(wctx)
+	// Note now whether it was the caller's context that ended the wait: the
+	// close can take a while (an ssh close waits for the node to report the
+	// death), and a caller's deadline that ran out during it must not turn a
+	// grace period that ran out into a wait the caller cut short.
+	callerErr := ctx.Err()
 	cancel()
 	closeErr := p.Close()
 	switch {
@@ -81,7 +86,7 @@ func Shutdown(ctx context.Context, p Process, sig os.Signal, grace time.Duration
 		return -1, closeErr
 	case sigErr != nil:
 		return -1, sigErr
-	case ctx.Err() != nil:
+	case callerErr != nil:
 		return -1, waitErr
 	case errors.Is(waitErr, context.DeadlineExceeded):
 		// The grace period ran out: only wctx's deadline can have done that,

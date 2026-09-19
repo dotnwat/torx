@@ -271,6 +271,67 @@ func TestLocalBackendStreamWaitHonorsContext(t *testing.T) {
 	}
 }
 
+// TestLocalBackendStreamContextCancelTerminatesCommand checks that cancelling
+// the context that started a stream kills the command and its group, with no
+// Close, and that Wait and Close afterwards behave as they do after a Close.
+func TestLocalBackendStreamContextCancelTerminatesCommand(t *testing.T) {
+	var b LocalBackend
+	dir := t.TempDir()
+	pidfile, childfile := filepath.Join(dir, "pid"), filepath.Join(dir, "child")
+	// The command ignores SIGTERM and holds a child, so only a group kill ends
+	// it -- which is what the context watcher must deliver.
+	ctx, cancel := context.WithCancel(context.Background())
+	p, err := b.Stream(ctx, Command("sh", "-c",
+		"trap '' TERM; echo $$ > "+pidfile+"; sleep 30 & echo $! > "+childfile+"; wait"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer p.Close()
+	pid, child := waitForPidfile(t, pidfile), waitForPidfile(t, childfile)
+
+	cancel() // no Close: cancelling the context alone must tear the command down
+	if !eventuallyDead(pid, 2*time.Second) {
+		t.Errorf("pid %d survived the context's cancellation", pid)
+	}
+	if !eventuallyDead(child, 2*time.Second) {
+		t.Errorf("child %d of pid %d survived the context's cancellation: the group was not killed", child, pid)
+	}
+	if code, err := p.Wait(context.Background()); err != nil || code != -1 {
+		t.Errorf("Wait after cancellation = (%d, %v), want (-1, nil): killed by a signal", code, err)
+	}
+	if err := p.Close(); err != nil {
+		t.Errorf("Close after cancellation: %v", err)
+	}
+}
+
+// TestLocalBackendStreamContextCancelAfterWait checks that cancellation still
+// kills the group once Wait has reaped the command: the leader's exit says
+// nothing about its children, and exec's own context watcher, which ends with
+// the reap, would have left them running.
+func TestLocalBackendStreamContextCancelAfterWait(t *testing.T) {
+	var b LocalBackend
+	childfile := filepath.Join(t.TempDir(), "child")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p, err := b.Stream(ctx, Command("sh", "-c", "sleep 30 & echo $! > "+childfile+"; exit 0"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer p.Close()
+	child := waitForPidfile(t, childfile)
+	if code, err := p.Wait(context.Background()); err != nil || code != 0 {
+		t.Fatalf("Wait = (%d, %v), want (0, nil)", code, err)
+	}
+	if !processAlive(child) {
+		t.Fatalf("child %d is gone before the cancellation", child)
+	}
+
+	cancel() // no Close: the child must go with the cancellation
+	if !eventuallyDead(child, 2*time.Second) {
+		t.Errorf("child %d survived the context's cancellation after Wait", child)
+	}
+}
+
 // TestLocalBackendStreamWaitIgnoresStdinHolder checks that Wait reports the
 // command's exit as soon as it happens, even while a child that inherited
 // stdin without reading it is still holding the input copy: the exit must be
