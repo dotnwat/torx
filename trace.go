@@ -35,9 +35,12 @@ const (
 )
 
 // reservedJobFile reports whether name is one of the framework's own files in a
-// job's results directory.
+// job's results directory, in any letter case: on a case-insensitive
+// filesystem, the default on macOS, a case variant of the name is the same
+// file, and an artifact written under one would truncate the open trace or be
+// overwritten by the final result.json.
 func reservedJobFile(name string) bool {
-	return name == eventsFile || name == testLogFile || name == resultFile
+	return strings.EqualFold(name, eventsFile) || strings.EqualFold(name, testLogFile) || strings.EqualFold(name, resultFile)
 }
 
 // teeSink fans each event out to several sinks.

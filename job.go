@@ -140,6 +140,11 @@ type JobContext struct {
 	// the job did, while the suite is not Ok, since results the run was asked
 	// for are missing.
 	persistErrs []error
+
+	// writeMu serializes artifact writes. A write truncates the file and then
+	// fills it, and two writes of one name from different goroutines would
+	// otherwise interleave, leaving a file that is neither's.
+	writeMu sync.Mutex
 }
 
 // NewJobContext returns a JobContext for the given params and event sink; sink
@@ -193,27 +198,33 @@ func (jc *JobContext) CollectArtifacts(ctx context.Context) error {
 // from nodes into directories there, so a job's files are told apart from
 // theirs by being files at the top: name must be a single non-traversal path
 // component that is neither one of the framework's own files (result.json,
-// test_log, events.ndjson) nor a registered service's name, and any other name
-// is a programming error and panics. Writing a name again replaces the file.
-// The artifact is kept whatever the job's outcome. It is a no-op when the run
-// is not persisting results, and a write that fails is recorded on the result
-// as a persistence failure rather than returned, so a full disk does not turn
-// a passing job into a failing one. Call it from Setup, Run, Teardown, or a
-// finalizer, not from Declare, which must stay pure.
+// test_log, events.ndjson) nor a registered service's name, in any letter
+// case, since a case-insensitive filesystem would take a case variant for the
+// same file; any other name is a programming error and panics. Writing a name
+// again replaces the file, and concurrent writes are serialized, so the file
+// is always one write's whole data. The artifact is kept whatever the job's
+// outcome. It is a no-op when the run is not persisting results, and a write
+// that fails is recorded on the result as a persistence failure rather than
+// returned, so a full disk does not turn a passing job into a failing one.
+// Call it from Setup, Run, Teardown, or a finalizer, not from Declare, which
+// must stay pure.
 func (jc *JobContext) WriteArtifact(name string, data []byte) {
 	if !validComponent(name) || reservedJobFile(name) {
 		panic(fmt.Sprintf("torx: artifact name must be a single non-traversal path component other than the framework's own files: %q", name))
 	}
 	for _, svc := range jc.registry.Services() {
-		if svc.Name() == name {
-			panic(fmt.Sprintf("torx: artifact name %q collides with the directory of the service of that name", name))
+		if strings.EqualFold(svc.Name(), name) {
+			panic(fmt.Sprintf("torx: artifact name %q collides with the directory of service %q", name, svc.Name()))
 		}
 	}
 	if jc.resultsDir == "" {
 		return
 	}
 	site := callerSite(2)
-	if err := os.WriteFile(filepath.Join(jc.resultsDir, name), data, 0o644); err != nil {
+	jc.writeMu.Lock()
+	err := os.WriteFile(filepath.Join(jc.resultsDir, name), data, 0o644)
+	jc.writeMu.Unlock()
+	if err != nil {
 		jc.mu.Lock()
 		jc.persistErrs = append(jc.persistErrs, fmt.Errorf("results: write artifact %s: %w", name, err))
 		jc.mu.Unlock()

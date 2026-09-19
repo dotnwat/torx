@@ -1,12 +1,14 @@
 package torx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -232,6 +234,9 @@ func TestWriteArtifactRejectsNames(t *testing.T) {
 		"", ".", "..", "a/b", // not a single non-traversal component
 		"result.json", "test_log", "events.ndjson", // the framework's own files
 		"svc", // the directory of the registered service
+		// Case variants of those: on a case-insensitive filesystem they are the
+		// same file, and the trace is open under the lowercase name.
+		"EVENTS.NDJSON", "Test_Log", "Result.JSON", "SVC",
 	} {
 		func() {
 			defer func() {
@@ -265,5 +270,33 @@ func TestWriteArtifactRecordsWriteFailure(t *testing.T) {
 	events := sink.Events()
 	if len(events) != 1 || events[0].Level != "error" || !strings.Contains(events[0].Message, "could not write artifact report.txt") {
 		t.Errorf("events = %+v, want an error log of the failed write", events)
+	}
+}
+
+func TestWriteArtifactSerializesConcurrentWrites(t *testing.T) {
+	// Two goroutines writing the same name: a write truncates and then fills
+	// the file, so unserialized they could interleave and leave a file that
+	// is neither's. Whichever lands last, the file is one write's whole data.
+	jc := NewJobContext(nil, nil)
+	jc.resultsDir = t.TempDir()
+	big := bytes.Repeat([]byte("a"), 1<<20)
+	small := bytes.Repeat([]byte("b"), 17)
+	path := filepath.Join(jc.resultsDir, "report.bin")
+	for i := range 20 {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); jc.WriteArtifact("report.bin", big) }()
+		go func() { defer wg.Done(); jc.WriteArtifact("report.bin", small) }()
+		wg.Wait()
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("artifact: %v", err)
+		}
+		if !bytes.Equal(got, big) && !bytes.Equal(got, small) {
+			t.Fatalf("round %d: artifact is %d bytes and neither write's data", i, len(got))
+		}
+	}
+	if errs := jc.persistErrors(); len(errs) != 0 {
+		t.Errorf("persist errors = %v, want none", errs)
 	}
 }

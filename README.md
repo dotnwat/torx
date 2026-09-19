@@ -246,8 +246,9 @@ What `JobBase` gives you, and how to take control:
   backup it took, a report it downloaded, a histogram it measured -- at the top
   of its results directory, beside `result.json`; the services' collected
   files sit in directories below. The name must be a single path component
-  that is not a framework file or a service name (a bad one panics), writing
-  it again replaces the file, and the file is kept whatever the outcome. In a
+  that is not a framework file or a service name in any letter case (a bad one
+  panics), writing it again replaces the file, concurrent writes are
+  serialized, and the file is kept whatever the outcome. In a
   run that is not persisting results it is a no-op, and a write that fails is
   recorded on the result as a persistence failure -- the suite is not Ok --
   rather than failing the job over a full disk.
