@@ -3,7 +3,10 @@ package torx
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -171,5 +174,96 @@ func TestJobOverrideSetup(t *testing.T) {
 	}
 	if !j.setupCalled {
 		t.Errorf("override Setup was not called via the interface")
+	}
+}
+
+func TestWriteArtifact(t *testing.T) {
+	var sink InMemoryEventSink
+	jc := NewJobContext(nil, &sink)
+	jc.resultsDir = t.TempDir()
+
+	jc.WriteArtifact("report.txt", []byte("first"))
+	// Writing the name again replaces the file: a job may rewrite a report as
+	// it goes, and the last version is the one that counts.
+	jc.WriteArtifact("report.txt", []byte("second"))
+
+	got, err := os.ReadFile(filepath.Join(jc.resultsDir, "report.txt"))
+	if err != nil {
+		t.Fatalf("artifact: %v", err)
+	}
+	if string(got) != "second" {
+		t.Errorf("artifact = %q, want the second write", got)
+	}
+	if errs := jc.persistErrors(); len(errs) != 0 {
+		t.Errorf("persist errors = %v, want none", errs)
+	}
+	// The trace narrates the write, attributed to the job's own call site.
+	events := sink.Events()
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want one per write", events)
+	}
+	e := events[1]
+	if e.Kind != EventLog || !strings.Contains(e.Message, "wrote artifact report.txt (6 bytes)") {
+		t.Errorf("event = %+v, want a log of the write", e)
+	}
+	if e.Site == nil || e.Site.File != "job_test.go" {
+		t.Errorf("event site = %+v, want the job's call site", e.Site)
+	}
+}
+
+func TestWriteArtifactNoResultsDir(t *testing.T) {
+	var sink InMemoryEventSink
+	jc := NewJobContext(nil, &sink)
+	jc.WriteArtifact("report.txt", []byte("report"))
+	if errs := jc.persistErrors(); len(errs) != 0 {
+		t.Errorf("persist errors = %v, want none: a run without results has nowhere to write", errs)
+	}
+	if events := sink.Events(); len(events) != 0 {
+		t.Errorf("events = %+v, want none for a write that did not happen", events)
+	}
+}
+
+func TestWriteArtifactRejectsNames(t *testing.T) {
+	jc := NewJobContext(nil, nil)
+	jc.Register(newFakeServiceSpec("svc", new([]string), 1))
+	// No results directory: a bad name is a programming error whether or not
+	// this run persists, so it must not wait for a persisting run to surface.
+	for _, name := range []string{
+		"", ".", "..", "a/b", // not a single non-traversal component
+		"result.json", "test_log", "events.ndjson", // the framework's own files
+		"svc", // the directory of the registered service
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("WriteArtifact(%q) did not panic", name)
+				}
+			}()
+			jc.WriteArtifact(name, nil)
+		}()
+	}
+}
+
+func TestWriteArtifactRecordsWriteFailure(t *testing.T) {
+	// A results directory that is a regular file: the artifact cannot be
+	// written under it. The failure is kept for the result rather than
+	// returned, since it is the results tree that is short, not the job.
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var sink InMemoryEventSink
+	jc := NewJobContext(nil, &sink)
+	jc.resultsDir = file
+
+	jc.WriteArtifact("report.txt", []byte("report"))
+
+	errs := jc.persistErrors()
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "write artifact report.txt") {
+		t.Fatalf("persist errors = %v, want the failed write", errs)
+	}
+	events := sink.Events()
+	if len(events) != 1 || events[0].Level != "error" || !strings.Contains(events[0].Message, "could not write artifact report.txt") {
+		t.Errorf("events = %+v, want an error log of the failed write", events)
 	}
 }

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -46,7 +47,7 @@ func requireRqlited(t *testing.T) {
 
 // largestJob is the node demand of the biggest jobs here, which sizes the
 // local pool. A job that grows past it fails allocation loudly.
-const largestJob = max(failoverNodes, rollingNodes)
+const largestJob = max(failoverNodes, rollingNodes, backupNodes)
 
 func TestSuiteEndToEnd(t *testing.T) {
 	requireRqlited(t)
@@ -67,7 +68,7 @@ func TestSuiteEndToEnd(t *testing.T) {
 		}
 		byID[r.ID] = r
 	}
-	for _, id := range []string{"rqlite.smoke", "rqlite.failover", "rqlite.rolling", `rqlite.cluster[level="none",nodes=3]`} {
+	for _, id := range []string{"rqlite.smoke", "rqlite.failover", "rqlite.rolling", "rqlite.backup", `rqlite.cluster[level="none",nodes=3]`} {
 		if _, ok := byID[id]; !ok {
 			t.Errorf("no result for %s; ran %v", id, res.Jobs)
 		}
@@ -100,6 +101,17 @@ func TestSuiteEndToEnd(t *testing.T) {
 		if info, err := os.Stat(p); err != nil || info.Size() == 0 {
 			t.Errorf("collected log %s missing or empty: %v", p, err)
 		}
+	}
+
+	// The backup job's own files sit at the top of its directory, beside the
+	// framework's, and hold what it fetched: the worker process wrote them
+	// there itself, so they are in place whichever launcher ran the job.
+	backupDir := filepath.Join(root, run, "rqlite.backup")
+	if db, err := os.ReadFile(filepath.Join(backupDir, backupFile)); err != nil || !bytes.HasPrefix(db, []byte(sqliteHeader)) {
+		t.Errorf("%s in %s is not a SQLite database file: %v", backupFile, backupDir, err)
+	}
+	if dump, err := os.ReadFile(filepath.Join(backupDir, dumpFile)); err != nil || !bytes.Contains(dump, []byte("CREATE TABLE events")) {
+		t.Errorf("%s in %s is not the SQL dump: %v", dumpFile, backupDir, err)
 	}
 }
 

@@ -84,16 +84,22 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 
 	// finish closes the trace -- the job's last event has been emitted by the
 	// time any path reaches it -- and stamps the variant's parameters and the
-	// persistence failures seen so far into the result, then writes
-	// result.json. Every result carries the parameters, passing or failing, so
-	// a consumer never has to decode them from the id. When the result.json
-	// write itself fails, its error cannot land in the file that failed; it is
-	// carried on the streamed result alone, which is how the driver learns of
-	// it.
+	// persistence failures seen so far, the job's own artifact writes that
+	// failed among them, into the result, then writes result.json. Every
+	// result carries the parameters, passing or failing, so a consumer never
+	// has to decode them from the id. When the result.json write itself fails,
+	// its error cannot land in the file that failed; it is carried on the
+	// streamed result alone, which is how the driver learns of it.
+	var jc *JobContext
 	finish := func(res JobResult) JobResult {
 		if trace != nil {
 			notePersist(trace.Close())
 			trace = nil
+		}
+		if jc != nil {
+			for _, err := range jc.persistErrors() {
+				notePersist(err)
+			}
 		}
 		res.Params = a.Params
 		res.PersistErr = strings.Join(persistErrs, "; ")
@@ -111,7 +117,7 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 	if !ok {
 		return fail(fmt.Errorf("worker: unknown job %q", a.JobID))
 	}
-	jc := NewJobContext(a.Params, sink)
+	jc = NewJobContext(a.Params, sink)
 	jc.resultsDir = jobDir
 	// Declare and Bind are (or drive) job-supplied code; confine a panic in
 	// either to this job's result, matching the recover wrapper Setup, Run, and

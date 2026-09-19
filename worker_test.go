@@ -20,6 +20,7 @@ func init() {
 	Register("wtest.block", func() Job { return &wBlockJob{} })
 	Register("wtest.nodes", func() Job { return &wNodeJob{} })
 	Register("wtest.dirtyteardown", func() Job { return &wDirtyTeardownJob{} })
+	Register("wtest.artifact", func() Job { return &wArtifactJob{} })
 }
 
 type wPassJob struct{ JobBase }
@@ -69,6 +70,15 @@ func (j *wNodeJob) Declare(jc *JobContext) {
 }
 func (j *wNodeJob) Run(_ context.Context, jc *JobContext) error {
 	jc.SetSummary(fmt.Sprintf("nodes=%d", len(j.svc.Nodes())))
+	return nil
+}
+
+// wArtifactJob writes one file of its own, report.txt, from its body.
+type wArtifactJob struct{ JobBase }
+
+func (*wArtifactJob) Declare(*JobContext) {}
+func (*wArtifactJob) Run(_ context.Context, jc *JobContext) error {
+	jc.WriteArtifact("report.txt", []byte("report"))
 	return nil
 }
 
