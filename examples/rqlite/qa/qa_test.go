@@ -74,8 +74,8 @@ func TestSuiteEndToEnd(t *testing.T) {
 	}
 
 	// The crashed leader ran twice, and both incarnations' output reached the
-	// results tree: the service rotates the first log aside before the second
-	// start, since StartCaptured would otherwise truncate it.
+	// results tree: the service's rotate policy has StartCaptured move the first
+	// log aside before the second start instead of truncating it.
 	var data struct {
 		Crashed string `json:"crashed"`
 	}

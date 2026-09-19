@@ -65,13 +65,12 @@ type Service struct {
 	members map[string]*member // node name -> member, from first start to stop
 }
 
-// member is a node's place in the cluster: the leased ports that address it,
-// the process currently filling that place, and how many processes have.
+// member is a node's place in the cluster: the leased ports that address it
+// and the process currently filling that place.
 type member struct {
 	httpPort int
 	raftPort int
 	proc     io.ReadCloser // the running rqlited, nil between Crash and Restart
-	starts   int           // processes launched behind these ports so far
 }
 
 // New builds a service named name that runs a cluster of nodes rqlited
@@ -79,6 +78,9 @@ type member struct {
 func New(name string, nodes int) *Service {
 	s := &Service{members: map[string]*member{}}
 	s.ServiceBase = torx.NewServiceBase(name, torx.Homogeneous(nodes, torx.NodeSpec{}), s)
+	// A Restart launches a second rqlited on the node; keep what the crashed one
+	// logged up to its crash beside what its replacement logs.
+	s.SetCapturePolicy(torx.CaptureRotate)
 	return s
 }
 
@@ -267,21 +269,12 @@ func (s *Service) launchLocked(ctx context.Context, n *torx.Node, m *member) err
 	if m.proc != nil {
 		return fmt.Errorf("rqlite: %s is already running", n.Name())
 	}
-	if m.starts > 0 {
-		// StartCaptured truncates stdout.log before launching, so the previous
-		// incarnation's output -- what a crashed leader logged up to its crash --
-		// is set aside first and collected beside the new log.
-		if err := s.rotateLog(ctx, n, m.starts); err != nil {
-			return err
-		}
-	}
 	args := commandLine(n.Name(), n.Addr(), m.httpPort, m.raftPort, s.peersLocked(n), s.dataDir(n))
 	proc, err := s.StartCaptured(ctx, n, torx.Command(binary, args...))
 	if err != nil {
 		return err
 	}
 	m.proc = proc
-	m.starts++
 	return nil
 }
 
@@ -319,23 +312,6 @@ func (s *Service) peersLocked(self *torx.Node) []string {
 		}
 	}
 	return peers
-}
-
-// rotateLog moves the captured stdout.log of the node's previous incarnation
-// aside as stdout.<k>.log and registers it for collection. A backend has no
-// rename operation, so the move runs as a command on the node.
-func (s *Service) rotateLog(ctx context.Context, n *torx.Node, k int) error {
-	dir := n.ServiceScratch(s.Name()).Root
-	name := fmt.Sprintf("stdout.%d.log", k)
-	res, err := n.Exec(ctx, torx.Command("mv", filepath.Join(dir, "stdout.log"), filepath.Join(dir, name)))
-	if err != nil {
-		return err
-	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("rqlite: rotate log on %s: mv exited %d: %s", n.Name(), res.ExitCode, strings.TrimSpace(string(res.Stderr)))
-	}
-	s.AddArtifact(n, torx.Artifact{Name: name, Path: filepath.Join(dir, name), CollectOnPass: true})
-	return nil
 }
 
 // waitReady polls path on n until it answers below 500, bounded by

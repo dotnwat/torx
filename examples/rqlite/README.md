@@ -181,10 +181,10 @@ so a probe that stalls costs one attempt rather than the node's whole
 readiness window.
 
 **Output is an artifact.** `StartCaptured` sends each `rqlited`'s output to
-`stdout.log` on its node and collects it after the job. It truncates that file
-on every start, so before a `Restart` the service moves the crashed process's
-log aside as `stdout.<n>.log` and registers it with `AddArtifact`; the results
-tree then holds what a crashed leader logged up to its crash.
+`stdout.log` on its node and collects it after the job. The service sets the
+`CaptureRotate` policy, so a `Restart` moves the crashed process's log aside
+as `stdout.<n>.log` instead of discarding it; the results tree then holds what
+a crashed leader logged up to its crash beside what its replacement logged.
 
 ## Testing the example
 
