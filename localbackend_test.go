@@ -2,6 +2,7 @@ package torx
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -267,5 +268,40 @@ func TestLocalBackendStreamWaitHonorsContext(t *testing.T) {
 	}
 	if !eventuallyDead(child, 2*time.Second) {
 		t.Errorf("child %d of pid %d survived Close: the group was not killed", child, pid)
+	}
+}
+
+// TestLocalBackendStreamWaitIgnoresStdinHolder checks that Wait reports the
+// command's exit as soon as it happens, even while a child that inherited
+// stdin without reading it is still holding the input copy: the exit must be
+// observed on its own, or a graceful stop of a command that exits promptly
+// would look like a timeout.
+func TestLocalBackendStreamWaitIgnoresStdinHolder(t *testing.T) {
+	var b LocalBackend
+	// The child takes stdin and sleeps on it without reading; the input is far
+	// larger than a pipe holds, so the copy blocks until someone drains it.
+	cmd := Command("sh", "-c", "exec 3<&0; sleep 30 <&3 & exec 3<&-; trap 'exit 0' TERM; echo ready; while true; do sleep 0.1; done")
+	cmd.Stdin = bytes.Repeat([]byte("x"), 1<<20)
+	p, err := b.Stream(context.Background(), cmd)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer p.Close()
+	if got := readLine(t, p); got != "ready" {
+		t.Fatalf("first line = %q, want ready", got)
+	}
+
+	if err := p.Signal(context.Background(), syscall.SIGTERM); err != nil {
+		t.Fatalf("Signal: %v", err)
+	}
+	// Well under localWaitDelay, which is what a Wait held by the copy would
+	// take.
+	ctx, cancel := context.WithTimeout(context.Background(), localWaitDelay/4)
+	defer cancel()
+	if code, err := p.Wait(ctx); err != nil || code != 0 {
+		t.Fatalf("Wait = (%d, %v), want (0, nil)", code, err)
+	}
+	if err := p.Close(); err != nil {
+		t.Errorf("Close: %v", err)
 	}
 }

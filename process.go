@@ -54,8 +54,11 @@ type Process interface {
 // when it could not be delivered to a running command, ctx's error when the
 // wait was cut short by the caller, the close's error when the kill could not
 // be carried out, or the wait's own error when the transport lost track of the
-// command before the grace period was up. Whatever the outcome, p is closed
-// when Shutdown returns.
+// command before the grace period was up. A kill that could not be carried
+// out is reported ahead of whatever ended the wait, the caller's own
+// cancellation included: the command may then still be running, and a caller
+// must be able to tell that from a stop that cleaned up. Whatever the
+// outcome, p is closed when Shutdown returns.
 //
 // The signal reaches the command only once it has replaced the shell the
 // backend launched it through; stop a command after it has shown it is up (a
@@ -71,14 +74,15 @@ func Shutdown(ctx context.Context, p Process, sig os.Signal, grace time.Duration
 	switch {
 	case waitErr == nil:
 		return code, closeErr
+	case closeErr != nil:
+		// The kill could not be carried out, so the command may still be
+		// running: that outranks whatever ended the wait, the caller's own
+		// cancellation and a signal that could not be delivered included.
+		return -1, closeErr
 	case sigErr != nil:
 		return -1, sigErr
 	case ctx.Err() != nil:
 		return -1, waitErr
-	case closeErr != nil:
-		// The kill could not be carried out, so the command may still be
-		// running: that outranks whatever ended the wait.
-		return -1, closeErr
 	case errors.Is(waitErr, context.DeadlineExceeded):
 		// The grace period ran out: only wctx's deadline can have done that,
 		// as ctx's own error was ruled out above.

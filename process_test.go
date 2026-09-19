@@ -248,3 +248,43 @@ func TestShutdownReportsCloseFailureOverWaitError(t *testing.T) {
 		t.Errorf("Shutdown = (%d, %v), want (-1, the close's error)", code, err)
 	}
 }
+
+// cancelledProcess is a scriptedProcess whose Wait returns only once the
+// caller's context is done, the way a wait on a live command does.
+type cancelledProcess struct{ scriptedProcess }
+
+func (p *cancelledProcess) Wait(ctx context.Context) (int, error) {
+	<-ctx.Done()
+	return -1, Wrap(ErrBackend, "backend: wait", ctx.Err())
+}
+
+// TestShutdownReportsCloseFailureOverCancel checks that a kill which could
+// not be carried out is reported even when the caller's own context ended the
+// wait: a caller must be able to tell a cancelled stop that cleaned up from
+// one that left the command running.
+func TestShutdownReportsCloseFailureOverCancel(t *testing.T) {
+	killFailed := errors.New("kill failed")
+	p := &cancelledProcess{scriptedProcess{closeErr: Wrap(ErrBackend, "backend: kill", killFailed)}}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	code, err := Shutdown(ctx, p, syscall.SIGTERM, time.Minute)
+	if code != -1 || !errors.Is(err, killFailed) {
+		t.Errorf("Shutdown = (%d, %v), want (-1, the close's error)", code, err)
+	}
+}
+
+// TestShutdownReportsCloseFailureOverSignalError checks the same precedence
+// when the signal could not be delivered either: the failed kill is what
+// leaves the command possibly running, so it is the answer.
+func TestShutdownReportsCloseFailureOverSignalError(t *testing.T) {
+	killFailed := errors.New("kill failed")
+	p := &scriptedProcess{
+		sigErr:   Wrap(ErrBackend, "backend: signal", errors.New("connection lost")),
+		waitErr:  Wrap(ErrBackend, "backend: wait", errors.New("connection lost")),
+		closeErr: Wrap(ErrBackend, "backend: kill", killFailed),
+	}
+	code, err := Shutdown(context.Background(), p, syscall.SIGTERM, time.Minute)
+	if code != -1 || !errors.Is(err, killFailed) {
+		t.Errorf("Shutdown = (%d, %v), want (-1, the close's error)", code, err)
+	}
+}

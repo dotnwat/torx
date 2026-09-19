@@ -39,9 +39,10 @@ func (b LocalBackend) command(ctx context.Context, cmd Cmd) *exec.Cmd {
 	if len(cmd.Env) > 0 {
 		c.Env = append(os.Environ(), cmd.Env...)
 	}
-	if cmd.Stdin != nil {
-		c.Stdin = bytes.NewReader(cmd.Stdin)
-	}
+	// Stdin is left to the caller: Exec hands exec a reader and lets Wait cover
+	// the copy along with the output, while Stream feeds a pipe of its own so
+	// the copy cannot hold up the exit report (see Stream).
+	//
 	// Run each command in its own process group so cancellation kills the whole
 	// tree, not just the direct child: a shell's grandchildren would otherwise
 	// keep the output pipes open and block Wait (a sleep under sh -c would hold
@@ -57,6 +58,9 @@ func (b LocalBackend) command(ctx context.Context, cmd Cmd) *exec.Cmd {
 
 func (b LocalBackend) Exec(ctx context.Context, cmd Cmd) (ExecResult, error) {
 	c := b.command(ctx, cmd)
+	if cmd.Stdin != nil {
+		c.Stdin = bytes.NewReader(cmd.Stdin)
+	}
 	var stdout, stderr bytes.Buffer
 	c.Stdout = &stdout
 	c.Stderr = &stderr
@@ -84,15 +88,45 @@ func (b LocalBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
 	}
 	c.Stdout = pw
 	c.Stderr = pw
+	// Feed stdin through a pipe of our own rather than handing exec a reader.
+	// exec copies a reader through a goroutine that Wait waits for, up to
+	// WaitDelay, and a child that inherited stdin without reading it holds
+	// that copy past the command's exit once the input outgrows the pipe: the
+	// exit would go unreported until WaitDelay ran out, and a graceful stop
+	// would time out on a command that exited promptly. An *os.File is wired
+	// to the child directly, with nothing for Wait to wait on, so the copy
+	// runs on its own and Close ends it, as the ssh backend's teardown does.
+	var stdinR, stdinW *os.File
+	if cmd.Stdin != nil {
+		stdinR, stdinW, err = os.Pipe()
+		if err != nil {
+			_ = pw.Close()
+			_ = pr.Close()
+			return nil, Wrap(ErrBackend, "backend: stream "+cmd.Path, err)
+		}
+		c.Stdin = stdinR
+	}
 	if err := c.Start(); err != nil {
 		_ = pw.Close()
 		_ = pr.Close()
+		if stdinR != nil {
+			_ = stdinR.Close()
+			_ = stdinW.Close()
+		}
 		return nil, Wrap(ErrBackend, "backend: stream "+cmd.Path, err)
 	}
-	// The child holds its own dup of the write end; close the parent's copy so
-	// the reader sees EOF once the child exits.
+	// The child holds its own dups of the pipe ends it was given; close the
+	// parent's copies so the reader sees EOF once the child exits and the
+	// child sees EOF once the input has been written.
 	_ = pw.Close()
-	return &procStream{cmd: c, r: pr, done: make(chan struct{})}, nil
+	if stdinR != nil {
+		_ = stdinR.Close()
+		go func() {
+			_, _ = io.Copy(stdinW, bytes.NewReader(cmd.Stdin))
+			_ = stdinW.Close()
+		}()
+	}
+	return &procStream{cmd: c, r: pr, stdinW: stdinW, done: make(chan struct{})}, nil
 }
 
 // procStream is the Process a LocalBackend's Stream returns: it streams the
@@ -110,8 +144,9 @@ func (b LocalBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
 // caller that closes soon after its wait, as Shutdown does, keeps that window
 // negligible.
 type procStream struct {
-	cmd *exec.Cmd
-	r   *os.File
+	cmd    *exec.Cmd
+	r      *os.File
+	stdinW *os.File // the input pipe's write end, nil without Cmd.Stdin
 
 	reapOnce sync.Once
 	done     chan struct{} // closed once the command has been reaped
@@ -171,11 +206,16 @@ func (s *procStream) reap() {
 // started, and reaps it. The group is killed whether or not the command has
 // already exited and been reaped: its children may outlive it, and the group
 // lives on while any of them does. A group already gone makes the kill fail
-// with ESRCH, which is success for teardown.
+// with ESRCH, which is success for teardown. Closing the input pipe ends a
+// stdin copy still blocked on it -- one held up by a process that escaped the
+// group -- rather than leaking the goroutine.
 func (s *procStream) Close() error {
 	s.closeOnce.Do(func() {
 		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
 		s.closeErr = s.r.Close()
+		if s.stdinW != nil {
+			_ = s.stdinW.Close()
+		}
 		s.reap()
 		<-s.done
 	})
