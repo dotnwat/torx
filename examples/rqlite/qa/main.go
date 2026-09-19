@@ -24,4 +24,5 @@ func init() {
 	torx.Register("rqlite.smoke", func() torx.Job { return &smokeJob{} })
 	torx.Register("rqlite.cluster", func() torx.Job { return &clusterJob{} })
 	torx.Register("rqlite.failover", func() torx.Job { return &failoverJob{} })
+	torx.Register("rqlite.rolling", func() torx.Job { return &rollingJob{} })
 }

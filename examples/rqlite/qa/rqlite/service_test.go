@@ -3,7 +3,11 @@
 package rqlite
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"slices"
 	"testing"
 
@@ -96,6 +100,9 @@ func TestCrashAndRestartRequireAProcessState(t *testing.T) {
 	if err := s.Crash(ctx, nodes[0]); err == nil {
 		t.Error("Crash of a never-started node succeeded")
 	}
+	if err := s.Shutdown(ctx, nodes[0]); err == nil {
+		t.Error("Shutdown of a never-started node succeeded")
+	}
 	if err := s.Restart(ctx, nodes[0]); err == nil {
 		t.Error("Restart of a never-started node succeeded")
 	}
@@ -103,6 +110,71 @@ func TestCrashAndRestartRequireAProcessState(t *testing.T) {
 	// before every start to establish a known state.
 	if err := s.StopNode(ctx, nodes[0]); err != nil {
 		t.Errorf("StopNode of a never-started node: %v", err)
+	}
+}
+
+// stubProc is a torx.Process standing in for an rqlited whose stop goes one
+// way or another: Wait ends with waitErr at once, and Close reports closeErr.
+type stubProc struct {
+	waitErr  error
+	closeErr error
+}
+
+func (p *stubProc) Read([]byte) (int, error)                { return 0, io.EOF }
+func (p *stubProc) Signal(context.Context, os.Signal) error { return nil }
+func (p *stubProc) Wait(context.Context) (int, error)       { return -1, p.waitErr }
+func (p *stubProc) Close() error                            { return p.closeErr }
+
+// TestUnstoppedProcessFailsRestartAndTeardown checks that a Crash or Shutdown
+// whose kill could not be carried out is not forgotten with the handle: the
+// old rqlited may still be running behind the member's ports, so Restart must
+// refuse and StopNode must fail, which marks the node dirty and keeps it from
+// being reused.
+func TestUnstoppedProcessFailsRestartAndTeardown(t *testing.T) {
+	killFailed := torx.Wrap(torx.ErrBackend, "kill group", errors.New("node unreachable"))
+	lost := torx.Wrap(torx.ErrBackend, "wait", errors.New("connection dropped"))
+	for name, stop := range map[string]func(*Service, context.Context, *torx.Node) error{
+		"Crash":    (*Service).Crash,
+		"Shutdown": (*Service).Shutdown,
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, nodes := bound(t, 1)
+			ctx := t.Context()
+			s.members["node-0"] = &member{httpPort: 4001, raftPort: 4002, proc: &stubProc{waitErr: lost, closeErr: killFailed}}
+			if err := stop(s, ctx, nodes[0]); !errors.Is(err, killFailed) {
+				t.Fatalf("%s = %v, want the kill failure", name, err)
+			}
+			if err := s.Restart(ctx, nodes[0]); !errors.Is(err, killFailed) {
+				t.Errorf("Restart after the failed %s = %v, want a refusal carrying the kill failure", name, err)
+			}
+			if err := s.StopNode(ctx, nodes[0]); !errors.Is(err, killFailed) {
+				t.Errorf("StopNode after the failed %s = %v, want the kill failure so the teardown fails", name, err)
+			}
+			if err := s.StopNode(ctx, nodes[0]); err != nil {
+				t.Errorf("second StopNode = %v, want nil: the member is gone", err)
+			}
+		})
+	}
+}
+
+// TestShutdownTimeoutLeavesTheNodeClean is the counterpart: a process that had
+// to be killed when the grace period ran out fails Shutdown, since the stop is
+// under test, but the kill went through, so the member can be restarted and
+// the teardown is clean.
+func TestShutdownTimeoutLeavesTheNodeClean(t *testing.T) {
+	s, nodes := bound(t, 1)
+	ctx := t.Context()
+	// A wait that ends with the deadline is what a running process produces
+	// once the grace period is up.
+	s.members["node-0"] = &member{httpPort: 4001, raftPort: 4002, proc: &stubProc{waitErr: torx.Wrap(torx.ErrBackend, "wait", context.DeadlineExceeded)}}
+	if err := s.Shutdown(ctx, nodes[0]); !errors.Is(err, torx.ErrShutdownTimeout) {
+		t.Fatalf("Shutdown = %v, want ErrShutdownTimeout", err)
+	}
+	if m := s.members["node-0"]; m.unstopped != nil {
+		t.Errorf("member left unstopped after a kill that went through: %v", m.unstopped)
+	}
+	if err := s.StopNode(ctx, nodes[0]); err != nil {
+		t.Errorf("StopNode = %v, want nil: the node is clean", err)
 	}
 }
 

@@ -13,7 +13,7 @@ half a minute.
 
 Two things live here:
 
-- **`qa/`** is the suite: a torx binary with three jobs, and the service
+- **`qa/`** is the suite: a torx binary with four jobs, and the service
   package (`qa/rqlite`) that deploys an rqlite cluster onto torx nodes and
   speaks to it.
 - **`harness/`** is the launcher: the front end a person or CI runs. It owns
@@ -68,7 +68,7 @@ results/rqlite/2026-09-18T17-38-54Z-3312641955/
     events.ndjson                 every event the worker emitted
   rqlite.failover/
     rqlite/node-2/stdout.log      each node's captured rqlited output ...
-    rqlite/node-2/stdout.1.log    ... and, for a node that was crashed and
+    rqlite/node-2/stdout.1.log    ... and, for a node that was stopped and
                                   restarted, the output of the first process
   run.json                        the whole run's results
 ```
@@ -136,6 +136,20 @@ the count converges rather than being current the moment the node is synced
 -- and checks the membership is whole again. The election time is recorded in
 the result's data.
 
+**`rqlite.rolling`** is the failover job's graceful twin: a rolling restart
+that stops every node in turn with SIGTERM, the way an operator would. rqlite
+has a leader step down before it exits on that signal, so the cluster hands
+leadership over instead of waiting out an election. For each node the job
+stops it, waits until the survivors report a leader, writes a hundred rows
+through that leader, restarts the node, and waits until it has received what
+it missed before moving on to the next. The stop itself is under test: a
+node that ignores the signal, or exits with a non-zero status, fails the
+job. At the end every node's own copy is checked for every row and the
+membership for wholeness. The time from each leader's stop until its
+successor is reported is recorded beside the failover job's election time,
+so the two numbers -- a handoff of about a hundred milliseconds against an
+election of a couple of seconds -- sit side by side in the results.
+
 ## How the service is built
 
 `qa/rqlite/service.go` is the part worth reading closely; the choices below
@@ -158,12 +172,30 @@ so a service using it would allocate all ports up front in an overridden
 **Ports are identity.** A node's two ports are leased when it first starts and
 kept until the framework stops it, not released with its process. Its peers
 know it by those addresses, so `Crash` kills the process and keeps the ports,
-and `Restart` launches a new process behind the same addresses on the same
-data directory: the node comes back as the member that went away, and its
-Raft log on disk lets it catch up. `StopNode`, which the framework calls at
-teardown and before every start, is the one that ends a membership and
-releases the ports. A job injects faults only through these methods, never by
-reaching past the service to the process.
+`Shutdown` stops it gracefully and keeps them too, and `Restart` launches a
+new process behind the same addresses on the same data directory: the node
+comes back as the member that went away, and its Raft log on disk lets it
+catch up. `StopNode`, which the framework calls at teardown and before every
+start, is the one that ends a membership and releases the ports. A job
+injects faults only through these methods, never by reaching past the
+service to the process.
+
+**Stops are graceful, and one of them is under test.** `StartCaptured` returns
+a `torx.Process`, and the service stops one with `torx.Shutdown`: SIGTERM,
+a grace period for rqlite's own shutdown -- the leader stepping down, the
+store snapshotting and closing -- and a SIGKILL of the process group only if
+that runs out. `StopNode` uses it so every job's teardown goes through the
+real shutdown path, but it only logs a process that had to be killed or
+exited unclean: the node is clean either way, and a teardown error would
+mark it dirty and quarantine it. `Shutdown`, the method the rolling job
+calls, is where the same stop is an assertion -- a timeout or a non-zero
+exit fails the call, and so the job. `Crash` stays SIGKILL, so the failover
+job's crash is still a crash. The one stop that does fail the teardown is a
+`Crash` or `Shutdown` that could not establish its process was gone -- the
+kill could not be carried out, or the transport lost track of it. The member
+is left unstopped: `Restart` refuses it, and `StopNode` fails with that error,
+so a node that may still be running the old `rqlited` is quarantined rather
+than reused.
 
 **Bind broadly, advertise the node's address.** Each `rqlited` binds `0.0.0.0`
 and advertises `node.Addr()` for both its HTTP and Raft endpoints. On the
@@ -184,9 +216,10 @@ readiness window.
 
 **Output is an artifact.** `StartCaptured` sends each `rqlited`'s output to
 `stdout.log` on its node and collects it after the job. The service sets the
-`CaptureRotate` policy, so a `Restart` moves the crashed process's log aside
+`CaptureRotate` policy, so a `Restart` moves the stopped process's log aside
 as `stdout.<n>.log` instead of discarding it; the results tree then holds what
-a crashed leader logged up to its crash beside what its replacement logged.
+a crashed leader logged up to its crash, or a stopped one up to its stepdown,
+beside what its replacement logged.
 
 ## Testing the example
 

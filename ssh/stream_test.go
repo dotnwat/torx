@@ -3,6 +3,7 @@ package ssh
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -328,6 +329,9 @@ func assertCloseKillsService(t *testing.T, b *backend) {
 // TestStreamCloseSurfacesKillFailure checks that Close reports a remote kill it
 // could not deliver, instead of returning success while the service may still be
 // running. The node is made unreachable before Close, so the kill cannot run.
+// The lost connection ends the session first, without any word on the command:
+// that must not pass for its exit, which would have Close skip the kill and
+// Signal refuse to try -- while the command runs on.
 func TestStreamCloseSurfacesKillFailure(t *testing.T) {
 	s := newTestServer(t)
 	be, err := build(s.descriptor(t))
@@ -335,18 +339,64 @@ func TestStreamCloseSurfacesKillFailure(t *testing.T) {
 		t.Fatalf("build backend: %v", err)
 	}
 	b := be.(*backend)
+	pidfile := filepath.Join(t.TempDir(), "pid")
+	script := fmt.Sprintf("trap '' HUP TERM; echo $$ > %s; while true; do sleep 1; done", pidfile)
 
-	stream, err := b.Stream(context.Background(), torx.Command("sh", "-c", "sleep 30"))
+	stream, err := b.Stream(context.Background(), torx.Command("sh", "-c", script))
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
+	pid := waitForPid(t, pidfile)
+	// The kill under test cannot reach it, so the loop is ended by hand: it
+	// leads its group (the wrapper exec'd it in place), so its pid is the pgid.
+	t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+
 	// Drop the connection and stop the listener so Close's fresh session to run the
-	// remote kill cannot be established.
+	// remote kill cannot be established, then wait for the session to end.
 	b.close()
 	_ = s.ln.Close()
-
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := stream.Wait(ctx); !errors.Is(err, torx.ErrBackend) {
+		t.Fatalf("Wait after the connection dropped = %v, want ErrBackend: the session ended without the exit", err)
+	}
+	if err := stream.Signal(context.Background(), syscall.SIGTERM); errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("Signal after the connection dropped = %v: a lost session was taken for the command's exit", err)
+	}
 	if err := stream.Close(); err == nil {
 		t.Error("Close reported success though the remote kill could not be delivered")
+	}
+	if !processAlive(pid) {
+		t.Errorf("service pid %d is gone: nothing should have been able to kill it", pid)
+	}
+}
+
+// TestStreamCloseAwaitsExitReport checks that Close, having delivered the kill,
+// lets the node report the command's death before it closes the session, so a
+// Wait after the Close can say how the command died. The server holds the
+// report back, as an sshd slower to reap than the client is to close would: a
+// close sent straight after the kill would reach it first, and the report
+// would be discarded with the channel.
+func TestStreamCloseAwaitsExitReport(t *testing.T) {
+	b := dialBackendWith(t, func(s *testServer) { s.exitDelay = 300 * time.Millisecond })
+	pidfile := filepath.Join(t.TempDir(), "pid")
+	script := fmt.Sprintf("trap '' HUP TERM; echo $$ > %s; while true; do sleep 1; done", pidfile)
+	stream, err := b.Stream(context.Background(), torx.Command("sh", "-c", script))
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	pid := waitForPid(t, pidfile)
+
+	if err := stream.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !eventuallyDead(pid, 2*time.Second) {
+		t.Fatalf("service pid %d survived Close", pid)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if code, err := stream.Wait(ctx); err != nil || code != -1 {
+		t.Errorf("Wait after Close = (%d, %v), want (-1, nil): the session was closed before the node reported the kill", code, err)
 	}
 }
 
@@ -376,6 +426,215 @@ func TestStreamContextCancelTerminatesCommand(t *testing.T) {
 	cancel() // no Close: cancelling the context alone must tear the command down
 	if !eventuallyDead(pid, 3*time.Second) {
 		t.Errorf("service pid %d survived context cancellation", pid)
+	}
+}
+
+// trapsTERM is a command that traps SIGTERM, announces it, and exits cleanly,
+// after first saying it is ready: only the program itself can do that, so a
+// signal that reached a shell around it instead would show as a missing
+// announcement and a signal death.
+var trapsTERM = torx.Command("sh", "-c", "trap 'echo got-term; exit 0' TERM; echo ready; while true; do sleep 0.1; done")
+
+// TestStreamSignalReachesCommand checks that the handle's Signal is delivered
+// to the command the wrapper exec'd, and that Wait then reports the exit the
+// command chose.
+func TestStreamSignalReachesCommand(t *testing.T) {
+	assertSignalReachesCommand(t, dialBackend(t))
+}
+
+// TestStreamSignalReachesCommandBehindForkingShell covers the shapes where the
+// wrapper has to make a process group of its own: the pid it reports must still
+// be the command's, not that of the shell setsid or perl started.
+func TestStreamSignalReachesCommandBehindForkingShell(t *testing.T) {
+	assertSignalReachesCommand(t, dialBackendWith(t, func(s *testServer) { s.forkDepth = 1 }))
+}
+
+func assertSignalReachesCommand(t *testing.T, b *backend) {
+	t.Helper()
+	stream, err := b.Stream(context.Background(), trapsTERM)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	defer stream.Close()
+	r := bufio.NewReader(stream)
+	if line, _ := r.ReadString('\n'); strings.TrimSpace(line) != "ready" {
+		t.Fatalf("first line = %q, want ready", strings.TrimSpace(line))
+	}
+
+	if err := stream.Signal(context.Background(), syscall.SIGTERM); err != nil {
+		t.Fatalf("signal: %v", err)
+	}
+	if line, _ := r.ReadString('\n'); strings.TrimSpace(line) != "got-term" {
+		t.Errorf("line after the signal = %q, want got-term: the signal did not reach the command", strings.TrimSpace(line))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if code, err := stream.Wait(ctx); err != nil || code != 0 {
+		t.Errorf("Wait = (%d, %v), want (0, nil)", code, err)
+	}
+}
+
+// TestStreamShutdownGraceful runs the graceful stop end to end over ssh: the
+// signal, the wait, and the close, with the command's own exit reported.
+func TestStreamShutdownGraceful(t *testing.T) {
+	b := dialBackend(t)
+	stream, err := b.Stream(context.Background(), trapsTERM)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if line, _ := bufio.NewReader(stream).ReadString('\n'); strings.TrimSpace(line) != "ready" {
+		t.Fatalf("first line = %q, want ready", strings.TrimSpace(line))
+	}
+	code, err := torx.Shutdown(context.Background(), stream, syscall.SIGTERM, 5*time.Second)
+	if err != nil || code != 0 {
+		t.Errorf("Shutdown = (%d, %v), want (0, nil)", code, err)
+	}
+}
+
+// TestStreamWaitReportsExitStatus checks that Wait carries the remote exit
+// status back, and that a command which has exited can no longer be signalled:
+// sshd has reaped it, so the pid may be someone else's by now.
+func TestStreamWaitReportsExitStatus(t *testing.T) {
+	b := dialBackend(t)
+	stream, err := b.Stream(context.Background(), torx.Command("sh", "-c", "exit 7"))
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	defer stream.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if code, err := stream.Wait(ctx); err != nil || code != 7 {
+		t.Fatalf("Wait = (%d, %v), want (7, nil)", code, err)
+	}
+	err = stream.Signal(context.Background(), syscall.SIGTERM)
+	if !errors.Is(err, torx.ErrBackend) || !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("Signal after exit = %v, want ErrBackend wrapping os.ErrProcessDone", err)
+	}
+}
+
+func TestStreamWaitHonorsContext(t *testing.T) {
+	b := dialBackend(t)
+	stream, err := b.Stream(context.Background(), torx.Command("sleep", "30"))
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	defer stream.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = stream.Wait(ctx)
+	if !errors.Is(err, torx.ErrBackend) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Wait err = %v, want ErrBackend wrapping the deadline", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("Wait took %v: it ignored its context", time.Since(start))
+	}
+}
+
+// TestStreamShutdownKillsSurvivingChildren checks that a graceful stop still
+// kills what the command left behind: a child that outlives it, here a sleep
+// the shell backgrounded with its output redirected so it holds no session
+// pipe. The command's own exit ends the session, but not the group, and Close
+// must kill the group all the same.
+func TestStreamShutdownKillsSurvivingChildren(t *testing.T) {
+	b := dialBackend(t)
+	childfile := filepath.Join(t.TempDir(), "child")
+	stream, err := b.Stream(context.Background(), torx.Command("sh", "-c",
+		"trap 'exit 0' TERM; sleep 30 >/dev/null 2>&1 & echo $! > "+childfile+"; echo ready; while true; do sleep 0.1; done"))
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if line, _ := bufio.NewReader(stream).ReadString('\n'); strings.TrimSpace(line) != "ready" {
+		t.Fatalf("first line = %q, want ready", strings.TrimSpace(line))
+	}
+	child := waitForPid(t, childfile)
+	t.Cleanup(func() { _ = syscall.Kill(child, syscall.SIGKILL) })
+
+	code, err := torx.Shutdown(context.Background(), stream, syscall.SIGTERM, 5*time.Second)
+	if err != nil || code != 0 {
+		t.Fatalf("Shutdown = (%d, %v), want (0, nil)", code, err)
+	}
+	if !eventuallyDead(child, 2*time.Second) {
+		t.Errorf("child %d survived Shutdown: Close did not kill the group once the command had exited", child)
+	}
+}
+
+// TestStreamWaitObservesExitBehindHeldOutput checks that the command's exit
+// counts as soon as the node reports it, even while a child that inherited its
+// output pipes keeps the session open: sshd reports the exit on reaping the
+// command and closes the session only once the pipes drain, and a wait that
+// took the session's end for the exit would turn this clean, prompt exit into
+// a shutdown timeout. The stream is drained throughout, as a capture would, so
+// it is the pipes on the node that hold the session, not this side.
+func TestStreamWaitObservesExitBehindHeldOutput(t *testing.T) {
+	b := dialBackend(t)
+	childfile := filepath.Join(t.TempDir(), "child")
+	stream, err := b.Stream(context.Background(), torx.Command("sh", "-c",
+		"trap 'exit 0' TERM; sleep 30 & echo $! > "+childfile+"; echo ready; while true; do sleep 0.1; done"))
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	r := bufio.NewReader(stream)
+	if line, _ := r.ReadString('\n'); strings.TrimSpace(line) != "ready" {
+		t.Fatalf("first line = %q, want ready", strings.TrimSpace(line))
+	}
+	go func() { _, _ = io.Copy(io.Discard, r) }()
+	child := waitForPid(t, childfile)
+	t.Cleanup(func() { _ = syscall.Kill(child, syscall.SIGKILL) })
+
+	code, err := torx.Shutdown(context.Background(), stream, syscall.SIGTERM, 500*time.Millisecond)
+	if err != nil || code != 0 {
+		t.Fatalf("Shutdown = (%d, %v), want (0, nil): the exit was not observed while the child held the output", code, err)
+	}
+	if !eventuallyDead(child, 2*time.Second) {
+		t.Errorf("child %d survived Shutdown: Close did not kill the group", child)
+	}
+}
+
+// TestStreamShutdownKillsAfterGrace runs the escalation over ssh: a command that
+// ignores the signal is killed when the grace period ends, and Wait then reports
+// the signal death as -1 -- sshd reports it with an exit-signal reply, which
+// crypto/ssh would otherwise render as 128 plus the signal number.
+func TestStreamShutdownKillsAfterGrace(t *testing.T) {
+	b := dialBackend(t)
+	pidfile := filepath.Join(t.TempDir(), "pid")
+	script := fmt.Sprintf("trap '' TERM; echo $$ > %s; while true; do sleep 0.1; done", pidfile)
+	stream, err := b.Stream(context.Background(), torx.Command("sh", "-c", script))
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	pid := waitForPid(t, pidfile)
+
+	code, err := torx.Shutdown(context.Background(), stream, syscall.SIGTERM, 200*time.Millisecond)
+	if !errors.Is(err, torx.ErrShutdownTimeout) {
+		t.Fatalf("Shutdown err = %v, want ErrShutdownTimeout", err)
+	}
+	if code != -1 {
+		t.Errorf("exit status = %d, want -1 (no status once killed)", code)
+	}
+	if !eventuallyDead(pid, 2*time.Second) {
+		t.Errorf("pid %d survived Shutdown: the close did not kill it", pid)
+	}
+	if code, err := stream.Wait(context.Background()); err != nil || code != -1 {
+		t.Errorf("Wait after Shutdown = (%d, %v), want (-1, nil): killed by a signal", code, err)
+	}
+}
+
+// TestStreamWaitReportsSignalDeath checks that a command the node reports as
+// killed by a signal gets the -1 the Process contract promises, as the
+// LocalBackend reports it, not the 128 plus the signal number crypto/ssh makes
+// of the exit-signal reply.
+func TestStreamWaitReportsSignalDeath(t *testing.T) {
+	b := dialBackend(t)
+	stream, err := b.Stream(context.Background(), torx.Command("sh", "-c", "kill -KILL $$"))
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	defer stream.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if code, err := stream.Wait(ctx); err != nil || code != -1 {
+		t.Errorf("Wait = (%d, %v), want (-1, nil): the node reported a signal death", code, err)
 	}
 }
 

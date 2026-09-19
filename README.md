@@ -49,10 +49,12 @@ package myservice
 
 import (
 	"context"
-	"io"
+	"errors"
 	"net"
 	"strconv"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/dotnwat/torx"
 )
@@ -62,13 +64,13 @@ type Service struct {
 	*torx.ServiceBase
 
 	mu      sync.Mutex
-	servers map[string]io.ReadCloser // node name -> running server handle
-	addrs   map[string]string        // node name -> host:port
+	servers map[string]torx.Process // node name -> running server
+	addrs   map[string]string       // node name -> host:port
 }
 
 // New builds a service named name that needs one node.
 func New(name string) *Service {
-	s := &Service{servers: map[string]io.ReadCloser{}, addrs: map[string]string{}}
+	s := &Service{servers: map[string]torx.Process{}, addrs: map[string]string{}}
 	// Homogeneous(count, spec) is the node demand. A spec can require CPUs,
 	// memory, or labels (torx.NodeSpec{Required: torx.Resources{...}}); an empty
 	// spec matches any node.
@@ -79,7 +81,8 @@ func New(name string) *Service {
 // StartNode launches the server on n. It leases a free port, binds every
 // interface so a client off the node can reach it, and advertises the node's
 // reachable address. StartCaptured runs the process with its output redirected
-// to a node-local file and registers that file for collection.
+// to a node-local file, registers that file for collection, and returns the
+// process to signal, wait for, and stop.
 func (s *Service) StartNode(ctx context.Context, n *torx.Node) error {
 	port, err := n.AllocatePort()
 	if err != nil {
@@ -91,12 +94,12 @@ func (s *Service) StartNode(ctx context.Context, n *torx.Node) error {
 		"--port", strconv.Itoa(port),
 		"--dir", dir,
 	)
-	handle, err := s.StartCaptured(ctx, n, cmd)
+	p, err := s.StartCaptured(ctx, n, cmd)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
-	s.servers[n.Name()] = handle
+	s.servers[n.Name()] = p
 	s.addrs[n.Name()] = net.JoinHostPort(n.Addr(), strconv.Itoa(port))
 	s.mu.Unlock()
 	return nil
@@ -111,18 +114,25 @@ func (s *Service) WaitNode(ctx context.Context, n *torx.Node) error {
 	return torx.WaitForPort(ctx, addr) // or torx.WaitUntil(ctx, poll, backoff)
 }
 
-// StopNode terminates the server. Closing the StartCaptured handle kills the
-// remote process group.
+// StopNode stops the server the way an operator would: SIGTERM, a grace period
+// to exit on its own, and a SIGKILL of its whole process group if it has not.
+// A server that had to be killed is noted rather than failed -- the node is
+// clean either way, and a teardown error would quarantine it.
 func (s *Service) StopNode(ctx context.Context, n *torx.Node) error {
 	s.mu.Lock()
-	h := s.servers[n.Name()]
+	p := s.servers[n.Name()]
 	delete(s.servers, n.Name())
 	delete(s.addrs, n.Name())
 	s.mu.Unlock()
-	if h == nil {
+	if p == nil {
 		return nil
 	}
-	return h.Close()
+	_, err := torx.Shutdown(ctx, p, syscall.SIGTERM, 5*time.Second)
+	if errors.Is(err, torx.ErrShutdownTimeout) {
+		torx.Logf(ctx, "warn", "myserver on %s ignored SIGTERM and was killed", n.Name())
+		return nil
+	}
+	return err
 }
 
 // CleanNode removes the server's persistent state.
@@ -161,6 +171,14 @@ Guidelines that keep a service portable across the local and ssh backends:
   test -- calls `s.SetCapturePolicy(torx.CaptureRotate)` at construction so each
   launch moves the previous process's log aside as `stdout.<k>.log` and
   collects it too, instead of discarding it (the default, `CaptureTruncate`).
+- **Stop through the process handle.** `StartCaptured` (and `n.Stream`) return
+  a `torx.Process`: `Signal` reaches the program itself, not a shell around
+  it, `Wait` reports its exit status, and `Close` kills its whole process
+  group. `torx.Shutdown(ctx, p, syscall.SIGTERM, grace)` composes them into
+  the usual graceful stop and escalates to the kill when the grace period
+  runs out (reported as `torx.ErrShutdownTimeout`). Use it so teardown goes
+  through the system's own shutdown path, and to drive rolling restarts and
+  signal-triggered reloads from a job.
 - **One-shot commands** (a load generator that runs and exits) use
   `n.Exec(ctx, cmd)` instead of `StartCaptured`; it runs to completion and
   returns the captured `ExecResult` (exit code, stdout, stderr).
@@ -347,7 +365,8 @@ import _ "github.com/dotnwat/torx/ssh"
 ```
 
 A node needs a POSIX `sh`. To kill a service's whole process group on
-teardown, torx runs each streamed command as the leader of its own group.
+teardown, and to signal the service's own process rather than a shell around
+it, torx runs each streamed command as the leader of its own group.
 Under OpenSSH (macOS Remote Login included) with a `bash` or `zsh` login shell
 that is already so, and nothing else is needed; otherwise the wrapper creates
 the group with `setsid` (util-linux or busybox) or `perl`, whichever the node

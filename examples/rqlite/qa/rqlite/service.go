@@ -6,12 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dotnwat/torx"
@@ -42,6 +42,10 @@ const (
 	// under the bound torx puts on each readiness probe, or the probe gives
 	// up first and the node never reports synced.
 	syncTimeout = time.Second
+	// stopGrace is how long a node gets to exit after SIGTERM before it is
+	// killed. A graceful shutdown -- the leader stepping down, the store
+	// snapshotting and closing -- takes well under a second.
+	stopGrace = 5 * time.Second
 )
 
 // Service runs an rqlite cluster of one rqlited per node.
@@ -55,9 +59,10 @@ const (
 // before launching it, which makes the order a real prerequisite. A node's
 // ports are leased when it first starts and kept until the framework stops
 // it, not released with its process, because they are its identity to its
-// peers. Crash and Restart replace the process behind the same addresses, so
-// a restarted node rejoins as the member that went away rather than as a
-// stranger, and the Raft log in its data directory lets it catch up.
+// peers. Crash, Shutdown, and Restart replace the process behind the same
+// addresses, so a restarted node rejoins as the member that went away rather
+// than as a stranger, and the Raft log in its data directory lets it catch
+// up.
 type Service struct {
 	*torx.ServiceBase
 
@@ -70,7 +75,13 @@ type Service struct {
 type member struct {
 	httpPort int
 	raftPort int
-	proc     io.ReadCloser // the running rqlited, nil between Crash and Restart
+	proc     torx.Process // the running rqlited, nil between a Crash or Shutdown and the Restart
+	// unstopped is the error of a Crash or Shutdown that could not establish
+	// its rqlited was gone: the kill could not be carried out, or the transport
+	// lost track of the process. The old rqlited may still hold the member's
+	// ports and data directory, so Restart refuses, and StopNode fails the
+	// teardown with it so the node is quarantined rather than reused.
+	unstopped error
 }
 
 // New builds a service named name that runs a cluster of nodes rqlited
@@ -130,8 +141,16 @@ func (s *Service) WaitSynced(ctx context.Context, n *torx.Node) error {
 	return s.waitReady(ctx, n, "/readyz?sync&timeout="+syncTimeout.String())
 }
 
-// StopNode terminates the node's rqlited, if one is running, and releases its
-// ports: the framework stopping a node ends its membership.
+// StopNode stops the node's rqlited, if one is running, and releases its
+// ports: the framework stopping a node ends its membership. The stop is the
+// graceful one an operator would do -- SIGTERM, on which a leader steps down
+// before exiting, then a bounded wait -- so every job's teardown goes through
+// rqlite's shutdown path. A process that ignored the signal and had to be
+// killed, or that exited unclean, is logged rather than failed: the node is
+// clean either way, and a teardown error would mark it dirty and quarantine
+// it. Shutdown is where the stop itself is under test. The one stop that does
+// fail is an earlier Crash or Shutdown that could not establish its rqlited
+// was gone: that node may still be running it, and the teardown must say so.
 func (s *Service) StopNode(ctx context.Context, n *torx.Node) error {
 	s.mu.Lock()
 	m := s.members[n.Name()]
@@ -140,9 +159,17 @@ func (s *Service) StopNode(ctx context.Context, n *torx.Node) error {
 	if m == nil {
 		return nil
 	}
-	var err error
+	err := m.unstopped
 	if m.proc != nil {
-		err = m.proc.Close()
+		code, serr := torx.Shutdown(ctx, m.proc, syscall.SIGTERM, stopGrace)
+		switch {
+		case errors.Is(serr, torx.ErrShutdownTimeout):
+			torx.Logf(ctx, "warn", "%s did not exit within %v of SIGTERM and was killed", n.Name(), stopGrace)
+		case serr != nil:
+			err = serr
+		case code != 0:
+			torx.Logf(ctx, "warn", "%s exited with status %d on SIGTERM", n.Name(), code)
+		}
 	}
 	n.ReleasePort(m.httpPort)
 	n.ReleasePort(m.raftPort)
@@ -157,7 +184,9 @@ func (s *Service) CleanNode(ctx context.Context, n *torx.Node) error {
 
 // Crash kills the node's rqlited outright -- SIGKILL, so no leader stepdown or
 // other graceful shutdown runs -- and keeps its ports and data directory, so
-// Restart brings the same member back.
+// Restart brings the same member back. Shutdown is the graceful counterpart.
+// A kill that could not be carried out leaves the member unstopped: the
+// process is let go of, but Restart refuses and the teardown fails.
 func (s *Service) Crash(ctx context.Context, n *torx.Node) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -167,17 +196,61 @@ func (s *Service) Crash(ctx context.Context, n *torx.Node) error {
 	}
 	err := m.proc.Close()
 	m.proc = nil
-	return err
+	if err != nil {
+		m.unstopped = fmt.Errorf("rqlite: crashing %s: %w", n.Name(), err)
+		return m.unstopped
+	}
+	return nil
 }
 
-// Restart launches rqlited again for a crashed node, behind the same addresses
-// and on the same data directory. Follow it with WaitNode or WaitSynced.
+// Shutdown stops the node's rqlited gracefully -- SIGTERM, on which a leader
+// steps down before exiting -- and keeps its ports and data directory, so
+// Restart brings the same member back. Unlike the teardown's stop, this one
+// is under test: a process that does not exit within the grace period (it is
+// killed then) or exits with a non-zero status fails the call. Those two
+// failures leave the node clean, the process being gone either way. Any other
+// error -- the signal or the kill could not be delivered, the wait was cut
+// short, the transport lost track of the process -- leaves the member
+// unstopped: torx.Shutdown reports a timeout only once its kill went through,
+// and past that it does not say whether the process is gone, so it is taken
+// to still be there.
+func (s *Service) Shutdown(ctx context.Context, n *torx.Node) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.members[n.Name()]
+	if m == nil || m.proc == nil {
+		return fmt.Errorf("rqlite: %s is not running", n.Name())
+	}
+	proc := m.proc
+	m.proc = nil
+	code, err := torx.Shutdown(ctx, proc, syscall.SIGTERM, stopGrace)
+	if err != nil {
+		err = fmt.Errorf("rqlite: shutting down %s: %w", n.Name(), err)
+		if !errors.Is(err, torx.ErrShutdownTimeout) {
+			m.unstopped = err
+		}
+		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("rqlite: %s exited with status %d on SIGTERM, want 0", n.Name(), code)
+	}
+	return nil
+}
+
+// Restart launches rqlited again for a node stopped by Crash or Shutdown,
+// behind the same addresses and on the same data directory. Follow it with
+// WaitNode or WaitSynced. A member whose stop could not establish its process
+// was gone cannot be restarted: the old rqlited may still hold its ports and
+// data directory.
 func (s *Service) Restart(ctx context.Context, n *torx.Node) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m := s.members[n.Name()]
 	if m == nil {
 		return fmt.Errorf("rqlite: %s has never been started", n.Name())
+	}
+	if m.unstopped != nil {
+		return fmt.Errorf("rqlite: %s cannot restart over a process that may still be running: %w", n.Name(), m.unstopped)
 	}
 	return s.launchLocked(ctx, n, m)
 }
