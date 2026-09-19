@@ -198,6 +198,97 @@ func TestNodesDecodesMembershipAndLeaderOf(t *testing.T) {
 	}
 }
 
+func TestBackupAndDumpFetchTheDatabase(t *testing.T) {
+	// A backup body is the SQLite file itself, returned as sent; a dump is the
+	// SQL text. Both are what rqlite v10.3.5 answers a two-row database with,
+	// the file cut down to its first 32 bytes.
+	sqlite := "SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00\x02\x00\x00\x00\x02"
+	dump := "PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\nCREATE TABLE events (id INTEGER PRIMARY KEY, note TEXT NOT NULL);\n" +
+		"INSERT INTO \"events\" VALUES(1,'one');\nINSERT INTO \"events\" VALUES(2,'two');\nCOMMIT;\n"
+	var got *http.Request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r
+		if r.URL.Query().Has("fmt") {
+			w.Header().Set("Content-Type", "application/sql")
+			_, _ = io.WriteString(w, dump)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = io.WriteString(w, sqlite)
+	}))
+	defer srv.Close()
+	c := NewClient(strings.TrimPrefix(srv.URL, "http://"))
+
+	backup, err := c.Backup(context.Background())
+	if err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+	if got.Method != http.MethodGet || got.URL.Path != "/db/backup" || got.URL.RawQuery != "" {
+		t.Errorf("request was %s %s?%s, want GET /db/backup", got.Method, got.URL.Path, got.URL.RawQuery)
+	}
+	if string(backup) != sqlite {
+		t.Errorf("Backup = %q, want the body verbatim", backup)
+	}
+
+	text, err := c.Dump(context.Background())
+	if err != nil {
+		t.Fatalf("Dump: %v", err)
+	}
+	if got.URL.Path != "/db/backup" || got.URL.Query().Get("fmt") != "sql" {
+		t.Errorf("request was %s?%s, want /db/backup?fmt=sql", got.URL.Path, got.URL.RawQuery)
+	}
+	if string(text) != dump {
+		t.Errorf("Dump = %q, want the body verbatim", text)
+	}
+}
+
+func TestLoadSendsTheFileAndReportsErrors(t *testing.T) {
+	var got *http.Request
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r
+		body, _ = io.ReadAll(r.Body)
+		_, _ = io.WriteString(w, `{"results":[]}`) // what a successful load answers
+	}))
+	defer srv.Close()
+	c := NewClient(strings.TrimPrefix(srv.URL, "http://"))
+
+	db := []byte("SQLite format 3\x00 and the rest of the file")
+	if err := c.Load(context.Background(), db); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Method != http.MethodPost || got.URL.Path != "/db/load" {
+		t.Errorf("request was %s %s, want POST /db/load", got.Method, got.URL.Path)
+	}
+	if ct := got.Header.Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("Content-Type = %q, want application/octet-stream", ct)
+	}
+	if string(body) != string(db) {
+		t.Errorf("body = %q, want the file verbatim", body)
+	}
+
+	// Data rqlite cannot load comes back as a statement error in a 200, the
+	// way a failed statement does; it must fail the call.
+	c, _, _ = serve(t, http.StatusOK, `{"results":[{"error":"near \"garbage\": syntax error"}]}`)
+	err := c.Load(context.Background(), []byte("garbage"))
+	if err == nil || !strings.Contains(err.Error(), "syntax error") {
+		t.Fatalf("Load of garbage = %v, want rqlite's error", err)
+	}
+}
+
+func TestOversizedResponseIsAnError(t *testing.T) {
+	// A body past the cap must fail rather than come back cut short: for a
+	// backup, a truncated body is a corrupt file that would restore as one.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(make([]byte, maxResponse+1))
+	}))
+	defer srv.Close()
+	c := NewClient(strings.TrimPrefix(srv.URL, "http://"))
+	if _, err := c.Backup(context.Background()); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("Backup of an oversized body = %v, want an error naming the cap", err)
+	}
+}
+
 func TestResultIntWithoutRows(t *testing.T) {
 	if _, err := (Result{}).Int(); err == nil {
 		t.Error("Int() on an empty result succeeded")

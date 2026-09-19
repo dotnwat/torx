@@ -13,7 +13,7 @@ half a minute.
 
 Two things live here:
 
-- **`qa/`** is the suite: a torx binary with four jobs, and the service
+- **`qa/`** is the suite: a torx binary with five jobs, and the service
   package (`qa/rqlite`) that deploys an rqlite cluster onto torx nodes and
   speaks to it.
 - **`harness/`** is the launcher: the front end a person or CI runs. It owns
@@ -70,6 +70,9 @@ results/rqlite/2026-09-18T17-38-54Z-3312641955/
     rqlite/node-2/stdout.log      each node's captured rqlited output ...
     rqlite/node-2/stdout.1.log    ... and, for a node that was stopped and
                                   restarted, the output of the first process
+  rqlite.backup/
+    backup.db                     the backup the job took, as rqlite restores it
+    backup.sql                    the same backup as a SQL dump, for reading
   run.json                        the whole run's results
 ```
 
@@ -149,6 +152,21 @@ membership for wholeness. The time from each leader's stop until its
 successor is reported is recorded beside the failover job's election time,
 so the two numbers -- a handoff of about a hundred milliseconds against an
 election of a couple of seconds -- sit side by side in the results.
+
+**`rqlite.backup`** checks that a backup restores the cluster. It writes a
+thousand rows at the leader, takes a backup there in both forms rqlite offers
+-- the SQLite file a restore loads, and the SQL dump a person can read -- and
+attaches both to its results with `jc.WriteArtifact`, so they land beside the
+job's `result.json` as `backup.db` and `backup.sql`. It then damages the
+database, dropping the table and creating another the backup knows nothing
+of, and restores by loading the backup at a follower, which forwards it to
+the leader the way an operator's load would go. The leader must serve every
+row again with the junk table gone -- a loaded backup replaces the database,
+where a loaded dump would only run its statements on top -- and every node's
+own copy must converge on the restored rows. The backup and restore times and
+sizes are recorded in the result's data. The job is what job-level artifacts
+exist for: the backup arrives in the job's own process, not on any node, so
+no service could have collected it.
 
 ## How the service is built
 

@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -113,8 +114,9 @@ func (JobBase) Teardown(ctx context.Context, jc *JobContext) error {
 }
 
 // JobContext is the framework handle a job uses across its lifecycle: it holds
-// the job's parameters, the services it declares, the event sink it logs to, and
-// the result payload it records. It is safe for concurrent use.
+// the job's parameters, the services it declares, the event sink it logs to,
+// the result payload it records, and the artifacts it writes. It is safe for
+// concurrent use.
 type JobContext struct {
 	Params Params
 
@@ -123,15 +125,26 @@ type JobContext struct {
 	sink       EventSink
 
 	// resultsDir is the job's directory in the results tree, or "" when the run
-	// is not persisting results. passed records the job outcome for collection
-	// (a failure gathers all artifacts; a pass gathers only CollectOnPass ones).
-	// Both are set by the worker before teardown.
+	// is not persisting results; the worker sets it before the job runs. passed
+	// records the job outcome for collection (a failure gathers all artifacts;
+	// a pass gathers only CollectOnPass ones); the worker sets it before
+	// teardown.
 	resultsDir string
 	passed     bool
 
 	mu      sync.Mutex
 	data    json.RawMessage
 	summary string
+	// persistErrs are the job artifacts that could not be written. The worker
+	// folds them into the result's PersistErr: the job's status still says what
+	// the job did, while the suite is not Ok, since results the run was asked
+	// for are missing.
+	persistErrs []error
+
+	// writeMu serializes artifact writes. A write truncates the file and then
+	// fills it, and two writes of one name from different goroutines would
+	// otherwise interleave, leaving a file that is neither's.
+	writeMu sync.Mutex
 }
 
 // NewJobContext returns a JobContext for the given params and event sink; sink
@@ -179,6 +192,55 @@ func (jc *JobContext) CollectArtifacts(ctx context.Context) error {
 	return errs.Err()
 }
 
+// WriteArtifact stores data as a file the job itself produced -- a backup it
+// took, a report it downloaded, a histogram it measured -- at name directly in
+// its results directory, beside result.json. Services' artifacts are collected
+// from nodes into directories there, so a job's files are told apart from
+// theirs by being files at the top: name must be a single non-traversal path
+// component that is neither one of the framework's own files (result.json,
+// test_log, events.ndjson) nor a registered service's name, in any letter
+// case, since a case-insensitive filesystem would take a case variant for the
+// same file; any other name is a programming error and panics. Writing a name
+// again replaces the file, and concurrent writes are serialized, so the file
+// is always one write's whole data. The artifact is kept whatever the job's
+// outcome. It is a no-op when the run is not persisting results, and a write
+// that fails is recorded on the result as a persistence failure rather than
+// returned, so a full disk does not turn a passing job into a failing one.
+// Call it from Setup, Run, Teardown, or a finalizer, not from Declare, which
+// must stay pure.
+func (jc *JobContext) WriteArtifact(name string, data []byte) {
+	if !validComponent(name) || reservedJobFile(name) {
+		panic(fmt.Sprintf("torx: artifact name must be a single non-traversal path component other than the framework's own files: %q", name))
+	}
+	for _, svc := range jc.registry.Services() {
+		if strings.EqualFold(svc.Name(), name) {
+			panic(fmt.Sprintf("torx: artifact name %q collides with the directory of service %q", name, svc.Name()))
+		}
+	}
+	if jc.resultsDir == "" {
+		return
+	}
+	site := callerSite(2)
+	jc.writeMu.Lock()
+	err := os.WriteFile(filepath.Join(jc.resultsDir, name), data, 0o644)
+	jc.writeMu.Unlock()
+	if err != nil {
+		jc.mu.Lock()
+		jc.persistErrs = append(jc.persistErrs, fmt.Errorf("results: write artifact %s: %w", name, err))
+		jc.mu.Unlock()
+		jc.emit("error", fmt.Sprintf("could not write artifact %s: %v", name, err), site)
+		return
+	}
+	jc.emit("info", fmt.Sprintf("wrote artifact %s (%d bytes)", name, len(data)), site)
+}
+
+// persistErrors returns the artifact writes that failed, in order.
+func (jc *JobContext) persistErrors() []error {
+	jc.mu.Lock()
+	defer jc.mu.Unlock()
+	return append([]error(nil), jc.persistErrs...)
+}
+
 // PoolSpec is the job's total node demand: the concatenation of its services'
 // specs in registration order.
 func (jc *JobContext) PoolSpec() PoolSpec {
@@ -205,8 +267,13 @@ func (jc *JobContext) Bind(nodes []*Node) {
 // Log emits a log event to the job's event sink, recording the caller's source
 // location.
 func (jc *JobContext) Log(level, message string) {
+	jc.emit(level, message, callerSite(2))
+}
+
+// emit sends a log event to the job's event sink, if it has one.
+func (jc *JobContext) emit(level, message string, site *Site) {
 	if jc.sink != nil {
-		jc.sink.Emit(Event{Kind: EventLog, Level: level, Message: message, Time: time.Now(), Site: callerSite(2)})
+		jc.sink.Emit(Event{Kind: EventLog, Level: level, Message: message, Time: time.Now(), Site: site})
 	}
 }
 

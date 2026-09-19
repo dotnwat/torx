@@ -55,6 +55,26 @@ func TestSelfExecLauncher(t *testing.T) {
 	}
 }
 
+func TestSelfExecLauncherWritesJobArtifact(t *testing.T) {
+	// The worker process owns the job's results directory and writes the
+	// job's artifact there itself; nothing crosses the event pipe. The file is
+	// in place once Launch returns, whichever launcher ran the job.
+	runDir := t.TempDir()
+	launcher := SelfExecLauncher{Env: []string{"TORX_TEST_WORKER=1"}}
+	res, err := launcher.Launch(context.Background(),
+		Assignment{JobID: "wtest.artifact", Session: SessionConfig{ResultsDir: runDir}}, discardSink{})
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if res.Status != StatusPass || res.PersistErr != "" {
+		t.Fatalf("result = %+v, want PASS with nothing unpersisted", res)
+	}
+	got, err := os.ReadFile(filepath.Join(runDir, "wtest.artifact", "report.txt"))
+	if err != nil || string(got) != "report" {
+		t.Errorf("report.txt = %q (%v), want the job's content", got, err)
+	}
+}
+
 func TestSelfExecLauncherJobFailure(t *testing.T) {
 	launcher := SelfExecLauncher{Env: []string{"TORX_TEST_WORKER=1"}}
 	res, err := launcher.Launch(context.Background(), Assignment{JobID: "wtest.fail"}, discardSink{})

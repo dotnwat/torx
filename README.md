@@ -242,9 +242,21 @@ What `JobBase` gives you, and how to take control:
   if you need to, and call `jc.CollectArtifacts(ctx)` between stopping and
   cleaning so logs survive.
 - **`jc.Defer(fn)`** registers a cleanup callback run during teardown.
+- **`jc.WriteArtifact(name, data)`** keeps a file the job itself produced -- a
+  backup it took, a report it downloaded, a histogram it measured -- at the top
+  of its results directory, beside `result.json`; the services' collected
+  files sit in directories below. The name must be a single path component
+  that is not a framework file or a service name in any letter case (a bad one
+  panics), writing it again replaces the file, concurrent writes are
+  serialized, and the file is kept whatever the outcome. In a
+  run that is not persisting results it is a no-op, and a write that fails is
+  recorded on the result as a persistence failure -- the suite is not Ok --
+  rather than failing the job over a full disk.
 - A **benchmark** records what it measured: `jc.Record(anyValue)` stores an
   opaque JSON payload and `jc.SetSummary("...")` a one-line human summary. torx
-  never interprets `Data`; large outputs belong in artifacts.
+  never interprets `Data`; large outputs belong in artifacts, written with
+  `jc.WriteArtifact` when the job holds them and collected from nodes when a
+  service produced them.
 
 Multi-service jobs just declare more services; the framework sums their demand
 into the pool it allocates and hands each service its nodes (`Bind`) in
@@ -294,6 +306,7 @@ go run ./path/to/suite -nodes 3 'my\..*'
 
 # Results land under ./results/<timestamp>/ with a `latest` symlink:
 #   results/<ts>/<jobVariant>/{events.ndjson, test_log, result.json,
+#                              <the job's own artifacts>,
 #                              <service>/<node>/stdout.log[, stdout.<k>.log]}
 ```
 

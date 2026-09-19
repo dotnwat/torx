@@ -54,7 +54,10 @@ const (
 	// client: the service hands torx.WaitForHTTP a URL, and torx bounds each
 	// probe itself.
 	requestTimeout = 10 * time.Second
-	maxResponse    = 8 << 20
+	// maxResponse bounds a response body. The suite's databases are small, so
+	// a backup of one stays far under it; a body that reaches it is refused
+	// rather than cut short.
+	maxResponse = 8 << 20
 )
 
 // Statement is one SQL statement with optional positional parameters.
@@ -174,6 +177,39 @@ func (c *Client) QueryInt(ctx context.Context, level string, stmt Statement) (in
 	return res.Int()
 }
 
+// Backup returns a backup of the database as a SQLite database file, the form
+// Load restores from. Whichever node is asked, the backup is the leader's: a
+// follower forwards the request.
+func (c *Client) Backup(ctx context.Context) ([]byte, error) {
+	return c.get(ctx, "/db/backup")
+}
+
+// Dump returns the database as a SQL text dump, the schema and every row as
+// statements, readable as it is. It is not what Load takes: rqlite executes a
+// loaded dump's statements over what the database already holds, while a
+// loaded Backup replaces it.
+func (c *Client) Dump(ctx context.Context) ([]byte, error) {
+	return c.get(ctx, "/db/backup?fmt=sql")
+}
+
+// Load replaces the whole database with db, a SQLite database file as Backup
+// returns it. Any node takes the request; a follower forwards it to the
+// leader. rqlite reports data it could not load as a statement error in an
+// otherwise successful response, which fails the call.
+func (c *Client) Load(ctx context.Context, db []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/db/load", bytes.NewReader(db))
+	if err != nil {
+		return fmt.Errorf("rqlite: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	data, err := c.do(req)
+	if err != nil {
+		return err
+	}
+	_, err = decodeResults(req.URL.Path, data, nil)
+	return err
+}
+
 // Nodes returns the cluster membership as this node sees it. Each member's
 // reachability is probed live, bounded by timeout, so a dead member is
 // reported unreachable instead of stalling the call. A node that knows no
@@ -213,15 +249,22 @@ func (c *Client) post(ctx context.Context, path string, stmts []Statement) ([]Re
 	if err != nil {
 		return nil, err
 	}
+	return decodeResults(req.URL.Path, data, stmts)
+}
+
+// decodeResults decodes the results envelope rqlite answers a statement
+// request with, turning a request-level error or any statement's own error
+// into an error; stmts, when given, name the statement a result belongs to.
+func decodeResults(path string, data []byte, stmts []Statement) ([]Result, error) {
 	var resp struct {
 		Results []Result `json:"results"`
 		Error   string   `json:"error"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("rqlite: decode %s response: %w", req.URL.Path, err)
+		return nil, fmt.Errorf("rqlite: decode %s response: %w", path, err)
 	}
 	if resp.Error != "" {
-		return nil, fmt.Errorf("rqlite: %s: %s", req.URL.Path, resp.Error)
+		return nil, fmt.Errorf("rqlite: %s: %s", path, resp.Error)
 	}
 	for i, r := range resp.Results {
 		if r.Error != "" {
@@ -235,18 +278,32 @@ func (c *Client) post(ctx context.Context, path string, stmts []Statement) ([]Re
 	return resp.Results, nil
 }
 
+// get fetches path and returns the body.
+func (c *Client) get(ctx context.Context, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("rqlite: %w", err)
+	}
+	return c.do(req)
+}
+
 // do sends req and returns the body of a 200 response. Any other status is an
 // error carrying the response text, which is where rqlite puts messages such
-// as "leader not found".
+// as "leader not found". A body past maxResponse is an error rather than a
+// truncated one: a backup cut short would be a corrupt file, not a shorter
+// answer.
 func (c *Client) do(req *http.Request) ([]byte, error) {
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("rqlite: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
 	if err != nil {
 		return nil, fmt.Errorf("rqlite: read %s response: %w", req.URL.Path, err)
+	}
+	if len(data) > maxResponse {
+		return nil, fmt.Errorf("rqlite: %s response exceeds %d bytes", req.URL.Path, maxResponse)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("rqlite: %s: HTTP %d: %s", req.URL.Path, resp.StatusCode, strings.TrimSpace(string(data)))

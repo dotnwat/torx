@@ -78,13 +78,7 @@ func (j *clusterJob) Run(ctx context.Context, jc *torx.JobContext) error {
 	}
 
 	// Read at a follower, or at the leader itself when there is no follower.
-	reader := leader
-	for _, n := range j.db.Nodes() {
-		if n.Name() != leader.Name() {
-			reader = n
-			break
-		}
-	}
+	reader := followerOf(j.db, leader)
 	count := rqlite.Stmt("SELECT COUNT(*) FROM kv")
 	if j.level == rqlite.LevelNone && reader != leader {
 		// A none read is served from the follower's own copy with no cluster
@@ -114,6 +108,17 @@ func (j *clusterJob) Run(ctx context.Context, jc *torx.JobContext) error {
 	jc.SetSummary(fmt.Sprintf("%d-node cluster; %d rows written at %s visible from %s at level=%s",
 		j.nodes, clusterRows, leader.Name(), reader.Name(), j.level))
 	return nil
+}
+
+// followerOf returns the first node in node order other than leader, or
+// leader itself when the cluster has no other node.
+func followerOf(db *rqlite.Service, leader *torx.Node) *torx.Node {
+	for _, n := range db.Nodes() {
+		if n.Name() != leader.Name() {
+			return n
+		}
+	}
+	return leader
 }
 
 // checkMembership verifies that a membership view describes a healthy cluster

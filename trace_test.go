@@ -133,6 +133,58 @@ func TestExecuteWritesResultsTree(t *testing.T) {
 	}
 }
 
+func TestExecuteWritesJobArtifact(t *testing.T) {
+	runDir := t.TempDir()
+	a := Assignment{JobID: "wtest.artifact", Session: SessionConfig{ResultsDir: runDir}}
+
+	res := execute(context.Background(), a, discardSink{})
+	if res.Status != StatusPass || res.PersistErr != "" {
+		t.Fatalf("result = %+v, want PASS with nothing unpersisted", res)
+	}
+
+	// The job's file sits at the top of its directory, beside result.json.
+	jobDir := filepath.Join(runDir, "wtest.artifact")
+	got, err := os.ReadFile(filepath.Join(jobDir, "report.txt"))
+	if err != nil || string(got) != "report" {
+		t.Errorf("report.txt = %q (%v), want the job's content", got, err)
+	}
+	log, _ := os.ReadFile(filepath.Join(jobDir, "test_log"))
+	if !strings.Contains(string(log), "wrote artifact report.txt") {
+		t.Errorf("test_log does not narrate the write:\n%s", log)
+	}
+}
+
+func TestExecuteSurfacesArtifactWriteFailure(t *testing.T) {
+	// A directory already sits where the job's artifact goes, so the write
+	// fails. The job itself still passes; the missing file must be visible on
+	// the result and fail the suite, as a missing trace or result.json would.
+	runDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(runDir, "wtest.artifact", "report.txt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := Assignment{JobID: "wtest.artifact", Session: SessionConfig{ResultsDir: runDir}}
+
+	res := execute(context.Background(), a, discardSink{})
+	if res.Status != StatusPass {
+		t.Fatalf("status = %v, want PASS (the job itself succeeded)", res.Status)
+	}
+	if !strings.Contains(res.PersistErr, "write artifact report.txt") {
+		t.Errorf("PersistErr = %q, want the failed artifact write", res.PersistErr)
+	}
+	if (SuiteResult{Jobs: []JobResult{res}}).Ok() {
+		t.Errorf("suite with an unwritten artifact reported Ok")
+	}
+	// result.json still landed, and carries the same failure.
+	b, err := os.ReadFile(filepath.Join(runDir, "wtest.artifact", "result.json"))
+	if err != nil {
+		t.Fatalf("result.json: %v", err)
+	}
+	var got JobResult
+	if err := json.Unmarshal(b, &got); err != nil || !strings.Contains(got.PersistErr, "write artifact report.txt") {
+		t.Errorf("result.json = %s (err %v), want the persist failure recorded", b, err)
+	}
+}
+
 func TestRunWritesResultsTree(t *testing.T) {
 	root := t.TempDir()
 	res := Run(context.Background(), testPool(t, 1), InProcessLauncher{}, sizedRequests(1, 1, nil),

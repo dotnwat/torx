@@ -5,9 +5,11 @@
 // A run gets a timestamped directory under the results root, with a "latest"
 // symlink pointing at it and an aggregate run.json. Each job gets a subdirectory
 // holding its execution trace -- events.ndjson (machine-readable, one event per
-// line) and test_log (human-readable) -- its result.json, and, under
-// <service>/<node>/, the artifacts collected from its services. The driver builds
-// the run directory; the worker fills in each job's subdirectory.
+// line) and test_log (human-readable) -- its result.json, any files the job
+// itself wrote with JobContext.WriteArtifact, and, under <service>/<node>/, the
+// artifacts collected from its services: files at the top of the directory are
+// the job's, directories are its services'. The driver builds the run
+// directory; the worker fills in each job's subdirectory.
 
 package torx
 
@@ -22,6 +24,24 @@ import (
 	"sync"
 	"time"
 )
+
+// The files the framework writes at the top of a job's results directory. A
+// job artifact lands beside them and may not take their names (see
+// reservedJobFile).
+const (
+	eventsFile  = "events.ndjson"
+	testLogFile = "test_log"
+	resultFile  = "result.json"
+)
+
+// reservedJobFile reports whether name is one of the framework's own files in a
+// job's results directory, in any letter case: on a case-insensitive
+// filesystem, the default on macOS, a case variant of the name is the same
+// file, and an artifact written under one would truncate the open trace or be
+// overwritten by the final result.json.
+func reservedJobFile(name string) bool {
+	return strings.EqualFold(name, eventsFile) || strings.EqualFold(name, testLogFile) || strings.EqualFold(name, resultFile)
+}
 
 // teeSink fans each event out to several sinks.
 type teeSink struct{ sinks []EventSink }
@@ -50,11 +70,11 @@ type traceSink struct {
 
 // newTraceSink opens the trace files in dir.
 func newTraceSink(dir string) (*traceSink, error) {
-	events, err := os.Create(filepath.Join(dir, "events.ndjson"))
+	events, err := os.Create(filepath.Join(dir, eventsFile))
 	if err != nil {
 		return nil, err
 	}
-	human, err := os.Create(filepath.Join(dir, "test_log"))
+	human, err := os.Create(filepath.Join(dir, testLogFile))
 	if err != nil {
 		_ = events.Close()
 		return nil, err
@@ -207,7 +227,7 @@ func writeResultJSON(dir string, res JobResult) error {
 	if err != nil {
 		return fmt.Errorf("results: encode result.json: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "result.json"), b, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, resultFile), b, 0o644); err != nil {
 		return fmt.Errorf("results: %w", err)
 	}
 	return nil
