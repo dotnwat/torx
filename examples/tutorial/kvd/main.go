@@ -115,7 +115,8 @@ func serveMain(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	srv := &http.Server{Handler: st.handler()}
+	conns := &connTracker{conns: map[net.Conn]connInfo{}}
+	srv := &http.Server{Handler: st.handler(), ConnState: conns.onState}
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
 	select {
@@ -124,15 +125,66 @@ func serveMain(args []string) int {
 		return 1
 	case <-ctx.Done():
 	}
-	log.Print("shutting down")
-	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// A graceful shutdown finishes the requests in flight and closes the
+	// idle connections. A connection that was accepted but never sent a
+	// request is neither, and the server gives it a few seconds before
+	// treating it as idle -- which is exactly what a slow shutdown looks
+	// like from outside, so say what was open going in.
+	log.Printf("shutting down with %s", conns.summary())
+	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(sctx); err != nil {
-		log.Print(err)
+		log.Printf("shutdown: %v; still open: %s", err, conns.summary())
 		return 1
 	}
 	log.Print("stopped")
 	return 0
+}
+
+// shutdownTimeout bounds how long a graceful shutdown waits for requests in
+// flight before the server gives up and exits non-zero.
+const shutdownTimeout = 5 * time.Second
+
+// connInfo is a connection's last state and when it entered it.
+type connInfo struct {
+	state http.ConnState
+	since time.Time
+}
+
+// connTracker follows every connection's state, for the shutdown log.
+type connTracker struct {
+	mu    sync.Mutex
+	conns map[net.Conn]connInfo
+}
+
+func (t *connTracker) onState(c net.Conn, st http.ConnState) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch st {
+	case http.StateClosed, http.StateHijacked:
+		delete(t.conns, c)
+	default:
+		t.conns[c] = connInfo{state: st, since: time.Now()}
+	}
+}
+
+// summary describes the open connections: how many, and each one that is
+// not idle with its peer, state, and how long it has been in that state.
+func (t *connTracker) summary() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var parts []string
+	for c, info := range t.conns {
+		if info.state == http.StateIdle {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %s for %s", c.RemoteAddr(), info.state, time.Since(info.since).Round(time.Millisecond)))
+	}
+	slices.Sort(parts)
+	if len(parts) == 0 {
+		return fmt.Sprintf("%d connection(s), all idle", len(t.conns))
+	}
+	return fmt.Sprintf("%d connection(s), not idle: %s", len(t.conns), strings.Join(parts, "; "))
 }
 
 // entry is one line of the log: a key and the value written to it.

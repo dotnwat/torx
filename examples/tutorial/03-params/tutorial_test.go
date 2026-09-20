@@ -155,12 +155,31 @@ func failedJobLogs(root string, res torx.SuiteResult) string {
 		if r.Status == torx.StatusPass {
 			continue
 		}
-		log, err := os.ReadFile(filepath.Join(root, run, r.ID, "test_log"))
+		dir := filepath.Join(root, run, r.ID)
+		log, err := os.ReadFile(filepath.Join(dir, "test_log"))
 		if err != nil {
 			fmt.Fprintf(&b, "=== %s: no test_log: %v\n", r.ID, err)
 			continue
 		}
 		fmt.Fprintf(&b, "=== %s test_log ===\n%s\n", r.ID, log)
+		// The services' captured output, collected under <service>/<node>/.
+		services, _ := os.ReadDir(dir)
+		for _, svc := range services {
+			if !svc.IsDir() {
+				continue
+			}
+			nodes, _ := os.ReadDir(filepath.Join(dir, svc.Name()))
+			for _, n := range nodes {
+				files, _ := os.ReadDir(filepath.Join(dir, svc.Name(), n.Name()))
+				for _, f := range files {
+					if !strings.HasPrefix(f.Name(), "stdout") {
+						continue
+					}
+					out, _ := os.ReadFile(filepath.Join(dir, svc.Name(), n.Name(), f.Name()))
+					fmt.Fprintf(&b, "=== %s %s/%s/%s ===\n%s\n", r.ID, svc.Name(), n.Name(), f.Name(), out)
+				}
+			}
+		}
 	}
 	return b.String()
 }
