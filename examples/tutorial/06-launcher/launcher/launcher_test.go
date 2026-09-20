@@ -77,6 +77,23 @@ func TestLauncherLocal(t *testing.T) {
 	checkRun(t, runDir, "local", []string{"kv.smoke", "kv.graceful"})
 }
 
+// TestLauncherRelativeResultsDir gives the launcher a -results-dir relative
+// to its working directory. The run directory goes onto the suite's PATH and
+// into compose's flags, both of which need it absolute, so the launcher has
+// to resolve it rather than pass it through.
+func TestLauncherRelativeResultsDir(t *testing.T) {
+	root := t.TempDir()
+	rel, err := filepath.Rel(repoDir(t), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDir := launch(t, "-results-dir", rel, `kv\.smoke`)
+	if !strings.HasPrefix(runDir, root+string(filepath.Separator)) {
+		t.Fatalf("run directory %q is not under %s", runDir, root)
+	}
+	checkRun(t, runDir, "local", []string{"kv.smoke"})
+}
+
 // requiredEnv, when set, turns an unusable docker into a failure instead of
 // a skip. CI's tutorial job sets it, so the docker path is exercised on
 // every push and a missing docker there is a broken job, not a quiet skip.
@@ -106,16 +123,22 @@ func TestLauncherDocker(t *testing.T) {
 	}
 }
 
-// launch runs the launcher with args from the repository root and returns
-// the run directory it announced, failing the test if the launcher did.
-func launch(t *testing.T, args ...string) string {
+// repoDir is the repository root, which the launcher must be run from.
+func repoDir(t *testing.T) string {
 	t.Helper()
 	repo, err := filepath.Abs("../../../..")
 	if err != nil {
 		t.Fatal(err)
 	}
+	return repo
+}
+
+// launch runs the launcher with args from the repository root and returns
+// the run directory it announced, failing the test if the launcher did.
+func launch(t *testing.T, args ...string) string {
+	t.Helper()
 	cmd := exec.Command("go", append([]string{"run", "./" + stepDir + "/launcher"}, args...)...)
-	cmd.Dir = repo
+	cmd.Dir = repoDir(t)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr

@@ -200,10 +200,12 @@ does; the suite would not change.
 [`launcher/launcher_test.go`](launcher/launcher_test.go) unit-tests the
 pure parts -- the project name, the PATH handling, the keys fitting together
 -- and runs the launcher end to end on both backends as a person would, from
-the repository root, reading the run directory it announces. The docker test
-skips when `docker info` fails; with `TORX_DOCKER_REQUIRED=1` in the
-environment it fails instead, which is how CI runs it. The suite's own test
-is the one from step 5, unchanged.
+the repository root, reading the run directory it announces; once with a
+`-results-dir` given relative to that root, which the launcher has to
+resolve before it puts the run directory on a PATH or in compose's flags.
+The docker test skips when `docker info` fails; with `TORX_DOCKER_REQUIRED=1`
+in the environment it fails instead, which is how CI runs it. The suite's
+own test is the one from step 5, unchanged.
 
 ## Where next
 

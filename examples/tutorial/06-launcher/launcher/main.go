@@ -110,6 +110,19 @@ func run(args []string) int {
 			return die(fmt.Errorf("params file: %w", err))
 		}
 	}
+	// The run directory is spelled absolutely wherever it goes -- onto the
+	// exec'd suite's PATH, where Go refuses a relative entry, and into
+	// compose's flags, which compose resolves from inside the run directory
+	// -- so a relative -results-dir is resolved against the launcher's
+	// working directory before anything is derived from it.
+	root := *resultsDir
+	if root == "" {
+		root = filepath.Join(repo, defaultResultsDir)
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return die(fmt.Errorf("results directory: %w", err))
+	}
 	tgt, err := buildTarget(*backend)
 	if err != nil {
 		return die(err)
@@ -130,10 +143,6 @@ func run(args []string) int {
 		}
 	}
 
-	root := *resultsDir
-	if root == "" {
-		root = filepath.Join(repo, defaultResultsDir)
-	}
 	runDir, err := torx.MakeRunDir(root)
 	if err != nil {
 		return die(fmt.Errorf("run directory: %w", err))
