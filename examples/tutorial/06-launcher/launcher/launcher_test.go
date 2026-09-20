@@ -4,12 +4,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -123,6 +129,129 @@ func TestLauncherDocker(t *testing.T) {
 	}
 }
 
+// TestDockerTeardownOnSignal interrupts the docker backend at the two points
+// where a signal used to end the launcher without a teardown: while compose
+// is provisioning the nodes, and while the suite is running in the driver.
+// The launcher runs against a stub docker on PATH that records every
+// invocation and blocks where compose would, so the test needs no docker.
+func TestDockerTeardownOnSignal(t *testing.T) {
+	launcher := buildLauncher(t)
+	stub := stubDocker(t)
+	for _, tc := range []struct {
+		name   string
+		block  string                // the compose subcommand the stub blocks in
+		signal func(*exec.Cmd) error // how the launcher is interrupted there
+		want   []string              // the compose subcommands run, in order
+	}{
+		// Ctrl-C at a terminal reaches the whole foreground process group,
+		// the launcher and the compose command in it alike.
+		{"interrupt during up", "up", func(cmd *exec.Cmd) error {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
+		}, []string{"up", "down"}},
+		// A supervisor, or a CI runner cancelling the job, terminates the
+		// launcher alone; it is the launcher that must pass that on.
+		{"sigterm during run", "run", func(cmd *exec.Cmd) error {
+			return cmd.Process.Signal(syscall.SIGTERM)
+		}, []string{"up", "run", "down"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			log := filepath.Join(t.TempDir(), "docker.log")
+			cmd := exec.CommandContext(ctx, launcher, "-backend", "docker", "-results-dir", t.TempDir(), `kv\.smoke`)
+			cmd.Dir = repoDir(t)
+			cmd.Env = append(os.Environ(),
+				"PATH="+stub+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"TORX_STUB_LOG="+log, "TORX_STUB_BLOCK="+tc.block)
+			// A process group of its own, so the test can signal the launcher
+			// and its children the way a terminal does.
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			cmd.WaitDelay = 10 * time.Second
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			// Interrupt once the stub is blocked where compose would be.
+			for !slices.Contains(composeSubcommands(t, log), tc.block) {
+				if ctx.Err() != nil {
+					t.Fatalf("the launcher never reached compose %s\n%s", tc.block, stderr.String())
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if err := tc.signal(cmd); err != nil {
+				t.Fatal(err)
+			}
+			// The launcher fails the run rather than dying of the signal ...
+			var exit *exec.ExitError
+			if err := cmd.Wait(); !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				t.Fatalf("launcher: %v, want exit status 1\n%s", err, stderr.String())
+			}
+			// ... after asking compose to tear the project down, and nothing
+			// else, once interrupted.
+			lines := composeSubcommands(t, log)
+			if !slices.Equal(lines, tc.want) {
+				t.Errorf("compose subcommands %q, want %q\n%s", lines, tc.want, stderr.String())
+			}
+			logged, _ := os.ReadFile(log)
+			if !strings.Contains(string(logged), " down --remove-orphans --rmi local") {
+				t.Errorf("the teardown does not remove this run's images:\n%s", logged)
+			}
+		})
+	}
+}
+
+// stubDocker writes a stand-in docker into a directory for PATH and returns
+// the directory. The stub appends every invocation to $TORX_STUB_LOG,
+// answers "docker version" with this machine's architecture, and blocks in
+// the compose subcommand named by $TORX_STUB_BLOCK until signalled.
+func stubDocker(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := `#!/bin/sh
+printf '%s\n' "$*" >>"$TORX_STUB_LOG"
+case "$1" in
+version) echo ` + runtime.GOARCH + ` ;;
+compose)
+	shift
+	while [ "${1#-}" != "$1" ]; do shift 2; done
+	if [ "$1" = "$TORX_STUB_BLOCK" ]; then exec sleep 60; fi
+	;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// composeSubcommands reads the stub's log and returns the subcommand of each
+// compose invocation in it, skipping compose's global flags, which each take
+// a value.
+func composeSubcommands(t *testing.T, log string) []string {
+	t.Helper()
+	data, err := os.ReadFile(log)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	var subs []string
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 || f[0] != "compose" {
+			continue
+		}
+		f = f[1:]
+		for len(f) > 1 && strings.HasPrefix(f[0], "-") {
+			f = f[2:]
+		}
+		if len(f) > 0 {
+			subs = append(subs, f[0])
+		}
+	}
+	return subs
+}
+
 // repoDir is the repository root, which the launcher must be run from.
 func repoDir(t *testing.T) string {
 	t.Helper()
@@ -131,6 +260,19 @@ func repoDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return repo
+}
+
+// buildLauncher builds the launcher for the tests that signal it: "go run"
+// does not pass every signal on to the program it runs.
+func buildLauncher(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "launcher")
+	cmd := exec.Command("go", "build", "-o", bin, "./"+stepDir+"/launcher")
+	cmd.Dir = repoDir(t)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build launcher: %v\n%s", err, out)
+	}
+	return bin
 }
 
 // launch runs the launcher with args from the repository root and returns

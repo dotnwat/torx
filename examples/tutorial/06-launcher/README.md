@@ -159,13 +159,17 @@ is static, checked in, and copied into every run directory.
 [`launcher/docker.go`](launcher/docker.go) ties it together: copy `docker/`
 into the run directory, write the keys, `docker compose up --build --wait`
 the nodes, `docker compose run` the suite in the driver with `-pool` and
-`-run-dir`, and `docker compose down` afterwards, whatever happened. Each
-run is its own compose project, named after the run directory, so two runs
-share neither containers nor a network nor a node image: compose names the
-image after the project as well, which matters because the image carries
-the run's keys, and the teardown removes it with the rest. A run
-interrupted hard enough to skip the teardown shows up in `docker compose
-ls` and is removed with `docker compose -p <name> down --rmi local`.
+`-run-dir`, and `docker compose down` afterwards. Each run is its own
+compose project, named after the run directory, so two runs share neither
+containers nor a network nor a node image: compose names the image after
+the project as well, which matters because the image carries the run's
+keys, and the teardown removes it with the rest. An interrupt (Ctrl-C) or a
+SIGTERM at any point cancels the run instead of ending the launcher: the
+signal is passed on to compose, which abandons provisioning or stops the
+suite -- the suite stops its jobs and services and writes what it has --
+and the teardown runs regardless. Only a run killed harder than that
+(`kill -9`) skips it; such a run shows up in `docker compose ls` and is
+removed with `docker compose -p <name> down --rmi local`.
 
 The run directory records all of it:
 
@@ -206,8 +210,12 @@ the repository root, reading the run directory it announces; once with a
 `-results-dir` given relative to that root, which the launcher has to
 resolve before it puts the run directory on a PATH or in compose's flags.
 The docker test skips when `docker info` fails; with `TORX_DOCKER_REQUIRED=1`
-in the environment it fails instead, which is how CI runs it. The suite's
-own test is the one from step 5, unchanged.
+in the environment it fails instead, which is how CI runs it. A last test
+needs no docker: it runs the docker backend against a stub `docker` on PATH
+that records its invocations and blocks where compose would, interrupts the
+launcher there -- a Ctrl-C while the nodes are being provisioned, a SIGTERM
+while the suite runs -- and checks that the teardown still follows. The
+suite's own test is the one from step 5, unchanged.
 
 ## Where next
 
