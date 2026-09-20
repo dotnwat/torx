@@ -52,7 +52,7 @@ go run ./examples/tutorial/06-launcher/launcher -parallel 3 'kv\.bench'
 
 The launcher prints one line, `run directory: <path>`, and then the suite's
 own output. The run directory lands under `results/tutorial/` in the
-repository (`-results-dir` moves it):
+repository (`-results-dir` chooses where):
 
 ```
 results/tutorial/2026-09-19T23-29-52Z-1673092302/

@@ -14,9 +14,10 @@ import (
 	"github.com/dotnwat/torx"
 )
 
-// main hands the process to torx. Run bare, the binary is the driver: it
-// discovers the jobs registered below, runs each in a worker subprocess --
-// this same binary, re-executed with "worker" -- and prints the results.
+// main hands the process to torx. When you run the binary, it is the driver:
+// it discovers the jobs registered below, runs each in a worker subprocess,
+// and prints the results. A worker is this same binary, re-executed with
+// the "worker" argument.
 func main() { torx.Main() }
 
 // Jobs are registered by a stable id in an init function, so that the driver
