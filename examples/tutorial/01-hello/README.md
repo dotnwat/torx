@@ -15,10 +15,7 @@ comments before going on.
 `torx.Register` takes a stable id and a factory. The driver discovers jobs
 from the registry, and a worker uses the factory to rebuild the one it is
 handed. Registration happens in an `init` function, so a job is discoverable
-as soon as its file is linked into the binary. This is not how `go test` finds
-tests, which the go tool lists when it builds a test binary; it is the pattern
-Go uses when a package registers itself on import, as a `database/sql` driver
-does in its `init`.
+as soon as its file is linked into the binary.
 
 A job embeds `torx.JobBase` and implements two methods. `Declare` is where it
 registers the services it needs; these jobs need none. `Run` is the test
