@@ -161,9 +161,11 @@ into the run directory, write the keys, `docker compose up --build --wait`
 the nodes, `docker compose run` the suite in the driver with `-pool` and
 `-run-dir`, and `docker compose down` afterwards, whatever happened. Each
 run is its own compose project, named after the run directory, so two runs
-do not share containers or a network; a run interrupted hard enough to skip
-the teardown shows up in `docker compose ls` and is removed with `docker
-compose -p <name> down`.
+share neither containers nor a network nor a node image: compose names the
+image after the project as well, which matters because the image carries
+the run's keys, and the teardown removes it with the rest. A run
+interrupted hard enough to skip the teardown shows up in `docker compose
+ls` and is removed with `docker compose -p <name> down --rmi local`.
 
 The run directory records all of it:
 

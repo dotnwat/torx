@@ -11,7 +11,13 @@ x-node: &node
   build:
     context: .
     dockerfile: docker/Dockerfile
-  image: torx-tutorial-node
+  # No image name, so compose names each node's image after the project and
+  # every run builds, and at teardown removes, its own. The image carries
+  # the run's host key and authorized client key; under a name shared by
+  # every run, the latest launch's build would retag it, and a run still
+  # going would find its nodes recreated from that image, presenting a host
+  # key its known_hosts refuses.
+
   # A node is ready once its sshd accepts connections; "compose up --wait"
   # waits for that before the launcher runs the suite.
   healthcheck:

@@ -72,12 +72,14 @@ func runDocker(ctx context.Context, stepDir, runDir string, argv []string) int {
 	// sshd answers (the healthcheck in compose.yaml).
 	fmt.Fprintf(os.Stderr, "launcher: starting %d nodes (compose project %s)\n", len(nodeNames), project)
 	if err := compose(append([]string{"up", "--build", "--detach", "--wait"}, nodeNames...)...).Run(); err != nil {
-		_ = compose("down", "--remove-orphans").Run()
+		_ = compose("down", "--remove-orphans", "--rmi", "local").Run()
 		return die(fmt.Errorf("docker compose up: %w", err))
 	}
+	// The teardown removes the containers, the network, and the node images
+	// compose built for this project.
 	defer func() {
 		fmt.Fprintln(os.Stderr, "launcher: stopping the nodes")
-		if err := compose("down", "--remove-orphans").Run(); err != nil {
+		if err := compose("down", "--remove-orphans", "--rmi", "local").Run(); err != nil {
 			fmt.Fprintln(os.Stderr, "launcher: docker compose down:", err)
 		}
 	}()
