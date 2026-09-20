@@ -4,8 +4,8 @@
 # directory, so "." here is the run directory: the node image is built from
 # it (bin/kvd, keys/, docker/sshd_config), and it is mounted into the driver
 # at /torx/run, where the suite finds its binary, the manifest, and the keys,
-# and writes its results. Compose gives each service a name on the network
-# -- n0, n1, n2 -- which is what the manifest addresses the nodes by.
+# and writes its results. Compose gives each service a name on the network,
+# n0, n1, and n2, which is what the manifest addresses the nodes by.
 
 x-node: &node
   build:

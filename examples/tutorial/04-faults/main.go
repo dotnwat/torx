@@ -2,8 +2,8 @@
 
 // Command 04-faults is the fourth step of the torx tutorial: fault injection
 // on one node. The service gains Crash, Shutdown, and Restart, and two jobs
-// use them -- one checks that writes survive a kill and a restart, the other
-// that a graceful stop is graceful -- while the results tree keeps what each
+// use them: one checks that writes survive a kill and a restart, the other
+// that a graceful stop is graceful. The results tree keeps what each
 // incarnation of the server logged. README.md walks through it.
 package main
 

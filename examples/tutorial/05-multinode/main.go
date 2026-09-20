@@ -3,8 +3,8 @@
 // Command 05-multinode is the fifth step of the torx tutorial: more than one
 // node. The benchmark's load generator becomes a service of its own, with as
 // many nodes as a parameter asks for, and the job declares it beside the
-// server: the framework sums the two services' demand, allocates that many
-// nodes, and hands each service its share. README.md walks through it.
+// server: the framework adds up the nodes the two services need, allocates
+// that many, and hands each service its share. README.md walks through it.
 package main
 
 import "github.com/dotnwat/torx"

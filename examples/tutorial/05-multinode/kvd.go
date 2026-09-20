@@ -67,7 +67,7 @@ type Service struct {
 }
 
 // New builds a service named name that needs one node. Homogeneous(count,
-// spec) is the node demand: the framework sizes the job from it before
+// spec) says which nodes it needs: the framework sizes the job from it before
 // anything runs, and an empty spec matches any node.
 func New(name string) *Service {
 	s := &Service{}
@@ -75,8 +75,8 @@ func New(name string) *Service {
 	// NEW in step 4: keep every incarnation's log.
 	//
 	// A Restart launches a second kvd on the node. Keep what the first one
-	// logged up to its crash or stop beside what its replacement logs -- as
-	// stdout.1.log next to stdout.log in the results tree -- instead of
+	// logged up to its crash or stop beside what its replacement logs, as
+	// stdout.1.log next to stdout.log in the results tree, instead of
 	// truncating it, which is the default.
 	s.SetCapturePolicy(torx.CaptureRotate)
 	return s
@@ -97,8 +97,8 @@ func (s *Service) StartNode(ctx context.Context, n *torx.Node) error {
 		return err
 	}
 	// NEW in step 3: an artifact that is collected only when the job fails.
-	// kvd's data log is worth having when a job fails -- it says what the
-	// server had actually recorded -- and noise when it passes. An artifact
+	// kvd's data log is worth having when a job fails, since it says what
+	// the server had actually recorded, and noise when it passes. An artifact
 	// registered without CollectOnPass is gathered only on failure, into the
 	// service's directory in the results tree beside the captured output.
 	s.AddArtifact(n, torx.Artifact{Name: "kv.log", Path: s.dataDir(n) + "/kv.log"})
@@ -204,11 +204,11 @@ func (s *Service) Crash(ctx context.Context) error {
 // Shutdown stops kvd gracefully and holds it to that: SIGTERM, a bounded
 // wait for it to exit on its own, and an exit status of 0. It is the same
 // stop StopNode does at teardown, but where StopNode only notes a process
-// that had to be killed or exited unclean, here that fails the call -- the
+// that had to be killed or exited unclean, here that fails the call: the
 // stop itself is under test. The port and data directory are kept for
-// Restart. A process the grace period ran out on was killed and is gone; on
-// any other error -- the signal could not be delivered, the wait was cut
-// short, the kill did not go through -- it may still be there, so it is
+// Restart. A process the grace period ran out on was killed and is gone. On
+// any other error (the signal could not be delivered, the wait was cut
+// short, the kill did not go through) it may still be there, so it is
 // kept for the teardown to retry, as after a failed Crash.
 func (s *Service) Shutdown(ctx context.Context) error {
 	s.mu.Lock()

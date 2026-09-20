@@ -49,7 +49,7 @@ type Service struct {
 }
 
 // New builds a service named name that needs one node. Homogeneous(count,
-// spec) is the node demand: the framework sizes the job from it before
+// spec) says which nodes it needs: the framework sizes the job from it before
 // anything runs, and an empty spec matches any node.
 func New(name string) *Service {
 	s := &Service{}
@@ -83,8 +83,8 @@ func (s *Service) StartNode(ctx context.Context, n *torx.Node) error {
 		return err
 	}
 	// NEW in step 3: an artifact that is collected only when the job fails.
-	// kvd's data log is worth having when a job fails -- it says what the
-	// server had actually recorded -- and noise when it passes. An artifact
+	// kvd's data log is worth having when a job fails, since it says what
+	// the server had actually recorded, and noise when it passes. An artifact
 	// registered without CollectOnPass is gathered only on failure, into the
 	// service's directory in the results tree beside the captured output.
 	s.AddArtifact(n, torx.Artifact{Name: "kv.log", Path: s.dataDir(n) + "/kv.log"})

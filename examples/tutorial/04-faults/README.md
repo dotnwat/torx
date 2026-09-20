@@ -29,7 +29,7 @@ is the point of this step:
   outcome: a process that did not exit within the grace period, or exited
   with a non-zero status, fails the call and so the job. The stop is under
   test.
-- **`StopNode`** -- the teardown's stop, unchanged since step 2 -- calls the
+- **`StopNode`**, the teardown's stop, unchanged since step 2, calls the
   same `torx.Shutdown` but only *logs* a process that had to be killed or
   exited unclean. The node is clean either way, and an error from a
   teardown hook marks the node dirty and quarantines it; a job that passed
@@ -55,8 +55,8 @@ two fields consistent for all of them.
 ## A kill that could not be carried out
 
 `Crash` and `Shutdown` clear the process only once it is established to be
-gone. If the kill could not be delivered -- or, for `Shutdown`, the wait was
-cut short or the transport lost track of the process -- the handle is kept:
+gone. If the kill could not be delivered, or, for `Shutdown`, the wait was
+cut short or the transport lost track of the process, the handle is kept:
 `Restart` refuses to launch beside a process that may still be running, and
 the teardown's `StopNode` tries the stop again and fails the job if it
 cannot, so a node that may still be running a stray kvd is quarantined
@@ -128,9 +128,9 @@ graceful job exists to catch.
 ## The jobs
 
 Both follow the same shape: write, fault, restart, wait, verify. After
-`Restart`, the job calls `j.db.Wait(ctx)` -- the same readiness wait the
-framework did before `Run`, which returns once the new process answers,
-having replayed its log -- and takes a fresh client, because the old one's
+`Restart`, the job calls `j.db.Wait(ctx)`. That is the same readiness wait the
+framework did before `Run`, and it returns once the new process answers,
+having replayed its log. Then the job takes a fresh client, because the old one's
 connections died with the process. Each records what it timed:
 `kv.durability` the time from the restart to readiness, `kv.graceful` the
 time SIGTERM took.

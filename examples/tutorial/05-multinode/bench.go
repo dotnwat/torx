@@ -14,14 +14,14 @@ import (
 // nodes of its own; Declare, Summary, and Run are where it shows.
 
 // benchJob is kv.bench: a benchmark of kvd under load from a number of
-// nodes, each running a number of clients. It declares two services -- the
+// nodes, each running a number of clients. It declares two services: the
 // server, on a node of its own, and the load generator, on as many nodes as
-// the nodes parameter says -- and the framework sums their demand into the
-// nodes it allocates the job and hands each service its share, in the order
-// they were registered.
+// the nodes parameter says. The framework adds up the nodes they need,
+// allocates that many to the job, and hands each service its share, in the
+// order they were registered.
 //
 // It runs once per point of its parameter matrix, and each variant is a job
-// of its own -- selected, scheduled, and reported on its own -- with an id
+// of its own, selected, scheduled, and reported on its own, with an id
 // that spells out its parameters, kv.bench[clients=4,nodes=2,seconds=2].
 type benchJob struct {
 	torx.JobBase
@@ -46,8 +46,8 @@ func (*benchJob) Matrix() []torx.Params {
 	})
 }
 
-// ResolveParams turns whatever parameters a variant was given -- from the
-// matrix above or a -params file -- into the complete, checked set it runs
+// ResolveParams turns whatever parameters a variant was given, from the
+// matrix above or a -params file, into the complete, checked set it runs
 // with. Discovery calls it before ids are built, so the id names every
 // parameter with its resolved value, a mistyped key fails the variant loudly
 // rather than silently running a default, and two spellings of the same
@@ -103,7 +103,7 @@ func intParam(p torx.Params, key string, def, limit int) (int, error) {
 // NEW in step 5: two services in one job.
 //
 // Declare registers the server and then the load generator, whose node
-// count is a parameter: the job's demand depends on the variant. Services
+// count is a parameter: how many nodes the job needs depends on the variant. Services
 // are bound to nodes in registration order, so the server gets the first
 // node of the job's allocation and the load generator the rest.
 func (j *benchJob) Declare(jc *torx.JobContext) {
@@ -143,8 +143,8 @@ type Summary struct {
 // Run drives the load from every load node at once and records the result.
 // The load generators reach the server at the address the service
 // advertises, which on the local pool is the loopback and on a real pool the
-// server node's own address -- the reason the service binds every interface
-// and advertises n.Addr() rather than 127.0.0.1.
+// server node's own address. That is the reason the service binds every
+// interface and advertises n.Addr() rather than 127.0.0.1.
 func (j *benchJob) Run(ctx context.Context, jc *torx.JobContext) error {
 	clients := jc.Params.Int("clients", 1)
 	seconds := jc.Params.Int("seconds", 2)

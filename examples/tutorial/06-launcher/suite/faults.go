@@ -62,8 +62,8 @@ func (j *durabilityJob) Run(ctx context.Context, jc *torx.JobContext) error {
 }
 
 // gracefulJob is kv.graceful: the stop itself is under test. It writes keys,
-// has the service stop kvd the way an operator would and hold it to that --
-// an exit on SIGTERM, within the grace period, with status 0 -- then
+// has the service stop kvd the way an operator would and hold it to that,
+// an exit on SIGTERM, within the grace period, with status 0, and then
 // restarts it and checks the keys are there. Where the durability job
 // checks the data survives the worst case, this one checks the server's
 // shutdown path works at all; a server that ignored the signal, or exited

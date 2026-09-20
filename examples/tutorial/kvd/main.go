@@ -8,7 +8,7 @@
 //	kvd version
 //
 // serve keeps every write in an append-only log under DIR and replays it
-// before it opens its port, so a restart -- even after a kill -- serves what
+// before it opens its port, so a restart, even after a kill, serves what
 // was written; answers 200 on /readyz once it is listening; and exits 0 on
 // SIGTERM once the requests in flight have finished, closing the connections
 // that carried none. load runs N clients that
@@ -146,8 +146,8 @@ const shutdownTimeout = 5 * time.Second
 // connections. A connection that was accepted but never sent a request is
 // neither: net/http gives it five seconds to speak before treating it as
 // idle, which from outside is a server that takes five seconds to stop.
-// Such connections are common -- a browser pre-connects, and an HTTP
-// client library can leave a pooled connection it never used -- and nothing
+// Such connections are common: a browser pre-connects, and an HTTP
+// client library can leave a pooled connection it never used. Nothing
 // is in flight on them, so they are closed as soon as Shutdown has closed
 // the listener.
 func newServer(st *store) (*http.Server, *connTracker) {
@@ -220,7 +220,7 @@ type entry struct {
 
 // store is the key-value map and the append-only log that makes it durable.
 // A write goes to the log before the map, and the response only goes out
-// once the write has reached the kernel -- which is what killing the process
+// once the write has reached the kernel, which is what killing the process
 // cannot undo. (A power loss could; a real store would fsync.)
 type store struct {
 	path string
@@ -381,7 +381,7 @@ type report struct {
 }
 
 // loadMain runs the clients, prints the report, and exits 1 if any request
-// failed or returned the wrong value -- the report is printed either way, so
+// failed or returned the wrong value. The report is printed either way, so
 // a caller can read it before deciding what an error means.
 func loadMain(args []string) int {
 	fs := flag.NewFlagSet("kvd load", flag.ContinueOnError)
@@ -439,8 +439,8 @@ type clientResult struct {
 }
 
 // runClient writes and reads back random keys until the deadline. Each
-// client works its own key space -- and each load generator its own, by the
-// prefix -- so that the read-back check is not confused by another client's
+// client works its own key space, and each load generator its own, by the
+// prefix, so that the read-back check is not confused by another client's
 // write. The first error is reported on stderr, so a run
 // against a server that is not there says so once instead of a thousand
 // times, and a client that cannot get through backs off rather than spinning.

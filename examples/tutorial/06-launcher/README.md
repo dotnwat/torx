@@ -9,13 +9,13 @@ changes one line.
 
 Three things live here:
 
-- [`suite/`](suite/) -- the suite. Its `main.go` gains a blank import of the
+- [`suite/`](suite/) is the suite. Its `main.go` gains a blank import of the
   ssh backend, `_ "github.com/dotnwat/torx/ssh"`, so that nodes of the
   `ssh` kind are constructible; without it, a manifest naming them is
   refused at load with an error that says so.
-- [`launcher/`](launcher/) -- the launcher, a Go program of a few hundred
+- [`launcher/`](launcher/) is the launcher, a Go program of a few hundred
   lines.
-- [`docker/`](docker/) -- what the docker backend provisions with: a
+- [`docker/`](docker/) is what the docker backend provisions with: a
   `Dockerfile` for the node image, its `sshd_config`, a `compose.yaml`, and
   the node `manifest.json`.
 
@@ -39,11 +39,11 @@ differently. The launcher is one answer, kept to what a real one needs.
    about to be run. All of this lands before the suite starts, so even an
    interrupted run says what produced it.
 4. Run the suite with `-run-dir` naming that directory. torx uses the
-   directory exactly as given -- no timestamped subdirectory, no `latest`
-   symlink; those belong to `-results-dir` mode -- and fills in the
+   directory exactly as given, with no timestamped subdirectory and no `latest`
+   symlink, since those belong to `-results-dir` mode, and fills in the
    per-job subdirectories and `run.json`. For the local backend the suite
-   is exec'd in place, with `bin/` prepended to its PATH so every node --
-   a subprocess of the suite -- finds kvd, and its exit status is the
+   is exec'd in place, with `bin/` prepended to its PATH so every node,
+   each a subprocess of the suite, finds kvd, and its exit status is the
    launcher's.
 
 ```sh
@@ -104,7 +104,7 @@ whole suite runs in about fifteen seconds. Every job that ran on the local
 pool runs here unchanged, and one line in the output says what changed
 underneath: `kvd at n2:30000`. The server was reached at a node's name on
 the docker network, by the job in the driver container and by the load
-generators in the other containers -- because the service binds every
+generators in the other containers, because the service binds every
 interface and advertises `n.Addr()`. A service that had hardcoded the
 loopback would have passed every earlier step and failed here.
 
@@ -114,8 +114,8 @@ Three containers are the nodes, and a fourth, the **driver**, runs the
 suite. The suite could not simply run on your machine: on Docker Desktop,
 containers on a bridge network are not reachable from the host, so a suite
 there could dial no node. Running it in a container on the same network is
-also what a real deployment looks like -- a CI runner or a bastion host on
-the nodes' network -- so the tutorial's topology is the general one, not a
+also what a real deployment looks like, a CI runner or a bastion host on
+the nodes' network, so the tutorial's topology is the general one, not a
 workaround. A suite is one static binary, so "deploying" it into that
 container is cross-compiling it for Linux on the engine's architecture,
 which is not the host's platform on a Mac; the launcher asks docker which.
@@ -136,7 +136,7 @@ connections, and the launcher's `compose up --wait` returns only once all
 three are healthy, so the suite never dials a node that is not there. The
 driver mounts the run directory at `/torx/run`, which is where the suite
 finds its binary, the manifest, and the keys, and where it writes its
-results -- straight into the run directory on your machine.
+results, straight into the run directory on your machine.
 
 [`launcher/keys.go`](launcher/keys.go) generates the keys, fresh for every
 run: a client key pair and a host key pair, from which it derives the
@@ -149,7 +149,7 @@ The image bakes the host key and the authorized key in.
 [`docker/manifest.json`](docker/manifest.json) is the pool: the boundary
 between provisioning and torx. Each node has a name, the address others
 dial it at (its compose service name, resolved by docker's DNS), a scratch
-root, a port range, and a backend descriptor -- `ssh`, with the host to
+root, a port range, and a backend descriptor: `ssh`, with the host to
 dial and the user, identity file, and known_hosts to dial with, spelled as
 paths inside the driver container. The port range must be explicit for a
 remote node: the default allocator finds free ports by listening on the
@@ -167,7 +167,7 @@ the project as well, which matters because the image carries the run's
 keys, and the teardown removes it with the rest. An interrupt (Ctrl-C) or a
 SIGTERM at any point cancels the run instead of ending the launcher: the
 signal is passed on to compose, which abandons provisioning or stops the
-suite -- the suite stops its jobs and services and writes what it has --
+suite, which in turn stops its jobs and services and writes what it has,
 and the teardown runs regardless. Only a run killed harder than that
 (`kill -9`) skips it; such a run shows up in `docker compose ls` and is
 removed with `docker compose -p <name> down --rmi local`.
@@ -205,8 +205,8 @@ does; the suite would not change.
 ## Testing
 
 [`launcher/launcher_test.go`](launcher/launcher_test.go) unit-tests the
-pure parts -- the project name, the PATH handling, the keys fitting together
--- and runs the launcher end to end on both backends as a person would, from
+pure parts (the project name, the PATH handling, the keys fitting together)
+and runs the launcher end to end on both backends as a person would, from
 the repository root, reading the run directory it announces; once with a
 `-results-dir` given relative to that root, which the launcher has to
 resolve before it puts the run directory on a PATH or in compose's flags.
@@ -214,8 +214,8 @@ The docker test skips when `docker info` fails; with `TORX_DOCKER_REQUIRED=1`
 in the environment it fails instead, which is how CI runs it. A last test
 needs no docker: it runs the docker backend against a stub `docker` on PATH
 that records its invocations and blocks where compose would, interrupts the
-launcher there -- a Ctrl-C while the nodes are being provisioned, a SIGTERM
-while the suite runs -- and checks that the teardown still follows. The
+launcher there, with a Ctrl-C while the nodes are being provisioned and a SIGTERM
+while the suite runs, and checks that the teardown still follows. The
 suite's own test is the one from step 5, unchanged.
 
 ## Where next

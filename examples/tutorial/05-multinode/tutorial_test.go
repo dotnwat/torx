@@ -70,8 +70,8 @@ func TestSuiteEndToEnd(t *testing.T) {
 		if !strings.HasPrefix(r.ID, "kv.bench") {
 			continue
 		}
-		// A benchmark records what it measured -- one report per load node
-		// plus the totals -- and keeps each node's raw report beside
+		// A benchmark records what it measured, one report per load node
+		// plus the totals, and keeps each node's raw report beside
 		// result.json.
 		var sum Summary
 		if err := json.Unmarshal(r.Data, &sum); err != nil || sum.Ops == 0 {

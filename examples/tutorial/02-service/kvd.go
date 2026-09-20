@@ -49,7 +49,7 @@ type Service struct {
 }
 
 // New builds a service named name that needs one node. Homogeneous(count,
-// spec) is the node demand: the framework sizes the job from it before
+// spec) says which nodes it needs: the framework sizes the job from it before
 // anything runs, and an empty spec matches any node.
 func New(name string) *Service {
 	s := &Service{}

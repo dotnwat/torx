@@ -17,7 +17,7 @@ import (
 
 // benchJob is kv.bench: a benchmark of kvd under a number of clients. It runs
 // once per point of its parameter matrix, and each variant is a job of its
-// own -- selected, scheduled, and reported on its own -- with an id that
+// own, selected, scheduled, and reported on its own, with an id that
 // spells out its parameters, kv.bench[clients=4,seconds=2].
 //
 // The load comes from kvd's own load generator, run on the node through
@@ -42,8 +42,8 @@ func (*benchJob) Matrix() []torx.Params {
 	return torx.Matrix(map[string][]any{"clients": {1, 4, 16}})
 }
 
-// ResolveParams turns whatever parameters a variant was given -- from the
-// matrix above or a -params file -- into the complete, checked set it runs
+// ResolveParams turns whatever parameters a variant was given, from the
+// matrix above or a -params file, into the complete, checked set it runs
 // with. Discovery calls it before ids are built, so the id names every
 // parameter with its resolved value, a mistyped key fails the variant loudly
 // rather than silently running a default, and two spellings of the same

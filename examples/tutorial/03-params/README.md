@@ -14,8 +14,8 @@ and step 6 gathers them all.
 A job that implements `Matrix() []torx.Params` expands into one **variant**
 per parameter set. `torx.Matrix` builds the cross product of the dimensions
 it is given; `kv.bench` has one, `clients`, so it becomes three variants.
-Each variant is a job of its own -- selected, scheduled, and reported on its
-own -- with an id that spells out its parameters:
+Each variant is a job of its own, selected, scheduled, and reported on its
+own, with an id that spells out its parameters:
 
 ```
 kv.bench[clients=1,seconds=2]
@@ -31,7 +31,7 @@ The job reads its parameters from `jc.Params` with the typed getters
 `seconds` is not in the matrix, yet it is in every id. That is
 `ResolveParams` at work: discovery calls it once per variant, before ids are
 built, and the job returns the complete, checked parameter set the variant
-runs with -- defaults filled in, values type- and range-checked, unknown
+runs with: defaults filled in, values type- and range-checked, unknown
 keys rejected. Without it, `{clients: 4}` and `{clients: 4, seconds: 2}`
 would be two variants of one configuration, and a mistyped key would
 silently run the default. One consequence to know: a dimension added later
@@ -63,8 +63,8 @@ node each and `-parallel 3` runs them at once; two jobs never share a node.
 
 ## What the job does
 
-`Run` asks the service's node to run `kvd load` with `n.Exec` -- the same
-call the preflight used -- and gets back an `ExecResult`: the exit code,
+`Run` asks the service's node to run `kvd load` with `n.Exec`, the same
+call the preflight used, and gets back an `ExecResult`: the exit code,
 stdout, and stderr. A non-zero exit is not an error from `Exec`; the
 command ran, and the job decides what its exit means. The load generator
 runs on the server's node here, next to the server; step 5 moves it onto
@@ -74,7 +74,7 @@ Then three calls record the outcome:
 
 - `jc.WriteArtifact("load.json", stdout)` keeps the load generator's raw
   output at the top of the job's results directory, beside `result.json`,
-  whatever happens next -- a failed variant still shows what the generator
+  whatever happens next, so a failed variant still shows what the generator
   saw. A job's own files sit at the top of its directory; the services'
   collected files sit in directories below.
 - `jc.Record(rep)` stores what was measured as the result's `data`. torx

@@ -29,7 +29,7 @@ const (
 // accept the client key from, and the known_hosts the client verifies every
 // node's host key against. Generating both sides here, before any
 // container exists, means the suite never has to trust a host key on first
-// use -- the torx ssh backend has no such fallback -- and a run's keys are
+// use, which the torx ssh backend could not do anyway, and a run's keys are
 // its own.
 func writeKeys(dir string, hosts []string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {

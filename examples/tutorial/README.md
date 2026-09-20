@@ -21,7 +21,7 @@ diff -r examples/tutorial/02-service examples/tutorial/03-params
 | [`02-service`](02-service/) | A service that runs kvd on one node, and a job that writes a key and reads it back. | `ServiceBase` and its four hooks, ports, readiness, captured output, a graceful stop, cleanup, the end-to-end test idiom |
 | [`03-params`](03-params/) | A benchmark that runs once per point of a parameter matrix and records what it measured. | `Matrix`, `ResolveParams`, `-params`, `n.Exec`, `Record`, job and service artifacts, `-nodes` and `-parallel` |
 | [`04-faults`](04-faults/) | Crashing, stopping, and restarting the server, with every incarnation's log kept. | The process handle, `Shutdown` as an assertion, `CaptureRotate` |
-| [`05-multinode`](05-multinode/) | The load generator becomes a service with nodes of its own. | Two services in one job, demand, node binding, why a service advertises the node's address |
+| [`05-multinode`](05-multinode/) | The load generator becomes a service with nodes of its own. | Two services in one job, how many nodes a job needs, node binding, why a service advertises the node's address |
 | [`06-launcher`](06-launcher/) | A launcher that builds, records, and runs the suite, and then provisions docker nodes and runs it over ssh. | `MakeRunDir` and `-run-dir`, the node manifest and `-pool`, the ssh backend |
 
 ## The system under test

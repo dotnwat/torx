@@ -25,9 +25,9 @@ import (
 //
 // It has nothing to start. The per-node hooks only check that kvd is on
 // each node's PATH; the work happens in Run, when the job asks for it. A
-// service that is not a long-running process per node -- a one-shot client,
-// a rolling operation -- is still a service: it is how a job gets nodes and
-// how the framework knows the job's demand. (A service like this could also
+// service that is not a long-running process per node, a one-shot client
+// or a rolling operation, is still a service: it is how a job gets nodes and
+// how the framework knows how many the job needs. (A service like this could also
 // override Start, Wait, Stop, and Clean directly instead of implementing the
 // per-node hooks.)
 type Load struct {
@@ -35,7 +35,7 @@ type Load struct {
 }
 
 // NewLoad builds a load service named name that needs nodes nodes. The
-// framework adds this demand to the other services' when it sizes the job.
+// framework adds them to the other services' nodes when it sizes the job.
 func NewLoad(name string, nodes int) *Load {
 	l := &Load{}
 	l.ServiceBase = torx.NewServiceBase(name, torx.Homogeneous(nodes, torx.NodeSpec{}), l)

@@ -10,25 +10,25 @@ part of a suite that accumulates; the jobs are the ones each step teaches.
 ## A service with nothing to start
 
 `Load` embeds `*torx.ServiceBase` like the kvd service, asks for `nodes`
-nodes, and implements the same four hooks -- but `StartNode` only runs the
+nodes, and implements the same four hooks. But `StartNode` only runs the
 preflight, and the other three do nothing. There is no long-running process:
 the work happens in `Run`, when the job asks for it, which runs `kvd load`
 on every node at once through `n.Exec` and returns each node's report.
 
-A service that is not a server per node -- a one-shot client, a rolling
-operation, a single API call -- is still a service. It is how a job gets
-nodes, and how the framework knows the job's demand. (Such a service can
+A service that is not a server per node is still a service: a one-shot
+client, a rolling operation, a single API call. It is how a job gets
+nodes, and how the framework knows how many nodes the job needs. (Such a service can
 also override `Start`, `Wait`, `Stop`, and `Clean` directly instead of the
 per-node hooks; the hooks are the default lifecycle, not the only one.)
 
 ## Two services in one job
 
-`Declare` now registers two services. The framework sums their demand -- one
-node for the server, `nodes` for the load -- allocates that many disjoint
+`Declare` now registers two services. The framework adds up the nodes they
+need, one for the server and `nodes` for the load, allocates that many disjoint
 nodes for the job, and hands each service its share in registration order:
 the server gets the first node, the load generator the rest. The node count
 comes from `jc.Params`, which is available in `Declare` as well as `Run`,
-so the job's demand depends on the variant.
+so how many nodes the job needs depends on the variant.
 
 The pool sizes itself to the largest job by default, three nodes here, so
 `-nodes` is no longer needed. No two of these variants fit in it together,
@@ -38,8 +38,8 @@ so they run one at a time.
 
 `kvd load` on a load node dials the server at `j.db.Addr()`: the node's
 reachable address and the leased port. On the local pool every node's
-address is `127.0.0.1` -- they are all subprocesses of one host, told apart
-by port -- so a load node dialing the server's address is dialing its own
+address is `127.0.0.1`: they are all subprocesses of one host, told apart
+by port. So a load node dialing the server's address is dialing its own
 host, and the choice made in step 2 (bind every interface, advertise
 `n.Addr()`) still changes nothing visible. In step 6 the load nodes are
 containers, the server's address is `n0`, and the same code reaches across

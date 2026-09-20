@@ -13,17 +13,17 @@
 //     nodes run on;
 //   - mint the run directory, through torx so it is named and linked the
 //     way the suite's own -results-dir mode would, and record the invocation
-//     in it -- argv, git identity, the binaries and exactly how the suite
-//     was run, a verbatim copy of any -params file -- before the suite
+//     in it (argv, git identity, the binaries and exactly how the suite
+//     was run, a verbatim copy of any -params file) before the suite
 //     starts, so a results tree always says what produced it, even for a
 //     run that was interrupted;
 //   - prepare the nodes: for the local backend, that is putting kvd on the
 //     PATH the suite's subprocesses inherit; for the docker backend, it is
 //     building a node image with kvd and an sshd in it, starting three
 //     containers from it, and generating the keys the suite logs in with;
-//   - run the suite with -run-dir pointing at the run directory -- exec'd in
-//     place for the local backend, in a container beside the nodes for the
-//     docker backend -- so its exit status is the launcher's;
+//   - run the suite with -run-dir pointing at the run directory, exec'd in
+//     place for the local backend and in a container beside the nodes for
+//     the docker backend, so its exit status is the launcher's;
 //   - and for docker, tear the containers down afterwards.
 //
 // The line "run directory: <path>" on standard output, printed before the
@@ -113,10 +113,10 @@ func run(args []string) int {
 			return die(fmt.Errorf("params file: %w", err))
 		}
 	}
-	// The run directory is spelled absolutely wherever it goes -- onto the
+	// The run directory is spelled absolutely wherever it goes: onto the
 	// exec'd suite's PATH, where Go refuses a relative entry, and into
-	// compose's flags, which compose resolves from inside the run directory
-	// -- so a relative -results-dir is resolved against the launcher's
+	// compose's flags, which compose resolves from inside the run directory.
+	// So a relative -results-dir is resolved against the launcher's
 	// working directory before anything is derived from it.
 	root := *resultsDir
 	if root == "" {
