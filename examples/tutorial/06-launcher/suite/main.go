@@ -1,10 +1,10 @@
 //go:build unix
 
-// Command suite is the torx suite of the tutorial's last step: the suite of
-// step 5, unchanged but for one line -- the blank import of the ssh backend,
-// so that nodes of the "ssh" kind in a -pool manifest are constructible --
-// and moved beside the launcher (../launcher) that builds it, prepares its
-// nodes, and runs it. README.md walks through it.
+// Command suite is the torx suite of the tutorial's last step: every job
+// from steps 2 to 5 in one binary, with one line added, the blank import of
+// the ssh backend, so that nodes of the "ssh" kind in a -pool manifest are
+// constructible. It sits beside the launcher (../launcher) that builds it,
+// prepares its nodes, and runs it. README.md walks through it.
 package main
 
 import (

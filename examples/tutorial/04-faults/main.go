@@ -16,8 +16,6 @@ func main() { torx.Main() }
 const serviceName = "kvd"
 
 func init() {
-	torx.Register("kv.smoke", func() torx.Job { return &smokeJob{} })
-	torx.Register("kv.bench", func() torx.Job { return &benchJob{} })
 	torx.Register("kv.durability", func() torx.Job { return &durabilityJob{} })
 	torx.Register("kv.graceful", func() torx.Job { return &gracefulJob{} })
 }

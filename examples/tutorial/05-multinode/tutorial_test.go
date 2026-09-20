@@ -53,11 +53,10 @@ func TestSuiteEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-	// Three nodes, which the largest variant needs all of, and up to three
-	// concurrent jobs, so the one-node jobs run in parallel.
+	// Three nodes, which the two-node variants need all of.
 	root := t.TempDir()
 	res := torx.Run(context.Background(), localPool(t, 3), torx.SelfExecLauncher{}, reqs,
-		torx.RunOptions{ResultsDir: root, MaxParallel: 3})
+		torx.RunOptions{ResultsDir: root})
 	if !res.Ok() {
 		t.Fatalf("suite failed:\n%s\n%s", res.Render(), failedJobLogs(root, res))
 	}
@@ -95,65 +94,9 @@ func TestSuiteEndToEnd(t *testing.T) {
 		}
 	}
 	// Ids carry the resolved parameters, defaults included.
-	for _, id := range []string{"kv.smoke", "kv.bench[clients=4,nodes=1,seconds=2]", "kv.bench[clients=16,nodes=2,seconds=2]", "kv.durability", "kv.graceful"} {
+	for _, id := range []string{"kv.bench[clients=4,nodes=1,seconds=2]", "kv.bench[clients=16,nodes=2,seconds=2]"} {
 		if !seen[id] {
 			t.Errorf("no result for %s; ran %v", id, res.Jobs)
-		}
-	}
-
-	// Both fault jobs ran kvd twice on their node, and both incarnations'
-	// output reached the results tree: the service's rotate policy has
-	// StartCaptured move the first log aside before the second start. The
-	// crashed one never got to say it stopped; the gracefully stopped one did.
-	for id, stoppedCleanly := range map[string]bool{"kv.durability": false, "kv.graceful": true} {
-		first, err := filepath.Glob(filepath.Join(root, run, id, serviceName, "*", "stdout.1.log"))
-		if err != nil || len(first) != 1 {
-			t.Fatalf("%s: rotated log stdout.1.log: %v, %v", id, first, err)
-		}
-		log, err := os.ReadFile(first[0])
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := strings.Contains(string(log), "stopped"); got != stoppedCleanly {
-			t.Errorf("%s: first incarnation's log says it stopped: %v, want %v:\n%s", id, got, stoppedCleanly, log)
-		}
-		second, err := os.ReadFile(filepath.Join(filepath.Dir(first[0]), "stdout.log"))
-		if err != nil || !strings.Contains(string(second), fmt.Sprintf("replayed %d entries", faultKeys)) {
-			t.Errorf("%s: second incarnation's log should show the replay of %d entries: %v\n%s", id, faultKeys, err, second)
-		}
-	}
-}
-
-func TestSmokeEndToEnd(t *testing.T) {
-	installKVD(t)
-	reqs, err := torx.Discover("kv.smoke")
-	if err != nil {
-		t.Fatalf("discover: %v", err)
-	}
-	root := t.TempDir()
-	res := torx.Run(context.Background(), localPool(t, 1), torx.SelfExecLauncher{}, reqs,
-		torx.RunOptions{ResultsDir: root})
-	if !res.Ok() {
-		t.Fatalf("suite failed:\n%s\n%s", res.Render(), failedJobLogs(root, res))
-	}
-	if res.Jobs[0].Summary == "" {
-		t.Errorf("kv.smoke: no summary")
-	}
-
-	// kvd's captured output was collected into the results tree, under the
-	// service's directory and the node's.
-	run, err := os.Readlink(filepath.Join(root, "latest"))
-	if err != nil {
-		t.Fatalf("latest symlink: %v", err)
-	}
-	logPath := filepath.Join(root, run, "kv.smoke", serviceName, "node-0", "stdout.log")
-	log, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("collected kvd log missing at %s: %v", logPath, err)
-	}
-	for _, want := range []string{"listening on", "shutting down", "stopped"} {
-		if !strings.Contains(string(log), want) {
-			t.Errorf("collected kvd log lacks %q:\n%s", want, log)
 		}
 	}
 }

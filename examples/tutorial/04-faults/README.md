@@ -127,7 +127,7 @@ connections died with the process. Each records what it timed:
 time SIGTERM took.
 
 ```sh
-go run ./examples/tutorial/04-faults 'kv\.durability' 'kv\.graceful'
+go run ./examples/tutorial/04-faults
 ```
 
 ```

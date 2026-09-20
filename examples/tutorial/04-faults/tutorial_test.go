@@ -4,8 +4,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,36 +25,17 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestResolveParams(t *testing.T) {
-	var j benchJob
-	got, err := j.ResolveParams(torx.Params{"clients": float64(8)})
-	if err != nil || got["clients"] != 8 || got["seconds"] != 2 {
-		t.Errorf("ResolveParams({clients: 8.0}) = %v, %v; want clients 8 with the default seconds 2", got, err)
-	}
-	for _, bad := range []torx.Params{
-		{"client": 8},    // a mistyped key
-		{"clients": 0},   // out of range
-		{"clients": 1.5}, // not whole
-		{"clients": "8"}, // not a number
-		{"seconds": maxSeconds + 1},
-	} {
-		if _, err := j.ResolveParams(bad); err == nil {
-			t.Errorf("ResolveParams(%v) accepted, want an error", bad)
-		}
-	}
-}
-
 func TestSuiteEndToEnd(t *testing.T) {
 	installKVD(t)
 	reqs, err := torx.Discover()
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-	// Three nodes and three concurrent jobs: the variants run in parallel,
-	// each on a node of its own.
+	// Two nodes and two concurrent jobs: the fault jobs run in parallel, each
+	// on a node of its own.
 	root := t.TempDir()
-	res := torx.Run(context.Background(), localPool(t, 3), torx.SelfExecLauncher{}, reqs,
-		torx.RunOptions{ResultsDir: root, MaxParallel: 3})
+	res := torx.Run(context.Background(), localPool(t, 2), torx.SelfExecLauncher{}, reqs,
+		torx.RunOptions{ResultsDir: root, MaxParallel: 2})
 	if !res.Ok() {
 		t.Fatalf("suite failed:\n%s\n%s", res.Render(), failedJobLogs(root, res))
 	}
@@ -67,26 +46,8 @@ func TestSuiteEndToEnd(t *testing.T) {
 	seen := map[string]bool{}
 	for _, r := range res.Jobs {
 		seen[r.ID] = true
-		if !strings.HasPrefix(r.ID, "kv.bench") {
-			continue
-		}
-		// A benchmark records what it measured, and keeps the raw report
-		// beside result.json.
-		var rep Report
-		if err := json.Unmarshal(r.Data, &rep); err != nil || rep.Ops == 0 {
-			t.Errorf("%s: recorded data %s: %v; want a report with ops", r.ID, r.Data, err)
-		}
-		if _, err := os.Stat(filepath.Join(root, run, r.ID, "load.json")); err != nil {
-			t.Errorf("%s: load.json artifact: %v", r.ID, err)
-		}
-		// The data log is registered for collection on failure only, and
-		// every variant passed.
-		if _, err := os.Stat(filepath.Join(root, run, r.ID, serviceName, "node-0", "kv.log")); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("%s: kv.log was collected on a pass: %v", r.ID, err)
-		}
 	}
-	// Ids carry the resolved parameters, defaults included.
-	for _, id := range []string{"kv.smoke", "kv.bench[clients=1,seconds=2]", "kv.bench[clients=4,seconds=2]", "kv.bench[clients=16,seconds=2]", "kv.durability", "kv.graceful"} {
+	for _, id := range []string{"kv.durability", "kv.graceful"} {
 		if !seen[id] {
 			t.Errorf("no result for %s; ran %v", id, res.Jobs)
 		}
@@ -111,40 +72,6 @@ func TestSuiteEndToEnd(t *testing.T) {
 		second, err := os.ReadFile(filepath.Join(filepath.Dir(first[0]), "stdout.log"))
 		if err != nil || !strings.Contains(string(second), fmt.Sprintf("replayed %d entries", faultKeys)) {
 			t.Errorf("%s: second incarnation's log should show the replay of %d entries: %v\n%s", id, faultKeys, err, second)
-		}
-	}
-}
-
-func TestSmokeEndToEnd(t *testing.T) {
-	installKVD(t)
-	reqs, err := torx.Discover("kv.smoke")
-	if err != nil {
-		t.Fatalf("discover: %v", err)
-	}
-	root := t.TempDir()
-	res := torx.Run(context.Background(), localPool(t, 1), torx.SelfExecLauncher{}, reqs,
-		torx.RunOptions{ResultsDir: root})
-	if !res.Ok() {
-		t.Fatalf("suite failed:\n%s\n%s", res.Render(), failedJobLogs(root, res))
-	}
-	if res.Jobs[0].Summary == "" {
-		t.Errorf("kv.smoke: no summary")
-	}
-
-	// kvd's captured output was collected into the results tree, under the
-	// service's directory and the node's.
-	run, err := os.Readlink(filepath.Join(root, "latest"))
-	if err != nil {
-		t.Fatalf("latest symlink: %v", err)
-	}
-	logPath := filepath.Join(root, run, "kv.smoke", serviceName, "node-0", "stdout.log")
-	log, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("collected kvd log missing at %s: %v", logPath, err)
-	}
-	for _, want := range []string{"listening on", "shutting down", "stopped"} {
-		if !strings.Contains(string(log), want) {
-			t.Errorf("collected kvd log lacks %q:\n%s", want, log)
 		}
 	}
 }

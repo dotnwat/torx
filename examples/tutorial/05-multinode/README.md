@@ -3,7 +3,9 @@
 Until now every job used one node. This step gives the benchmark's load
 generator nodes of its own: [`load.go`](load.go) makes it a service, and
 [`bench.go`](bench.go) declares that service beside the server and gains a
-`nodes` parameter. Nothing else changes.
+`nodes` parameter. Nothing else changes: [`kvd.go`](kvd.go) is step 4's,
+fault methods included, though no job here calls them. The service is the
+part of a suite that accumulates; the jobs are the ones each step teaches.
 
 ## A service with nothing to start
 
@@ -29,8 +31,8 @@ comes from `jc.Params`, which is available in `Declare` as well as `Run`,
 so the job's demand depends on the variant.
 
 The pool sizes itself to the largest job by default, three nodes here, so
-`-nodes` is no longer needed; with `-parallel 3` the three-node variants run
-alone and the one-node jobs run alongside each other.
+`-nodes` is no longer needed. No two of these variants fit in it together,
+so they run one at a time.
 
 ## The address, again
 
@@ -69,7 +71,7 @@ mean nothing. Each node's raw report is kept as its own artifact,
 ## Running it
 
 ```sh
-go run ./examples/tutorial/05-multinode -parallel 3 'kv\.bench'
+go run ./examples/tutorial/05-multinode
 ```
 
 ```
@@ -102,4 +104,4 @@ results/latest/
 
 ## Next
 
-Step 6 runs this suite, unchanged, on containers.
+Step 6 gathers every job so far into one suite and runs it on containers.

@@ -3,9 +3,11 @@
 Six suites, each built on the one before, that take torx from a job with no
 service to a launcher that provisions docker containers and runs the suite
 against them over ssh. Read them in order. Each step's README says what the
-step adds, how to run it, and what to look at in the results; each step's
+step adds, how to run it, and what to look at in the results. Each step's
 code is the previous step's plus the change, so a diff between two steps is
-the lesson:
+the lesson, with one rule that keeps the diff small: a step carries only
+the jobs it teaches. A job an earlier step taught is not repeated until
+step 6, which gathers every job into one suite.
 
 ```sh
 diff -r examples/tutorial/02-service examples/tutorial/03-params

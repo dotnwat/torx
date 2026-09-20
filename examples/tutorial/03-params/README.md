@@ -5,7 +5,9 @@ runs once per point of a parameter matrix, drives kvd's load generator on
 the node, records what it measured, and keeps the raw output beside its
 result; and the service registers kvd's data log for collection when a job
 fails. The diff from step 2 is [`bench.go`](bench.go), a few lines in
-[`kvd.go`](kvd.go), and a registration in [`main.go`](main.go).
+[`kvd.go`](kvd.go), and a registration in [`main.go`](main.go). Step 2's
+`kv.smoke` is not repeated here: a step carries only the jobs it teaches,
+and step 6 gathers them all.
 
 ## Variants
 
@@ -41,7 +43,7 @@ than defaulting.
 ## Running it
 
 ```sh
-go run ./examples/tutorial/03-params -nodes 3 -parallel 3 'kv\.bench'
+go run ./examples/tutorial/03-params -nodes 3 -parallel 3
 ```
 
 ```
@@ -125,7 +127,7 @@ matrix and one explicit configuration a cross product cannot express:
 ```
 
 ```sh
-go run ./examples/tutorial/03-params -params examples/tutorial/03-params/params.json -parallel 3 'kv\.bench'
+go run ./examples/tutorial/03-params -params examples/tutorial/03-params/params.json -parallel 3
 ```
 
 ```

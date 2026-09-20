@@ -3,8 +3,9 @@
 This step has two parts. The first wraps the suite in a **launcher**, the
 front end a person or CI runs. The second gives the launcher a second
 backend: it provisions three docker containers, and runs the suite against
-them over ssh. The suite is step 5's, moved to [`suite/`](suite/) and
-changed in one line.
+them over ssh. The suite in [`suite/`](suite/) gathers every job from
+steps 2 to 5 into one binary, which is what a real suite looks like, and
+changes one line.
 
 Three things live here:
 
