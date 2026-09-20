@@ -75,8 +75,9 @@ func installKVD(t *testing.T) {
 }
 
 // failedJobLogs returns the collected test_log of every job that did not
-// pass, so a failure -- in CI especially, where the temporary results tree is
-// gone by the time anyone looks -- shows which wait or check gave out.
+// pass, so a failure shows which wait or check gave out. That matters in CI
+// especially, where the temporary results tree is gone by the time anyone
+// looks.
 func failedJobLogs(root string, res torx.SuiteResult) string {
 	run, err := os.Readlink(filepath.Join(root, "latest"))
 	if err != nil {

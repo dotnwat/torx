@@ -45,6 +45,12 @@ database.
   export PATH=/tmp/torx-bin:$PATH
   ```
 
+  or, if `$(go env GOPATH)/bin` is on your `PATH` already:
+
+  ```sh
+  go install ./examples/tutorial/kvd
+  ```
+
   A suite whose node has no kvd fails at once and says so. Step 6's launcher
   takes this chore over, which is part of what a launcher is for.
 - For step 6's docker part, docker with the compose plugin: Docker Desktop,

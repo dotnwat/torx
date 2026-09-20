@@ -11,7 +11,7 @@ import (
 
 // smokeJob is kv.smoke: one node, one key written and read back. It is the
 // smallest job that proves the binary runs, the service brings it to
-// readiness, and the API answers -- the shape every later job elaborates.
+// readiness, and the API answers. Every later job elaborates that shape.
 type smokeJob struct {
 	torx.JobBase
 	db *Service

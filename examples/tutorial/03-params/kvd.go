@@ -58,8 +58,8 @@ func New(name string) *Service {
 }
 
 // StartNode leases a port and launches kvd on n behind it. kvd binds every
-// interface, so a client that is not on the node -- the job, which runs in
-// the worker process -- can reach it, and the service advertises the node's
+// interface, so a client that is not on the node can reach it. The job is one,
+// since it runs in the worker process, and the service advertises the node's
 // reachable address (Addr) rather than the loopback. StartCaptured runs the
 // process with its output redirected to a node-local file that is collected
 // into the results tree after the job, and returns the process to signal,
@@ -145,10 +145,10 @@ func (s *Service) Client() *client.Client {
 }
 
 // preflight checks that kvd is on n's PATH by running its version command
-// through the node -- n.Exec runs a command to completion and returns what
+// through the node. n.Exec runs a command to completion and returns what
 // it printed and how it exited. Without the check, a node that was not
 // prepared fails at the end of the readiness wait with a timeout, and the
-// reason is only in the collected log; with it, the job fails at once and
+// reason is only in the collected log. With it, the job fails at once and
 // the error says what to do.
 func preflight(ctx context.Context, n *torx.Node) error {
 	res, err := n.Exec(ctx, torx.Command(binary, "version"))

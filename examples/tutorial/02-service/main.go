@@ -1,8 +1,8 @@
 //go:build unix
 
 // Command 02-service is the second step of the torx tutorial: the first
-// suite with a service. It deploys kvd -- the tutorial's small key-value
-// server, ../kvd -- onto one node, and its one job writes a key through
+// suite with a service. It deploys kvd, the tutorial's small key-value
+// server in ../kvd, onto one node, and its one job writes a key through
 // kvd's HTTP API and reads it back. README.md walks through it.
 package main
 
