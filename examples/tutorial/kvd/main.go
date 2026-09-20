@@ -24,7 +24,7 @@
 //
 // kvd knows nothing about torx. The tutorial's suites drive it the way they
 // would drive any server: by name from the node's PATH, through its command
-// line and its HTTP API.
+// line and its HTTP API. The client package beside it is theirs, not kvd's.
 package main
 
 import (

@@ -1,6 +1,10 @@
 //go:build unix
 
-package main
+// Package client speaks kvd's HTTP API. The tutorial's suites use it from
+// their jobs, which run in the worker process and reach kvd over the
+// network at the address the service advertises. kvd itself does not use
+// it: the system under test and the suites that test it share no code.
+package client
 
 import (
 	"context"
@@ -21,16 +25,14 @@ const requestTimeout = 10 * time.Second
 // ErrNotFound is returned by Get for a key that has no value.
 var ErrNotFound = errors.New("key not found")
 
-// Client speaks kvd's HTTP API from the job's own process. The job does not
-// run on a node; it reaches kvd over the network at the address the service
-// advertises.
+// Client is a client for one kvd.
 type Client struct {
 	base string
 	http *http.Client
 }
 
-// NewClient returns a client for the kvd at addr (host:port).
-func NewClient(addr string) *Client {
+// New returns a client for the kvd at addr (host:port).
+func New(addr string) *Client {
 	return &Client{base: "http://" + addr, http: &http.Client{Timeout: requestTimeout}}
 }
 

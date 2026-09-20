@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dotnwat/torx"
+	"github.com/dotnwat/torx/examples/tutorial/kvd/client"
 )
 
 // faultKeys is how many keys the fault jobs write before the fault.
@@ -101,7 +102,7 @@ func (j *gracefulJob) Run(ctx context.Context, jc *torx.JobContext) error {
 }
 
 // writeKeys writes n distinct keys and returns what it wrote.
-func writeKeys(ctx context.Context, c *Client, n int) (map[string]string, error) {
+func writeKeys(ctx context.Context, c *client.Client, n int) (map[string]string, error) {
 	want := make(map[string]string, n)
 	for i := range n {
 		key, value := fmt.Sprintf("key-%03d", i), fmt.Sprintf("value-%03d", i)
@@ -115,7 +116,7 @@ func writeKeys(ctx context.Context, c *Client, n int) (map[string]string, error)
 
 // verifyKeys reads every key back and fails on the first that is missing or
 // wrong.
-func verifyKeys(ctx context.Context, c *Client, want map[string]string) error {
+func verifyKeys(ctx context.Context, c *client.Client, want map[string]string) error {
 	for key, value := range want {
 		got, err := c.Get(ctx, key)
 		if err != nil {

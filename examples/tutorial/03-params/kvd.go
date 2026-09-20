@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dotnwat/torx"
+	"github.com/dotnwat/torx/examples/tutorial/kvd/client"
 )
 
 // binary is the server, resolved from the node's PATH under this fixed name.
@@ -147,8 +148,8 @@ func (s *Service) Addr() string {
 }
 
 // Client returns a client for kvd's HTTP API.
-func (s *Service) Client() *Client {
-	return NewClient(s.Addr())
+func (s *Service) Client() *client.Client {
+	return client.New(s.Addr())
 }
 
 // preflight checks that kvd is on n's PATH by running its version command

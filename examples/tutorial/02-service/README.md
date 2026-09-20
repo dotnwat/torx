@@ -73,8 +73,8 @@ with `jc.Register`. It must be pure -- construct and register, start nothing
 -- because the framework calls it once to size the job and again, in the
 worker, to rebuild it identically. `Run` gets a client from the service and
 does the test. The job runs in the worker process, not on a node, so it
-reaches kvd over the network at the address the service advertises;
-[`client.go`](client.go) is a small `net/http` client for kvd's API.
+reaches kvd over the network at the address the service advertises.
+[`../kvd/client`](../kvd/client/) is a small `net/http` client for kvd's API, shared by every step from here on.
 
 ## Running it
 
@@ -155,5 +155,5 @@ driver/worker split:
 
 Everything a service and job are made of that does not need a live server
 -- address handling, response parsing, readiness predicates -- is ordinary
-Go, and should be unit-tested as such; `client.go` is written to make that
+Go, and should be unit-tested as such. The client package is written to make that
 possible.
