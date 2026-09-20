@@ -1,42 +1,79 @@
 # torx
 
-[![CI](https://github.com/dotnwat/torx/actions/workflows/ci.yml/badge.svg)](https://github.com/dotnwat/torx/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/dotnwat/torx.svg)](https://pkg.go.dev/github.com/dotnwat/torx)
+torx is a distributed testing and benchmarking framework. It is inspired by
+Ceph's [teuthology](https://github.com/ceph/teuthology) and Confluent's
+[ducktape](https://github.com/confluentinc/ducktape). Both of those
+frameworks are written in Python, but the software they test can be written
+in any language: Ceph and Redpanda are C++ systems tested with them, and
+Kafka is a Java one.
 
-torx is a distributed testing and benchmarking framework. A **suite** is a Go
-binary that links the torx library and its own jobs; the same binary is both the
-driver and, re-executed, the worker that runs one job. You write two kinds of
-thing:
+Like those frameworks, torx models a test as a job in a suite. A job
+declares the services it needs and asserts on their behavior, and the
+machines under it sit behind abstractions such as `Node` and `Backend`, so
+that many kinds of networked software can be tested the same way.
 
-- a **Service** — how to run a process (a server, a client, a load generator) on
-  the nodes allocated to it, and
-- a **Job** — one test or benchmark, which declares the services it needs and
-  drives them.
+![torx architecture: the driver, its workers, their services on nodes, and the local, docker, and ssh backends](docs/architecture.svg)
+
+The suite binary is the driver. It discovers the jobs compiled into it, works
+out how many nodes each one needs from the services it declares, allocates
+those nodes from the pool, and runs each job in a worker, which is the same
+binary re-executed. Inside the worker the job's services start their
+processes on the nodes they were given, and every command, file transfer,
+and signal a service issues goes through the node's backend. torx ships two
+backends, local subprocesses and ssh. The tutorial's docker nodes are
+containers running sshd, reached through the ssh backend; a backend that
+drove containers through `docker exec` would register the same way and
+change nothing above it.
+
+# Getting started
+
+The examples are the way in. Each has a README that says how to run it and
+what to look at.
+
+- [`examples/tutorial/02-service`](examples/tutorial/02-service/) is the
+  smallest complete suite: a service that runs one server on one node, and
+  a job that writes a key to it and reads the key back. It is the second
+  step of the [tutorial](examples/tutorial/), six suites that each build on
+  the one before.
+- [`examples/tutorial/06-launcher`](examples/tutorial/06-launcher/) wraps
+  the suite in a launcher. torx does not build the suite, install the system
+  under test, or provision nodes, so in practice a project runs its suite
+  through a harness that does. This one builds the binaries, records how the
+  run was invoked, provisions docker containers, and runs the suite against
+  them over ssh.
+- [`examples/rqlite`](examples/rqlite/) tests a real distributed database,
+  rqlite, with the same building blocks: a cluster service whose nodes join
+  in order, parametrized and fault-injection jobs, a backup taken and
+  restored, and the launcher a team would run it through.
+
+# Reference
+
+A **suite** is a Go binary that links the torx library and its own jobs; the
+same binary is both the driver and, re-executed, the worker that runs one job.
+You write two kinds of thing:
+
+- a **Service**, which says how to run a process (a server, a client, a load
+  generator) on the nodes allocated to it, and
+- a **Job**, which is one test or benchmark: it declares the services it needs
+  and drives them.
 
 The framework does the rest: it sizes each job from the services it declares,
 allocates a disjoint set of nodes for it, starts the services, waits for
-readiness, runs the job body, and tears everything down — collecting logs and
+readiness, runs the job body, and tears everything down, collecting logs and
 artifacts along the way.
 
 A few concepts you will meet:
 
-- **Node** — one execution target. A node runs commands and moves files through
+- **Node** is one execution target. A node runs commands and moves files through
   its **Backend** (`LocalBackend` for local runs, the `ssh` backend for remote
   nodes); a service never touches the transport, it calls `node.Exec`,
   `node.Stream`, `node.WriteFile`, and so on. A node also carries a scratch
   directory, a port allocator, and its reachable address (`node.Addr()`).
-- **Pool** — the finite set of nodes a run owns. The driver allocates a sub-pool
+- **Pool** is the finite set of nodes a run owns. The driver allocates a sub-pool
   per job and frees it on completion, so two jobs never share a node.
-- **Result** — a job passes when `Run` returns `nil`. A benchmark additionally
-  records an opaque `Data` payload plus a one-line `Summary`; torx stores these
-  verbatim and never interprets them.
-
-A tutorial lives in [`examples/tutorial/`](examples/tutorial/): six suites
-that build on one another, from a job with no service to a launcher that
-runs the same suite on docker containers over ssh. A fuller example,
-[`examples/rqlite/`](examples/rqlite/), tests a real distributed database:
-a multi-node service, parametrized and fault-injection jobs, and the launcher
-harness a project builds around torx to run its suite.
+- **Result** is what a job leaves behind. A job passes when `Run` returns
+  `nil`. A benchmark additionally records an opaque `Data` payload plus a
+  one-line `Summary`; torx stores these verbatim and never interprets them.
 
 ## Authoring a Service
 
@@ -117,7 +154,7 @@ func (s *Service) WaitNode(ctx context.Context, n *torx.Node) error {
 
 // StopNode stops the server the way an operator would: SIGTERM, a grace period
 // to exit on its own, and a SIGKILL of its whole process group if it has not.
-// A server that had to be killed is noted rather than failed -- the node is
+// A server that had to be killed is noted rather than failed. The node is
 // clean either way, and a teardown error would quarantine it.
 func (s *Service) StopNode(ctx context.Context, n *torx.Node) error {
 	s.mu.Lock()
@@ -156,7 +193,7 @@ func (s *Service) Addr() string {
 
 Guidelines that keep a service portable across the local and ssh backends:
 
-- **Reach the node only through its methods** — `n.Exec`, `n.Stream`,
+- **Reach the node only through its methods**: `n.Exec`, `n.Stream`,
   `n.ReadFile`, `n.WriteFile`, `n.Mkdir`, `n.Rm`, `n.Signal`. They run on the
   node whether that is a local subprocess or a container over SSH.
 - **Bind broadly, advertise `n.Addr()`.** Bind the server to all interfaces so a
@@ -168,9 +205,9 @@ Guidelines that keep a service portable across the local and ssh backends:
   stderr to a node-local file and collects it into the results tree. For any
   other output (a `--log-file`, a data dump) call `s.AddArtifact(n,
   torx.Artifact{Name: ..., Path: ..., CollectOnPass: true})`. A service that
-  launches more than one process on a node over a job -- a crash-and-restart
-  test -- calls `s.SetCapturePolicy(torx.CaptureRotate)` at construction so each
-  launch moves the previous process's log aside as `stdout.<k>.log` and
+  launches more than one process on a node over a job, as a crash-and-restart
+  test does, calls `s.SetCapturePolicy(torx.CaptureRotate)` at construction so
+  each launch moves the previous process's log aside as `stdout.<k>.log` and
   collects it too, instead of discarding it (the default, `CaptureTruncate`).
 - **Stop through the process handle.** `StartCaptured` (and `n.Stream`) return
   a `torx.Process`: `Signal` reaches the program itself, not a shell around
@@ -184,9 +221,10 @@ Guidelines that keep a service portable across the local and ssh backends:
   `n.Exec(ctx, cmd)` instead of `StartCaptured`; it runs to completion and
   returns the captured `ExecResult` (exit code, stdout, stderr).
 
-A service that is not a per-node server — a rolling restart, a one-shot client, a
-single cloud-API call — can override the coarse lifecycle methods (`Start`,
-`Stop`, `Clean`, `Wait`) directly instead of implementing the per-node hooks.
+A service that is not a per-node server, such as a rolling restart, a one-shot
+client, or a single cloud-API call, can override the coarse lifecycle methods
+(`Start`, `Stop`, `Clean`, `Wait`) directly instead of implementing the per-node
+hooks; `NewServiceBase` then takes `nil` for the hooks.
 
 ## Authoring a Job (test or benchmark)
 
@@ -236,23 +274,23 @@ func (j *smokeJob) Run(ctx context.Context, jc *torx.JobContext) error {
 
 What `JobBase` gives you, and how to take control:
 
-- **`Setup`** starts every declared service and waits for each to be ready, in
-  registration order. Override `Setup` to control start order or start lazily.
+- **`Setup`** starts every declared service in registration order, then waits
+  for each to be ready. Override `Setup` to control start order or start lazily.
 - **`Teardown`** stops the services, collects their artifacts, cleans them, and
-  runs finalizers — in reverse order, aggregating every error. Override it only
-  if you need to, and call `jc.CollectArtifacts(ctx)` between stopping and
-  cleaning so logs survive.
+  runs finalizers, in that order and each in reverse registration order,
+  aggregating every error. Override it only if you need to, and call
+  `jc.CollectArtifacts(ctx)` between stopping and cleaning so logs survive.
 - **`jc.Defer(fn)`** registers a cleanup callback run during teardown.
-- **`jc.WriteArtifact(name, data)`** keeps a file the job itself produced -- a
-  backup it took, a report it downloaded, a histogram it measured -- at the top
-  of its results directory, beside `result.json`; the services' collected
-  files sit in directories below. The name must be a single path component
-  that is not a framework file or a service name in any letter case (a bad one
-  panics), writing it again replaces the file, concurrent writes are
-  serialized, and the file is kept whatever the outcome. In a
-  run that is not persisting results it is a no-op, and a write that fails is
-  recorded on the result as a persistence failure -- the suite is not Ok --
-  rather than failing the job over a full disk.
+- **`jc.WriteArtifact(name, data)`** keeps a file the job itself produced, such
+  as a backup it took, a report it downloaded, or a histogram it measured, at
+  the top of its results directory, beside `result.json`; the services'
+  collected files sit in directories below. The name must be a single path
+  component that is not a framework file or a service name in any letter case
+  (a bad one panics), writing it again replaces the file, concurrent writes are
+  serialized, and the file is kept whatever the outcome. In a run that is not
+  persisting results it is a no-op. A write that fails is recorded on the
+  result as a persistence failure, which makes the suite not Ok, rather than
+  failing the job over a full disk.
 - A **benchmark** records what it measured: `jc.Record(anyValue)` stores an
   opaque JSON payload and `jc.SetSummary("...")` a one-line human summary. torx
   never interprets `Data`; large outputs belong in artifacts, written with
@@ -270,17 +308,17 @@ cross product. Each variant gets a stable id and is selected, scheduled, and
 reported independently. Read `jc.Params` (with the typed `Int`/`String`/`Bool`
 getters) inside `Declare`/`Run`.
 
-A parametrized job — especially one meant to take externally supplied
-configurations (`-params`, below) — should also implement
+A parametrized job, and above all one meant to take externally supplied
+configurations (`-params`, below), should also implement
 
 ```go
 ResolveParams(p torx.Params) (torx.Params, error)
 ```
 
 Discovery calls it once per variant, before selection, duplicate detection,
-and id construction. The job returns the complete canonical map — defaults
-filled in, values type- and range-checked, unknown keys rejected — and that
-map is what the variant runs with, what its id is computed from, and what its
+and id construction. The job returns the complete canonical map: defaults
+filled in, values type- and range-checked, unknown keys rejected. That map is
+what the variant runs with, what its id is computed from, and what its
 results record. Without the hook, `{a:1}` and `{a:1, b:<default>}` are two
 different ids for the same configuration, and a mistyped key silently runs
 the default value. An error from the resolver fails the variant loudly before
@@ -292,7 +330,7 @@ on the recorded params in results, not on id strings.
 
 A suite is a Go binary whose `main` calls `torx.Main()` and whose jobs are
 registered via `init`. A job is discoverable only if its package is linked into
-that binary — so the file with the `torx.Register(...)` call must be imported
+that binary, so the file with the `torx.Register(...)` call must be imported
 (the `main` package here contains it directly).
 
 ## Running a suite
@@ -306,6 +344,7 @@ go run ./path/to/suite my.smoke
 go run ./path/to/suite -nodes 3 'my\..*'
 
 # Results land under ./results/<timestamp>/ with a `latest` symlink:
+#   results/<ts>/run.json
 #   results/<ts>/<jobVariant>/{events.ndjson, test_log, result.json,
 #                              <the job's own artifacts>,
 #                              <service>/<node>/stdout.log[, stdout.<k>.log]}
@@ -319,7 +358,7 @@ per-run tree; empty to disable), `-run-dir <dir>` (below), `-params <file>`
 **External parametrization.** `-params FILE` replaces the named jobs'
 compiled-in variants with externally supplied ones, so a specific
 configuration or sweep runs without editing the suite. The file is JSON keyed
-by job id; each entry gives `matrix` (dimension name → list of values,
+by job id; each entry gives `matrix` (a dimension name to its list of values,
 expanded to the cross product), `configs` (explicit parameter objects, for
 curated points a cross product cannot express), or both (the expanded matrix
 plus the configs):
@@ -334,24 +373,27 @@ plus the configs):
 ```
 
 Entries replace a job's compiled-in variants entirely; nothing is merged. The
-envelope is strict — unknown fields, empty forms, empty dimensions, and null
+envelope is strict, because externally supplied configuration must never
+degrade silently: unknown fields, empty forms, empty dimensions, and null
 values are rejected, an entry expanding to more than `torx.MaxVariants`
 (65536) variants is refused with the count named, and naming a job that is
-unknown or whose variants end up entirely unselected is an error — because
-externally supplied configuration must never degrade silently. Each supplied parameter set still passes through
-the job's `ResolveParams` (above), so ids stay canonical and two entries that
-resolve to the same configuration are rejected as duplicates.
+unknown or whose variants end up entirely unselected is an error. Each
+supplied parameter set still passes through the job's `ResolveParams`
+(above), so ids stay canonical and two entries that resolve to the same
+configuration are rejected as duplicates.
 
-**Launchers and `-run-dir`.** A tool that wraps a suite — building it, writing
-an invocation record, archiving the run's inputs — needs to know the exact run
-directory before the run starts ([`examples/rqlite/harness`](examples/rqlite/harness/)
-is one such tool): resolving the `latest` symlink afterwards
-races concurrent runs, and an interrupted run would leave the metadata with no
-home at all. Such a launcher creates the run directory itself, writes its
-metadata into it, and then invokes the suite with `-run-dir DIR`. torx uses
-the directory exactly as given — no timestamped subdirectory is minted and no
-`latest` symlink is maintained (those conveniences belong to `-results-dir`
-mode) — and fills in the per-variant subdirectories and the final `run.json`.
+**Launchers and `-run-dir`.** A tool that wraps a suite (building it, writing
+an invocation record, archiving the run's inputs) needs to know the exact run
+directory before the run starts; the tutorial's
+[launcher](examples/tutorial/06-launcher/launcher/) and
+[`examples/rqlite/harness`](examples/rqlite/harness/) are two such tools.
+Resolving the `latest` symlink afterwards races concurrent runs, and an
+interrupted run would leave the metadata with no home at all. Such a launcher
+creates the run directory itself, writes its metadata into it, and then
+invokes the suite with `-run-dir DIR`. torx uses the directory exactly as
+given: no timestamped subdirectory is minted and no `latest` symlink is
+maintained, since those conveniences belong to `-results-dir` mode, and torx
+fills in the per-variant subdirectories and the final `run.json`.
 The directory must already exist, and `-run-dir` is mutually exclusive with
 `-results-dir`. A launcher that wants its runs named and linked the way
 `-results-dir` mode does it mints the directory with `torx.MakeRunDir(root)`,
@@ -380,14 +422,14 @@ import _ "github.com/dotnwat/torx/ssh"
 
 A node needs a POSIX `sh`. To kill a service's whole process group on
 teardown, and to signal the service's own process rather than a shell around
-it, torx runs each streamed command as the leader of its own group.
-Under OpenSSH (macOS Remote Login included) with a `bash` or `zsh` login shell
-that is already so, and nothing else is needed; otherwise the wrapper creates
-the group with `setsid` (util-linux or busybox) or `perl`, whichever the node
-has -- which also covers a login shell that forks (`dash`), `ForceCommand`
-wrappers, and sshds that do not isolate commands at all (Dropbear). A node
-with none of those refuses to stream, and the error says what to install,
-rather than risk signalling the sshd itself.
+it, torx runs each streamed command as the leader of its own process group.
+Under OpenSSH with a `bash` or `zsh` login shell the command already is one,
+and nothing else is needed; macOS Remote Login is such a setup. Otherwise the
+wrapper creates the group with `setsid` from util-linux or busybox, or with
+`perl`, whichever the node has. That covers a login shell that forks
+(`dash`), `ForceCommand` wrappers, and an sshd that does not isolate commands
+at all (Dropbear). A node with none of those refuses to stream rather than
+risk signalling the sshd itself, and the error says what to install.
 
 Because a suite is one static binary, production and multi-node runs invoke it
 directly; `go run`/`go test` is one way to invoke the same binary, not a second
@@ -416,15 +458,7 @@ func TestSmoke(t *testing.T) {
 }
 ```
 
-Everything else — the pure functions a service and job are built from (readiness
-predicates, address handling, result parsing) — is ordinary Go unit-testable, and
-should be: design services and jobs so their logic is reachable without a running
-server wherever possible.
-
-## Status and license
-
-torx is pre-1.0. The API may change between minor versions; pin a tag. It
-drives Unix processes (process groups, POSIX signals, `sh`) and is developed
-on Linux and macOS; Windows is not supported.
-
-Licensed under the [Apache License, Version 2.0](LICENSE).
+Everything else is ordinary Go unit-testable, and should be: the pure
+functions a service and job are built from, such as readiness predicates,
+address handling, and result parsing. Design services and jobs so their logic
+is reachable without a running server wherever possible.
