@@ -15,6 +15,7 @@ package torx
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -35,6 +36,10 @@ const (
 	// headers. It leaves room for a readiness handler that does real work --
 	// a quorum check, a ping to a store -- under load.
 	httpProbeTimeout = 5 * time.Second
+	// maxProbeBody bounds how much of a readiness response WaitForHTTP reads
+	// before closing it. A readiness body is a status line, not a payload;
+	// reading it lets the transport reuse the connection at once.
+	maxProbeBody = 64 << 10
 )
 
 // WaitUntil polls until poll reports ready, poll returns an error, or ctx is
@@ -90,6 +95,22 @@ func WaitForPort(ctx context.Context, addr string) error {
 // costs one attempt rather than the whole wait; an endpoint that legitimately
 // takes longer to answer is not a readiness probe, and a caller that must poll
 // one builds on WaitUntil with its own client.
+//
+// The wait leaves nothing connected to the server: its probes run on a
+// transport of their own, whose connections are closed when the wait
+// returns, and never on the process-wide http.DefaultTransport a suite's own
+// clients usually share. A probe connection left pooled there is not only a
+// connection the server sees open; the caller's first request can race the
+// transport returning it, dial a second connection while it waits, be handed
+// the probe's, and leave the second one open and never used -- and a server
+// shutting down gracefully then waits on a connection nothing is in flight
+// on. (net/http's Shutdown gives such a connection five seconds.) The
+// transport of their own is the default transport's configuration -- proxy,
+// dial timeouts, a TLS config a suite set on it -- with a pool of its own. A
+// suite that replaced http.DefaultTransport with a RoundTripper of another
+// type has chosen how every request in the process travels, probes included:
+// they run on it as it is, and their connections are closed when the wait
+// returns only if it has a CloseIdleConnections method.
 func WaitForHTTP(ctx context.Context, url string) error {
 	return waitForHTTP(ctx, url, httpProbeTimeout)
 }
@@ -97,7 +118,8 @@ func WaitForHTTP(ctx context.Context, url string) error {
 // waitForHTTP is WaitForHTTP with the per-probe bound as a parameter, so tests
 // can make a stall cheap.
 func waitForHTTP(ctx context.Context, url string, probe time.Duration) error {
-	client := &http.Client{}
+	client := &http.Client{Transport: probeTransport()}
+	defer client.CloseIdleConnections()
 	return WaitUntil(ctx, func(ctx context.Context) (bool, error) {
 		ctx, cancel := context.WithTimeout(ctx, probe)
 		defer cancel()
@@ -109,9 +131,34 @@ func waitForHTTP(ctx context.Context, url string, probe time.Duration) error {
 		if err != nil {
 			return false, nil
 		}
+		// Read the body (bounded) before closing it: a body read to its end
+		// hands the connection back to the transport before Close returns,
+		// where one closed unread is drained and handed back afterwards, in
+		// the background. It keeps each probe's connection reusable by the
+		// next probe, and the transport's pool settled when the wait ends.
+		// Not on a 101, though: the transport hands that response's
+		// connection over as the body and stops watching the context, so a
+		// read of it blocks for as long as the peer stays silent, past any
+		// deadline. Close alone closes the connection.
+		if resp.StatusCode != http.StatusSwitchingProtocols {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxProbeBody))
+		}
 		_ = resp.Body.Close()
 		return resp.StatusCode < 500, nil
 	}, defaultPollBackoff)
+}
+
+// probeTransport returns the transport for one wait's probes: the default
+// transport's settings -- proxy from the environment, dial timeouts, TLS
+// configuration -- with a connection pool of its own. A default transport of
+// some other type cannot be cloned, and dropping its settings for a bare
+// http.Transport would fail probes its owner's own requests pass, so probes
+// run on it as it is.
+func probeTransport() http.RoundTripper {
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		return t.Clone()
+	}
+	return http.DefaultTransport
 }
 
 // WaitForLog waits until substr appears in the content returned by read. read
