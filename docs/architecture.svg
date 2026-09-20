@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="562" viewBox="0 0 760 562" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="334" viewBox="0 0 760 334" role="img" aria-labelledby="title desc">
   <title id="title">torx architecture</title>
-  <desc id="desc">The suite binary runs as the driver, which allocates nodes from its pool to each job and runs the job in a worker, the same binary re-executed. Inside a worker the job's services run on the nodes bound to them. Every command a service issues on a node goes through the node's Backend: local subprocesses, docker containers, or real hosts over ssh.</desc>
+  <desc id="desc">The suite binary runs as the driver, which allocates nodes from its pool to each job and runs the job in a worker, the same binary re-executed. Inside a worker the job's services run on the nodes bound to them. Every call a service makes on a node goes through the node's Backend: local subprocesses, docker containers, or real hosts over ssh.</desc>
   <style>
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 12px; fill: #1f2328; }
     .title { font-size: 13px; font-weight: 600; }
@@ -19,104 +19,101 @@
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#57606a"/>
     </marker>
   </defs>
-  <rect width="760" height="562" fill="#ffffff"/>
+  <rect width="760" height="334" fill="#ffffff"/>
 
   <!-- the driver: the suite binary, and the pool it allocates from -->
-  <rect class="outer" x="20" y="20" width="720" height="128" rx="6"/>
-  <text x="36" y="44"><tspan class="title">driver</tspan> <tspan class="muted">the suite binary</tspan></text>
-  <text x="36" y="66">discovers the jobs compiled into it, works out how many nodes each needs from the</text>
-  <text x="36" y="82">services it declares, allocates it disjoint nodes from the pool, runs it in a worker,</text>
-  <text x="36" y="98">which is the same binary re-executed, and writes the results tree</text>
-  <text class="muted" x="36" y="128">pool</text>
+  <rect class="outer" x="16" y="16" width="728" height="66" rx="6"/>
+  <text x="30" y="38"><tspan class="title">driver</tspan> <tspan class="muted">the suite binary:</tspan> discovers jobs, allocates each one disjoint nodes from the pool, runs it in a worker</text>
+  <text class="muted" x="30" y="64">pool</text>
   <g class="node a">
-    <rect x="76" y="114" width="34" height="20" rx="4"/>
-    <text x="93" y="128" text-anchor="middle">n0</text>
+    <rect x="64" y="50" width="34" height="20" rx="4"/>
+    <text x="81" y="64" text-anchor="middle">n0</text>
   </g>
   <g class="node a">
-    <rect x="116" y="114" width="34" height="20" rx="4"/>
-    <text x="133" y="128" text-anchor="middle">n1</text>
+    <rect x="104" y="50" width="34" height="20" rx="4"/>
+    <text x="121" y="64" text-anchor="middle">n1</text>
   </g>
   <g class="node a">
-    <rect x="156" y="114" width="34" height="20" rx="4"/>
-    <text x="173" y="128" text-anchor="middle">n2</text>
+    <rect x="144" y="50" width="34" height="20" rx="4"/>
+    <text x="161" y="64" text-anchor="middle">n2</text>
   </g>
   <g class="node b">
-    <rect x="196" y="114" width="34" height="20" rx="4"/>
-    <text x="213" y="128" text-anchor="middle">n3</text>
+    <rect x="184" y="50" width="34" height="20" rx="4"/>
+    <text x="201" y="64" text-anchor="middle">n3</text>
   </g>
   <g class="node b">
-    <rect x="236" y="114" width="34" height="20" rx="4"/>
-    <text x="253" y="128" text-anchor="middle">n4</text>
+    <rect x="224" y="50" width="34" height="20" rx="4"/>
+    <text x="241" y="64" text-anchor="middle">n4</text>
   </g>
   <g class="node b">
-    <rect x="276" y="114" width="34" height="20" rx="4"/>
-    <text x="293" y="128" text-anchor="middle">n5</text>
+    <rect x="264" y="50" width="34" height="20" rx="4"/>
+    <text x="281" y="64" text-anchor="middle">n5</text>
   </g>
-  <text class="small muted" x="340" y="123">a node is one execution target: a scratch directory,</text>
-  <text class="small muted" x="340" y="136">a port allocator, a reachable address, and a Backend</text>
+  <text class="small muted" x="314" y="64">a node: scratch directory, port allocator, reachable address, Backend</text>
 
   <!-- the driver hands each worker one assignment -->
-  <line class="arrow" x1="194" y1="148" x2="194" y2="210"/>
-  <line class="arrow" x1="566" y1="148" x2="566" y2="210"/>
-  <text class="muted" x="380" y="184" text-anchor="middle">assignment: job id, params, nodes</text>
+  <line class="arrow" x1="190" y1="82" x2="190" y2="120"/>
+  <line class="arrow" x1="570" y1="82" x2="570" y2="120"/>
+  <text class="muted" x="380" y="106" text-anchor="middle">assignment: job id, params, nodes</text>
 
   <!-- worker running job A -->
-  <rect class="outer" x="20" y="212" width="348" height="140" rx="6"/>
-  <text x="36" y="236"><tspan class="title">worker</tspan> <tspan class="muted">running job A</tspan></text>
-  <rect class="inner" x="36" y="252" width="316" height="34" rx="4"/>
-  <text x="48" y="274"><tspan class="muted">service</tspan> <tspan class="mono">server</tspan></text>
+  <rect class="outer" x="16" y="122" width="348" height="72" rx="6"/>
+  <text x="30" y="143"><tspan class="title">worker</tspan> <tspan class="muted">the same binary, re-executed, running job A</tspan></text>
+  <text class="muted" x="30" y="172">services</text>
+  <rect class="inner" x="86" y="154" width="144" height="28" rx="4"/>
+  <text class="mono" x="96" y="172">server</text>
     <g class="node a">
-      <rect x="170" y="259" width="34" height="20" rx="4"/>
-      <text x="187" y="273" text-anchor="middle">n0</text>
+      <rect x="146" y="158" width="34" height="20" rx="4"/>
+      <text x="163" y="172" text-anchor="middle">n0</text>
     </g>
     <g class="node a">
-      <rect x="210" y="259" width="34" height="20" rx="4"/>
-      <text x="227" y="273" text-anchor="middle">n1</text>
+      <rect x="186" y="158" width="34" height="20" rx="4"/>
+      <text x="203" y="172" text-anchor="middle">n1</text>
     </g>
-  <rect class="inner" x="36" y="296" width="316" height="34" rx="4"/>
-  <text x="48" y="318"><tspan class="muted">service</tspan> <tspan class="mono">load</tspan></text>
+  <rect class="inner" x="238" y="154" width="90" height="28" rx="4"/>
+  <text class="mono" x="248" y="172">load</text>
     <g class="node a">
-      <rect x="170" y="303" width="34" height="20" rx="4"/>
-      <text x="187" y="317" text-anchor="middle">n2</text>
+      <rect x="284" y="158" width="34" height="20" rx="4"/>
+      <text x="301" y="172" text-anchor="middle">n2</text>
     </g>
 
   <!-- worker running job B -->
-  <rect class="outer" x="392" y="212" width="348" height="140" rx="6"/>
-  <text x="408" y="236"><tspan class="title">worker</tspan> <tspan class="muted">running job B</tspan></text>
-  <rect class="inner" x="408" y="252" width="316" height="34" rx="4"/>
-  <text x="420" y="274"><tspan class="muted">service</tspan> <tspan class="mono">server</tspan></text>
+  <rect class="outer" x="396" y="122" width="348" height="72" rx="6"/>
+  <text x="410" y="143"><tspan class="title">worker</tspan> <tspan class="muted">running job B</tspan></text>
+  <text class="muted" x="410" y="172">services</text>
+  <rect class="inner" x="466" y="154" width="104" height="28" rx="4"/>
+  <text class="mono" x="476" y="172">server</text>
     <g class="node b">
-      <rect x="542" y="259" width="34" height="20" rx="4"/>
-      <text x="559" y="273" text-anchor="middle">n3</text>
+      <rect x="526" y="158" width="34" height="20" rx="4"/>
+      <text x="543" y="172" text-anchor="middle">n3</text>
     </g>
-  <rect class="inner" x="408" y="296" width="316" height="34" rx="4"/>
-  <text x="420" y="318"><tspan class="muted">service</tspan> <tspan class="mono">load</tspan></text>
+  <rect class="inner" x="578" y="154" width="130" height="28" rx="4"/>
+  <text class="mono" x="588" y="172">load</text>
     <g class="node b">
-      <rect x="542" y="303" width="34" height="20" rx="4"/>
-      <text x="559" y="317" text-anchor="middle">n4</text>
+      <rect x="624" y="158" width="34" height="20" rx="4"/>
+      <text x="641" y="172" text-anchor="middle">n4</text>
     </g>
     <g class="node b">
-      <rect x="582" y="303" width="34" height="20" rx="4"/>
-      <text x="599" y="317" text-anchor="middle">n5</text>
+      <rect x="664" y="158" width="34" height="20" rx="4"/>
+      <text x="681" y="172" text-anchor="middle">n5</text>
     </g>
 
   <!-- every call a service makes on a node goes through the node's Backend -->
-  <line class="arrow" x1="194" y1="352" x2="194" y2="414"/>
-  <line class="arrow" x1="566" y1="352" x2="566" y2="414"/>
-  <text class="muted" x="380" y="381" text-anchor="middle">every command, file transfer, and signal</text>
-  <text class="muted" x="380" y="396" text-anchor="middle">a service issues on a node</text>
+  <line class="arrow" x1="190" y1="194" x2="190" y2="232"/>
+  <line class="arrow" x1="570" y1="194" x2="570" y2="232"/>
+  <text class="muted" x="380" y="218" text-anchor="middle">every call a service makes on a node</text>
 
   <!-- the Backend interface and the transports that implement it -->
-  <rect class="outer" x="20" y="416" width="720" height="126" rx="6"/>
-  <text x="36" y="440"><tspan class="title">Backend</tspan> <tspan class="muted">one per node</tspan></text>
-  <text class="mono" x="36" y="460" xml:space="preserve">Exec  Stream  Put  Get  ReadFile  WriteFile  Exists  Mkdir  Rm  Signal</text>
-  <rect class="inner" x="36" y="474" width="218" height="52" rx="4"/>
-  <text class="title" x="145" y="496" text-anchor="middle">Local</text>
-  <text class="small muted" x="145" y="514" text-anchor="middle">subprocesses on the driver host</text>
-  <rect class="inner" x="270" y="474" width="218" height="52" rx="4"/>
-  <text class="title" x="379" y="496" text-anchor="middle">Docker</text>
-  <text class="small muted" x="379" y="514" text-anchor="middle">containers, through docker exec</text>
-  <rect class="inner" x="504" y="474" width="218" height="52" rx="4"/>
-  <text class="title" x="613" y="496" text-anchor="middle">SSH</text>
-  <text class="small muted" x="613" y="514" text-anchor="middle">real hosts and VMs on a real network</text>
+  <rect class="outer" x="16" y="234" width="728" height="84" rx="6"/>
+  <text x="30" y="255"><tspan class="title">Backend</tspan> <tspan class="muted">one per node</tspan></text>
+  <text class="mono" x="180" y="255" xml:space="preserve">Exec  Stream  Put  Get  ReadFile  WriteFile  Exists  Mkdir  Rm  Signal</text>
+  <rect class="inner" x="30" y="264" width="225" height="44" rx="4"/>
+  <text class="title" x="142" y="282" text-anchor="middle">Local</text>
+  <text class="small muted" x="142" y="298" text-anchor="middle">subprocesses on the driver host</text>
+  <rect class="inner" x="267" y="264" width="225" height="44" rx="4"/>
+  <text class="title" x="379" y="282" text-anchor="middle">Docker</text>
+  <text class="small muted" x="379" y="298" text-anchor="middle">containers, through docker exec</text>
+  <rect class="inner" x="504" y="264" width="225" height="44" rx="4"/>
+  <text class="title" x="616" y="282" text-anchor="middle">SSH</text>
+  <text class="small muted" x="616" y="298" text-anchor="middle">real hosts and VMs on a real network</text>
 </svg>
