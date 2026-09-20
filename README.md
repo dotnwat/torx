@@ -12,39 +12,7 @@ declares the services it needs and asserts on their behavior, and the
 machines under it sit behind abstractions such as `Node` and `Backend`, so
 that many kinds of networked software can be tested the same way.
 
-```
-suite binary, run as the driver
-+--------------------------------------------------------------------+
-| discovers the jobs compiled into it, works out how many nodes      |
-| each one needs from the services it declares, allocates it         |
-| disjoint nodes from the pool, runs it in a worker process, and     |
-| writes the results tree                                            |
-|                                                                    |
-|   pool: [n0] [n1] [n2] [n3] [n4] [n5]                              |
-+--------------------------------------------------------------------+
-        |                                    |
-        | assignment: job id, params, nodes  |
-        v                                    v
-+----------------------------+       +----------------------------+
-| worker: the same binary,   |       | worker, running job B      |
-| re-executed, running job A |       |                            |
-|   service "server"  n0 n1  |       |   service "server"  n3     |
-|   service "load"    n2     |       |   service "load"    n4 n5  |
-|                            |       |                            |
-|   each Node: scratch dir,  |       |                            |
-|   port allocator, address  |       |                            |
-+----------------------------+       +----------------------------+
-        |                                        |
-        |  Exec, Stream, WriteFile, Signal, ...  |
-        |  every call goes through the Node's    |
-        |  Backend, one of:                      |
-        v                                        v
-+--------------------+   +--------------------+   +------------------------+
-| Local              |   | Docker             |   | SSH                    |
-| subprocesses on    |   | containers         |   | real hosts and VMs     |
-| the driver host    |   |                    |   | on a real network      |
-+--------------------+   +--------------------+   +------------------------+
-```
+![torx architecture: the driver, its workers, their services on nodes, and the local, docker, and ssh backends](docs/architecture.svg)
 
 The suite binary is the driver. It discovers the jobs compiled into it, works
 out how many nodes each one needs from the services it declares, allocates
