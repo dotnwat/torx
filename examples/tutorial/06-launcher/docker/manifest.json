@@ -1,0 +1,52 @@
+{
+  "nodes": [
+    {
+      "name": "n0",
+      "address": "n0",
+      "scratch": "/var/tmp/torx",
+      "ports": { "min": 30000, "max": 31000 },
+      "backend": {
+        "kind": "ssh",
+        "host": "n0",
+        "config": {
+          "user": "torx",
+          "identity_file": "/torx/run/keys/client_key",
+          "known_hosts": "/torx/run/keys/known_hosts",
+          "connect_timeout_ms": 5000
+        }
+      }
+    },
+    {
+      "name": "n1",
+      "address": "n1",
+      "scratch": "/var/tmp/torx",
+      "ports": { "min": 30000, "max": 31000 },
+      "backend": {
+        "kind": "ssh",
+        "host": "n1",
+        "config": {
+          "user": "torx",
+          "identity_file": "/torx/run/keys/client_key",
+          "known_hosts": "/torx/run/keys/known_hosts",
+          "connect_timeout_ms": 5000
+        }
+      }
+    },
+    {
+      "name": "n2",
+      "address": "n2",
+      "scratch": "/var/tmp/torx",
+      "ports": { "min": 30000, "max": 31000 },
+      "backend": {
+        "kind": "ssh",
+        "host": "n2",
+        "config": {
+          "user": "torx",
+          "identity_file": "/torx/run/keys/client_key",
+          "known_hosts": "/torx/run/keys/known_hosts",
+          "connect_timeout_ms": 5000
+        }
+      }
+    }
+  ]
+}

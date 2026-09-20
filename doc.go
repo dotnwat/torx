@@ -13,9 +13,9 @@
 // See [Main], [Register], [Job], and [Service] for the programming model, and
 // the README for a walkthrough. The [LocalBackend] runs nodes as local
 // subprocesses; the ssh subpackage adds remote nodes behind the same [Backend]
-// interface. A complete suite lives under examples/echo, and a fuller one --
-// a real distributed database with a multi-node service, fault injection, and
-// a launcher harness -- under examples/rqlite.
+// interface. A step-by-step tutorial lives under examples/tutorial, and a
+// fuller example -- a real distributed database with a multi-node service,
+// fault injection, and a launcher harness -- under examples/rqlite.
 //
 // torx drives Unix processes (process groups, POSIX signals, sh); Windows is
 // not supported. It is pre-1.0: the API may change between minor versions.

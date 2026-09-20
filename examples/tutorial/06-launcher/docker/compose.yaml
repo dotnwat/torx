@@ -1,0 +1,46 @@
+# The tutorial's docker pool: three nodes and a driver on one network.
+#
+# The launcher runs this file with the run directory as the project
+# directory, so "." here is the run directory: the node image is built from
+# it (bin/kvd, keys/, docker/sshd_config), and it is mounted into the driver
+# at /torx/run, where the suite finds its binary, the manifest, and the keys,
+# and writes its results. Compose gives each service a name on the network,
+# n0, n1, and n2, which is what the manifest addresses the nodes by.
+
+x-node: &node
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  # No image name, so compose names each node's image after the project and
+  # every run builds, and at teardown removes, its own. The image carries
+  # the run's host key and authorized client key; under a name shared by
+  # every run, the latest launch's build would retag it, and a run still
+  # going would find its nodes recreated from that image, presenting a host
+  # key its known_hosts refuses.
+
+  # A node is ready once its sshd accepts connections; "compose up --wait"
+  # waits for that before the launcher runs the suite.
+  healthcheck:
+    test: ["CMD", "nc", "-z", "127.0.0.1", "22"]
+    interval: 1s
+    timeout: 1s
+    retries: 30
+
+services:
+  n0: *node
+  n1: *node
+  n2: *node
+
+  # The driver runs the suite. It needs nothing but the static binary in the
+  # mounted run directory. It runs as the launching user (the launcher sets
+  # TORX_UID and TORX_GID) so the results it writes are theirs.
+  driver:
+    image: alpine:3.22
+    user: "${TORX_UID:-0}:${TORX_GID:-0}"
+    volumes:
+      - .:/torx/run
+    working_dir: /torx/run
+    depends_on:
+      n0: { condition: service_healthy }
+      n1: { condition: service_healthy }
+      n2: { condition: service_healthy }
