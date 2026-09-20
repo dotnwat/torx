@@ -12,7 +12,7 @@ declares the services it needs and asserts on their behavior, and the
 machines under it sit behind abstractions such as `Node` and `Backend`, so
 that many kinds of networked software can be tested the same way.
 
-![torx architecture: the driver, its workers, their services on nodes, and the local, docker, and ssh backends](docs/architecture.svg)
+![torx architecture: the driver, its workers, their services on nodes, and the local, docker, and ssh backends](architecture.svg)
 
 The suite binary is the driver. It discovers the jobs compiled into it, works
 out how many nodes each one needs from the services it declares, allocates
