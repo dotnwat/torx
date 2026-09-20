@@ -6,9 +6,12 @@
 *.test
 *.out
 *.prof
-/examples/echo/echo
 /examples/rqlite/qa/qa
 /examples/rqlite/harness/harness
+/examples/tutorial/kvd/kvd
+/examples/tutorial/0[1-5]-*/0[1-5]-*
+/examples/tutorial/06-launcher/suite/suite
+/examples/tutorial/06-launcher/launcher/launcher
 
 # Editor and OS noise
 .DS_Store

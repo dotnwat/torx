@@ -31,8 +31,9 @@ A few concepts you will meet:
   records an opaque `Data` payload plus a one-line `Summary`; torx stores these
   verbatim and never interprets them.
 
-A worked example lives in [`examples/echo/`](examples/echo/): a tiny echo
-service and job, the whole vertical slice in one file. A fuller one,
+A tutorial lives in [`examples/tutorial/`](examples/tutorial/): six suites
+that build on one another, from a job with no service to a launcher that
+runs the same suite on docker containers over ssh. A fuller example,
 [`examples/rqlite/`](examples/rqlite/), tests a real distributed database:
 a multi-node service, parametrized and fault-injection jobs, and the launcher
 harness a project builds around torx to run its suite.
@@ -396,7 +397,7 @@ code path.
 
 Cross-language wire compatibility and full service lifecycles need a live server,
 so a suite is usually exercised by running it end to end and asserting the
-result. The idiom (see [`examples/echo/echo_test.go`](examples/echo/echo_test.go)) is a Go test
+result. The idiom (see [`examples/tutorial/02-service/tutorial_test.go`](examples/tutorial/02-service/tutorial_test.go)) is a Go test
 whose `TestMain` lets the test binary double as the torx worker, then runs the
 suite through the real driver/worker split on a small local pool:
 

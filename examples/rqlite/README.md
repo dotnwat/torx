@@ -1,8 +1,9 @@
 # examples/rqlite — a QA suite for a real distributed system
 
-[`examples/echo`](../echo/) shows torx's programming model in one file. This
-example shows what a project actually builds around torx: a suite that tests a
-real distributed database, and the launcher that a team runs it through.
+[`examples/tutorial`](../tutorial/) teaches torx's programming model step by
+step. This example shows what a project actually builds around torx: a suite
+that tests a real distributed database, and the launcher that a team runs it
+through.
 
 The system under test is [rqlite](https://rqlite.io), a distributed SQLite
 replicated with Raft. It suits a test suite well: one static binary, a plain

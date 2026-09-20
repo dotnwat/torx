@@ -1,0 +1,6 @@
+{
+  "kv.bench": {
+    "matrix": { "clients": [8, 32], "seconds": [1] },
+    "configs": [ { "clients": 64, "seconds": 3 } ]
+  }
+}

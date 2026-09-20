@@ -85,3 +85,24 @@ jobs:
           TORX_RQLITE_REQUIRED: "1"
       - name: run the suite through the harness
         run: go run ./examples/rqlite/harness
+
+  # The tutorial's last step provisions docker containers and runs the suite
+  # against them over ssh. The matrix above skips that test where docker is
+  # not usable; this job runs it with the skip turned into a failure, and
+  # then runs every tutorial job through the launcher on the docker backend.
+  example-tutorial:
+    name: example (tutorial, docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - name: docker is usable
+        run: docker info
+      - name: tutorial tests (docker required)
+        run: go test -race -count=1 ./examples/tutorial/...
+        env:
+          TORX_DOCKER_REQUIRED: "1"
+      - name: run the suite through the launcher on docker
+        run: go run ./examples/tutorial/06-launcher/launcher -backend docker -parallel 3
