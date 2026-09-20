@@ -10,7 +10,8 @@
 // serve keeps every write in an append-only log under DIR and replays it
 // before it opens its port, so a restart -- even after a kill -- serves what
 // was written; answers 200 on /readyz once it is listening; and exits 0 on
-// SIGTERM after finishing the requests in flight. load runs N clients that
+// SIGTERM once the requests in flight have finished, closing the connections
+// that carried none. load runs N clients that
 // each write a key and read it back for S seconds, and prints one JSON
 // summary; each client checks it reads back what it wrote, so two load
 // generators against one server must be given distinct prefixes. version
@@ -115,8 +116,7 @@ func serveMain(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	conns := &connTracker{conns: map[net.Conn]connInfo{}}
-	srv := &http.Server{Handler: st.handler(), ConnState: conns.onState}
+	srv, conns := newServer(st)
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
 	select {
@@ -125,11 +125,6 @@ func serveMain(args []string) int {
 		return 1
 	case <-ctx.Done():
 	}
-	// A graceful shutdown finishes the requests in flight and closes the
-	// idle connections. A connection that was accepted but never sent a
-	// request is neither, and the server gives it a few seconds before
-	// treating it as idle -- which is exactly what a slow shutdown looks
-	// like from outside, so say what was open going in.
 	log.Printf("shutting down with %s", conns.summary())
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
@@ -144,6 +139,23 @@ func serveMain(args []string) int {
 // shutdownTimeout bounds how long a graceful shutdown waits for requests in
 // flight before the server gives up and exits non-zero.
 const shutdownTimeout = 5 * time.Second
+
+// newServer builds the HTTP server over st, with its connections tracked.
+//
+// A graceful Shutdown finishes the requests in flight and closes the idle
+// connections. A connection that was accepted but never sent a request is
+// neither: net/http gives it five seconds to speak before treating it as
+// idle, which from outside is a server that takes five seconds to stop.
+// Such connections are common -- a browser pre-connects, and an HTTP
+// client library can leave a pooled connection it never used -- and nothing
+// is in flight on them, so they are closed as soon as Shutdown has closed
+// the listener.
+func newServer(st *store) (*http.Server, *connTracker) {
+	conns := &connTracker{conns: map[net.Conn]connInfo{}}
+	srv := &http.Server{Handler: st.handler(), ConnState: conns.onState}
+	srv.RegisterOnShutdown(conns.closeNew)
+	return srv, conns
+}
 
 // connInfo is a connection's last state and when it entered it.
 type connInfo struct {
@@ -165,6 +177,19 @@ func (t *connTracker) onState(c net.Conn, st http.ConnState) {
 		delete(t.conns, c)
 	default:
 		t.conns[c] = connInfo{state: st, since: time.Now()}
+	}
+}
+
+// closeNew closes every connection that has not sent a request. The server
+// notices the close on its next read and drops the connection from its own
+// accounting.
+func (t *connTracker) closeNew() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for c, info := range t.conns {
+		if info.state == http.StateNew {
+			_ = c.Close()
+		}
 	}
 }
 

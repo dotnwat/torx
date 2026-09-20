@@ -79,9 +79,42 @@ recorded, then the teardown's graceful stop:
 ```
 kvd: 2026/09/19 16:23:14.916581 replayed 100 entries from /var/folders/.../node-0/kvd/data/kv.log
 kvd: 2026/09/19 16:23:14.916839 listening on [::]:61317
-kvd: 2026/09/19 16:23:15.017992 shutting down
+kvd: 2026/09/19 16:23:15.017992 shutting down with 1 connection(s), all idle
 kvd: 2026/09/19 16:23:15.018086 stopped
 ```
+
+## What the first Linux run found
+
+`kv.graceful` failed on its first run in CI, on Linux, one time in two:
+
+```
+FAIL   kv.graceful  (5.215s)
+        kvd on node-0 exited with status 1 on SIGTERM, want 0
+```
+
+Five seconds, then a non-zero exit. kvd's log said what it was waiting for:
+
+```
+kvd: 2026/09/20 01:22:39.073428 shutting down with 2 connection(s), not idle: 127.0.0.1:35568 new for 2ms
+```
+
+A second connection, on which no request had ever been sent. Go's HTTP
+server, asked to shut down gracefully, finishes the requests in flight and
+closes the idle connections, but a connection that has never spoken is
+neither, and the server gives it five seconds to say something before
+treating it as idle. That was longer than kvd's own shutdown budget and
+longer than the grace period the service allows, so the stop failed either
+way. The connection was the client's: Go's HTTP client had dialed it while
+waiting for a pooled one to become free, won the race, and never used it.
+Browsers do the same thing on purpose, pre-connecting to a server they
+expect to talk to.
+
+The fix is in the server, where it belongs: nothing is in flight on such a
+connection, so kvd closes it as soon as the listener is closed instead of
+waiting, and its shutdown log says what was open going in. The stop is
+then a couple of milliseconds again, and a server that could not stop in
+time because of a client that never spoke to it is exactly what the
+graceful job exists to catch.
 
 ## The jobs
 

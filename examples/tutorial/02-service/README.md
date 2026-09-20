@@ -107,7 +107,7 @@ results/latest/
 ```
 kvd: 2026/09/19 16:17:56.137729 replayed 0 entries from /var/folders/.../torx/node-0/kvd/data/kv.log
 kvd: 2026/09/19 16:17:56.138937 listening on [::]:60587
-kvd: 2026/09/19 16:17:56.183058 shutting down
+kvd: 2026/09/19 16:17:56.183058 shutting down with 1 connection(s), all idle
 kvd: 2026/09/19 16:17:56.183221 stopped
 ```
 

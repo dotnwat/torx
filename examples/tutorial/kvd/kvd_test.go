@@ -3,7 +3,10 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -102,5 +105,55 @@ func TestPercentile(t *testing.T) {
 	}
 	if p := percentile(lat, 0.99); p != 100 {
 		t.Errorf("p99 = %v, want 100", p)
+	}
+}
+
+// TestShutdownClosesUnusedConnections is the regression for a five-second
+// stop: a connection that never sent a request must not hold Shutdown up.
+// The server itself would wait five seconds for it; kvd closes it at once.
+func TestShutdownClosesUnusedConnections(t *testing.T) {
+	st, err := openStore(filepath.Join(t.TempDir(), "kv.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	srv, conns := newServer(st)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(ln) }()
+
+	// One connection that speaks, one that never does.
+	hc := &http.Client{}
+	if err := put(hc, "http://"+ln.Addr().String(), "k", "v"); err != nil {
+		t.Fatal(err)
+	}
+	silent, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = silent.Close() }()
+	// Wait until the server has accepted the silent connection.
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(conns.summary(), "new") {
+		if time.Now().After(deadline) {
+			t.Fatalf("server never saw the silent connection: %s", conns.summary())
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown: %v after %s; open: %s", err, time.Since(start), conns.summary())
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("shutdown took %s with an unused connection open, want well under a second", took)
+	}
+	if err := <-served; !errors.Is(err, http.ErrServerClosed) {
+		t.Errorf("Serve returned %v, want ErrServerClosed", err)
 	}
 }
