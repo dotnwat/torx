@@ -9,7 +9,6 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -45,7 +44,6 @@ const (
 type Service struct {
 	*torx.ServiceBase
 
-	mu   sync.Mutex
 	port int          // the leased port; 0 until the first start
 	proc torx.Process // the running kvd; nil when it is not running
 }
@@ -89,9 +87,7 @@ func (s *Service) StartNode(ctx context.Context, n *torx.Node) error {
 	// registered without CollectOnPass is gathered only on failure, into the
 	// service's directory in the results tree beside the captured output.
 	s.AddArtifact(n, torx.Artifact{Name: "kv.log", Path: s.dataDir(n) + "/kv.log"})
-	s.mu.Lock()
 	s.port, s.proc = port, proc
-	s.mu.Unlock()
 	return nil
 }
 
@@ -111,10 +107,8 @@ func (s *Service) WaitNode(ctx context.Context, n *torx.Node) error {
 // hook marks the node dirty and quarantines it. The port goes back to the
 // allocator once the process is down.
 func (s *Service) StopNode(ctx context.Context, n *torx.Node) error {
-	s.mu.Lock()
 	port, proc := s.port, s.proc
 	s.port, s.proc = 0, nil
-	s.mu.Unlock()
 	if proc == nil {
 		return nil
 	}
@@ -139,8 +133,6 @@ func (s *Service) CleanNode(ctx context.Context, n *torx.Node) error {
 // Addr returns the host:port a client dials to reach kvd, or "" before the
 // service has started.
 func (s *Service) Addr() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.port == 0 {
 		return ""
 	}

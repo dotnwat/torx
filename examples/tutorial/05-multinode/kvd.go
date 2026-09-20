@@ -48,6 +48,12 @@ const (
 type Service struct {
 	*torx.ServiceBase
 
+	// mu guards port and proc. The framework calls the four hooks one at a
+	// time, so they never race with each other, and the earlier steps had no
+	// lock. Crash, Shutdown, and Restart are different: a job calls them
+	// from Run, which may be using the service from other goroutines at the
+	// same time, clients reading Addr while a fault is injected, and the
+	// lock keeps the two fields consistent for all of them.
 	mu sync.Mutex
 	// port is the leased port. It is kvd's address as far as a job is
 	// concerned, so it is kept across Crash, Shutdown, and Restart and only
