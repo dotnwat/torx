@@ -43,6 +43,15 @@ it on the same data directory. Only `StopNode`, when the framework stops the
 service, releases it. `Addr()` is therefore stable across a fault, and a job
 holds one address for the whole run.
 
+## A lock, now that a job can reach in
+
+The service gains a mutex around `port` and `proc`. Until now only the
+framework touched them, one hook at a time, so the earlier steps had no
+lock. `Crash`, `Shutdown`, and `Restart` are called from the job's `Run`,
+which may be using the service from other goroutines at the same time,
+clients reading `Addr()` while a fault is injected, and the lock keeps the
+two fields consistent for all of them.
+
 ## A kill that could not be carried out
 
 `Crash` and `Shutdown` clear the process only once it is established to be

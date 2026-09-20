@@ -82,6 +82,7 @@ func (s *Service) StartNode(ctx context.Context, n *torx.Node) error {
 		n.ReleasePort(port) // it never came up; do not leak the lease
 		return err
 	}
+	// NEW in step 3: an artifact that is collected only when the job fails.
 	// kvd's data log is worth having when a job fails -- it says what the
 	// server had actually recorded -- and noise when it passes. An artifact
 	// registered without CollectOnPass is gathered only on failure, into the

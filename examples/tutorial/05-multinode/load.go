@@ -14,6 +14,8 @@ import (
 	"github.com/dotnwat/torx"
 )
 
+// NEW in step 5: a service with nodes of its own and nothing to start.
+
 // Load is the load generator as a service: it owns a set of nodes and runs
 // kvd's load generator on all of them at once, against a server somewhere
 // else. It is the second service in the benchmark job, and the reason a

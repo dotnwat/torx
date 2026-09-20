@@ -7,7 +7,9 @@ step adds, how to run it, and what to look at in the results. Each step's
 code is the previous step's plus the change, so a diff between two steps is
 the lesson, with one rule that keeps the diff small: a step carries only
 the jobs it teaches. A job an earlier step taught is not repeated until
-step 6, which gathers every job into one suite.
+step 6, which gathers every job into one suite. Code a step adds for its
+lesson is marked `NEW in step N` in a comment, so the delta is visible in
+the file itself; code without a mark came from an earlier step.
 
 ```sh
 diff -r examples/tutorial/02-service examples/tutorial/03-params

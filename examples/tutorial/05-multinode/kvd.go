@@ -48,6 +48,8 @@ const (
 type Service struct {
 	*torx.ServiceBase
 
+	// NEW in step 4: a lock, now that a job can reach into the service.
+	//
 	// mu guards port and proc. The framework calls the four hooks one at a
 	// time, so they never race with each other, and the earlier steps had no
 	// lock. Crash, Shutdown, and Restart are different: a job calls them
@@ -70,6 +72,8 @@ type Service struct {
 func New(name string) *Service {
 	s := &Service{}
 	s.ServiceBase = torx.NewServiceBase(name, torx.Homogeneous(1, torx.NodeSpec{}), s)
+	// NEW in step 4: keep every incarnation's log.
+	//
 	// A Restart launches a second kvd on the node. Keep what the first one
 	// logged up to its crash or stop beside what its replacement logs -- as
 	// stdout.1.log next to stdout.log in the results tree -- instead of
@@ -92,6 +96,7 @@ func (s *Service) StartNode(ctx context.Context, n *torx.Node) error {
 	if err != nil {
 		return err
 	}
+	// NEW in step 3: an artifact that is collected only when the job fails.
 	// kvd's data log is worth having when a job fails -- it says what the
 	// server had actually recorded -- and noise when it passes. An artifact
 	// registered without CollectOnPass is gathered only on failure, into the
@@ -103,6 +108,8 @@ func (s *Service) StartNode(ctx context.Context, n *torx.Node) error {
 	return s.launchLocked(ctx, n)
 }
 
+// NEW in step 4: the launch, shared by StartNode and Restart.
+//
 // launchLocked starts kvd behind the leased port on the data directory. It is
 // the one place a process is created, shared by StartNode and Restart.
 // StartCaptured runs the process with its output redirected to a node-local
@@ -170,6 +177,8 @@ func (s *Service) CleanNode(ctx context.Context, n *torx.Node) error {
 	return n.Rm(ctx, n.ServiceScratch(s.Name()).Root)
 }
 
+// NEW in step 4: a fault a job can inject.
+//
 // Crash kills kvd outright: Close sends SIGKILL to its whole process group,
 // so none of its shutdown code runs. The port and the data directory are
 // kept, so Restart brings back the same server at the same address, with
@@ -190,6 +199,8 @@ func (s *Service) Crash(ctx context.Context) error {
 	return nil
 }
 
+// NEW in step 4: a stop that is an assertion.
+//
 // Shutdown stops kvd gracefully and holds it to that: SIGTERM, a bounded
 // wait for it to exit on its own, and an exit status of 0. It is the same
 // stop StopNode does at teardown, but where StopNode only notes a process
@@ -220,6 +231,8 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// NEW in step 4: the recovery a job drives after a fault.
+//
 // Restart launches kvd again after a Crash or Shutdown, behind the same port
 // and on the same data directory, so it replays what the previous process
 // recorded. Follow it with Wait, which blocks until the new process is ready.

@@ -9,6 +9,10 @@ import (
 	"github.com/dotnwat/torx"
 )
 
+// NEW in step 3: the benchmark job, with Matrix, ResolveParams, Record, and
+// WriteArtifact. NEW in step 5: a second service, the load generator, on
+// nodes of its own; Declare, Summary, and Run are where it shows.
+
 // benchJob is kv.bench: a benchmark of kvd under load from a number of
 // nodes, each running a number of clients. It declares two services -- the
 // server, on a node of its own, and the load generator, on as many nodes as
@@ -96,6 +100,8 @@ func intParam(p torx.Params, key string, def, limit int) (int, error) {
 	return n, nil
 }
 
+// NEW in step 5: two services in one job.
+//
 // Declare registers the server and then the load generator, whose node
 // count is a parameter: the job's demand depends on the variant. Services
 // are bound to nodes in registration order, so the server gets the first
@@ -119,6 +125,8 @@ type Report struct {
 	Errors    int     `json:"errors"`
 }
 
+// NEW in step 5: aggregating across nodes.
+//
 // Summary is what the job records: every node's report, and the totals a
 // reader wants first. Throughput adds up across nodes; percentiles do not,
 // so the worst node's p99 stands for the whole rather than an average that
@@ -130,6 +138,8 @@ type Summary struct {
 	P99Ms     float64      `json:"p99_ms_worst"`
 }
 
+// NEW in step 5: the load comes from every load node at once.
+//
 // Run drives the load from every load node at once and records the result.
 // The load generators reach the server at the address the service
 // advertises, which on the local pool is the loopback and on a real pool the

@@ -48,6 +48,9 @@ import (
 	"github.com/dotnwat/torx"
 )
 
+// NEW in step 6: the launcher. Everything in this directory, and in
+// ../docker, is new.
+
 const (
 	// suitePackage and kvdPackage are what gets built, relative to the
 	// repository root; stepDir is this step, holding the docker files.

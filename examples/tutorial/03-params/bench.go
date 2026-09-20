@@ -12,6 +12,9 @@ import (
 	"github.com/dotnwat/torx"
 )
 
+// NEW in step 3: the benchmark job, with Matrix, ResolveParams, Record, and
+// WriteArtifact.
+
 // benchJob is kv.bench: a benchmark of kvd under a number of clients. It runs
 // once per point of its parameter matrix, and each variant is a job of its
 // own -- selected, scheduled, and reported on its own -- with an id that

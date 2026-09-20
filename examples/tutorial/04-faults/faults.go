@@ -11,6 +11,9 @@ import (
 	"github.com/dotnwat/torx/examples/tutorial/kvd/client"
 )
 
+// NEW in step 4: the fault jobs. They inject faults only through the
+// service's Crash, Shutdown, and Restart.
+
 // faultKeys is how many keys the fault jobs write before the fault.
 const faultKeys = 100
 

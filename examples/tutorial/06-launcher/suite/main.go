@@ -10,9 +10,9 @@ package main
 import (
 	"github.com/dotnwat/torx"
 
-	// The ssh backend registers itself under the "ssh" kind. Without this
-	// import a manifest naming ssh nodes is refused at load, with an error
-	// that says so.
+	// NEW in step 6: the one line the suite changes. The ssh backend
+	// registers itself under the "ssh" kind; without this import a manifest
+	// naming ssh nodes is refused at load, with an error that says so.
 	_ "github.com/dotnwat/torx/ssh"
 )
 
