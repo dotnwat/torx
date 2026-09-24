@@ -4,12 +4,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -68,6 +70,10 @@ func runDocker(ctx context.Context, stepDir, runDir string, argv []string) int {
 	if err := prepareDocker(stepDir, runDir); err != nil {
 		return die(err)
 	}
+	uid, gid, err := driverUser()
+	if err != nil {
+		return die(err)
+	}
 	project := projectName(runDir)
 	compose := func(ctx context.Context, args ...string) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, "docker", append([]string{
@@ -82,7 +88,7 @@ func runDocker(ctx context.Context, stepDir, runDir string, argv []string) int {
 		// Results the driver writes should belong to whoever ran the launcher,
 		// which matters on Linux, where a bind mount keeps container-side
 		// ownership.
-		cmd.Env = append(os.Environ(), "TORX_UID="+strconv.Itoa(os.Getuid()), "TORX_GID="+strconv.Itoa(os.Getgid()))
+		cmd.Env = append(os.Environ(), "TORX_UID="+strconv.Itoa(uid), "TORX_GID="+strconv.Itoa(gid))
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -112,7 +118,7 @@ func runDocker(ctx context.Context, stepDir, runDir string, argv []string) int {
 
 	// Run the suite in the driver container. Its exit status is ours; for a
 	// run stopped by a signal it is compose's own, which is non-zero too.
-	err := compose(ctx, append([]string{"run", "--rm", "driver"}, argv...)...).Run()
+	err = compose(ctx, append([]string{"run", "--rm", "driver"}, argv...)...).Run()
 	var exit *exec.ExitError
 	switch {
 	case err == nil:
@@ -123,6 +129,57 @@ func runDocker(ctx context.Context, stepDir, runDir string, argv []string) int {
 		// compose died of a signal, or did not start.
 		return die(interrupted(ctx, fmt.Errorf("docker compose run: %w", err)))
 	}
+}
+
+// engineInfo is what the launcher reads from "docker info". The docker
+// command is either Docker's CLI, talking to Docker or to Podman through its
+// Docker-compatible API, or Podman's own CLI installed under that name (the
+// podman-docker package), which answers in a shape of its own: Podman's
+// fields are under Host, which Docker's info does not have.
+type engineInfo struct {
+	SecurityOptions []string // Docker's; "name=rootless" marks a rootless engine
+	Host            *struct {
+		Arch     string // Podman's, spelled as Go spells it
+		Security struct{ Rootless bool }
+	}
+}
+
+// rootless reports whether the engine maps container root to the launching
+// user, as rootless Docker and Podman run by a user both do.
+func (i engineInfo) rootless() bool {
+	if i.Host != nil {
+		return i.Host.Security.Rootless
+	}
+	return slices.Contains(i.SecurityOptions, "name=rootless")
+}
+
+func dockerInfo() (engineInfo, error) {
+	out, err := exec.Command("docker", "info", "--format", "{{json .}}").Output()
+	if err != nil {
+		return engineInfo{}, fmt.Errorf("docker info: %w (is the engine running?)", err)
+	}
+	var info engineInfo
+	if err := json.Unmarshal(out, &info); err != nil {
+		return engineInfo{}, fmt.Errorf("docker info: %w", err)
+	}
+	return info, nil
+}
+
+// driverUser is the uid and gid the driver container runs as, chosen so the
+// files it writes into the bind-mounted run directory belong to whoever ran
+// the launcher. On a rootful engine that is the launcher's own uid and gid.
+// A rootless engine maps container root to the launching user and every
+// other uid to one of their subordinate ids, which cannot write the run
+// directory at all, so there the driver runs as root.
+func driverUser() (uid, gid int, err error) {
+	info, err := dockerInfo()
+	if err != nil {
+		return 0, 0, err
+	}
+	if info.rootless() {
+		return 0, 0, nil
+	}
+	return os.Getuid(), os.Getgid(), nil
 }
 
 // interrupted returns a plain "interrupted" in place of err once ctx has

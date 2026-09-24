@@ -58,7 +58,8 @@ database.
   A suite whose node has no kvd fails at once and says so. Step 6's launcher
   takes this chore over, which is part of what a launcher is for.
 - For step 6's docker part, docker with the compose plugin: Docker Desktop,
-  or a docker engine with `docker compose`.
+  or a docker engine with `docker compose`. Podman works too, with Docker
+  Compose; step 6 says how to set it up.
 
 ## Running and testing
 

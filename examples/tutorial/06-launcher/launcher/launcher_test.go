@@ -37,6 +37,42 @@ func TestWithPath(t *testing.T) {
 	}
 }
 
+// TestEngineInfo decodes "docker info" as each engine prints it, cut to the
+// fields the launcher reads: Docker's CLI (whether the engine behind it is
+// Docker or Podman's Docker-compatible API), and Podman's own CLI installed
+// as docker.
+func TestEngineInfo(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		info     string
+		rootless bool
+		arch     string // Podman's; Docker's comes from "docker version"
+	}{
+		{"docker", `{"Architecture":"x86_64","SecurityOptions":["name=apparmor","name=seccomp,profile=builtin","name=cgroupns"]}`, false, ""},
+		{"docker rootless", `{"Architecture":"x86_64","SecurityOptions":["name=seccomp,profile=builtin","name=rootless","name=cgroupns"]}`, true, ""},
+		{"docker cli, podman engine", `{"Architecture":"x86_64","SecurityOptions":["name=seccomp,profile=default","name=rootless","name=selinux"]}`, true, ""},
+		{"podman cli", `{"host":{"arch":"amd64","security":{"rootless":true,"selinuxEnabled":true}},"store":{},"version":{}}`, true, "amd64"},
+		{"podman cli, rootful", `{"host":{"arch":"arm64","security":{"rootless":false}},"store":{},"version":{}}`, false, "arm64"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var info engineInfo
+			if err := json.Unmarshal([]byte(tc.info), &info); err != nil {
+				t.Fatal(err)
+			}
+			if got := info.rootless(); got != tc.rootless {
+				t.Errorf("rootless = %v, want %v", got, tc.rootless)
+			}
+			var arch string
+			if info.Host != nil {
+				arch = info.Host.Arch
+			}
+			if arch != tc.arch {
+				t.Errorf("podman arch = %q, want %q", arch, tc.arch)
+			}
+		})
+	}
+}
+
 // TestWriteKeys checks the generated files fit together: the client key
 // parses, its public half is what the nodes authorize, and the host key is
 // what known_hosts holds for every node name.
@@ -204,14 +240,16 @@ func TestDockerTeardownOnSignal(t *testing.T) {
 
 // stubDocker writes a stand-in docker into a directory for PATH and returns
 // the directory. The stub appends every invocation to $TORX_STUB_LOG,
-// answers "docker version" with this machine's architecture, and blocks in
-// the compose subcommand named by $TORX_STUB_BLOCK until signalled.
+// answers "docker info" as a rootful Docker engine and "docker version" with
+// this machine's architecture, and blocks in the compose subcommand named by
+// $TORX_STUB_BLOCK until signalled.
 func stubDocker(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	script := `#!/bin/sh
 printf '%s\n' "$*" >>"$TORX_STUB_LOG"
 case "$1" in
+info) echo '{"SecurityOptions":["name=seccomp,profile=builtin"]}' ;;
 version) echo ` + runtime.GOARCH + ` ;;
 compose)
 	shift

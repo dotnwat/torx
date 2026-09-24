@@ -32,13 +32,16 @@ services:
   n2: *node
 
   # The driver runs the suite. It needs nothing but the static binary in the
-  # mounted run directory. It runs as the launching user (the launcher sets
-  # TORX_UID and TORX_GID) so the results it writes are theirs.
+  # mounted run directory. It runs as whichever container user writes files
+  # as the launching user (the launcher sets TORX_UID and TORX_GID) so the
+  # results it writes are theirs. The "z" relabels the run directory for
+  # SELinux, which otherwise denies the container any access to it on an
+  # enforcing host (Fedora, RHEL); elsewhere it is ignored.
   driver:
     image: alpine:3.22
     user: "${TORX_UID:-0}:${TORX_GID:-0}"
     volumes:
-      - .:/torx/run
+      - .:/torx/run:z
     working_dir: /torx/run
     depends_on:
       n0: { condition: service_healthy }

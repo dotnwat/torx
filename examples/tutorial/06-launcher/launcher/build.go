@@ -33,15 +33,26 @@ func buildTarget(backend string) (target, error) {
 		return target{OS: runtime.GOOS, Arch: runtime.GOARCH}, nil
 	}
 	if _, err := exec.LookPath("docker"); err != nil {
-		return target{}, fmt.Errorf("the docker backend needs docker on PATH: %w", err)
+		return target{}, fmt.Errorf("the docker backend needs docker on PATH (Docker's CLI, or Podman's installed as docker): %w", err)
 	}
-	out, err := exec.Command("docker", "version", "--format", "{{.Server.Arch}}").Output()
+	info, err := dockerInfo()
 	if err != nil {
-		return target{}, fmt.Errorf("docker version: %w (is the docker engine running?)", err)
+		return target{}, err
 	}
-	arch := strings.TrimSpace(string(out))
+	var arch string
+	if info.Host != nil {
+		arch = info.Host.Arch
+	} else {
+		// Docker's info spells the architecture as uname does (x86_64); its
+		// version spells it as Go does.
+		out, err := exec.Command("docker", "version", "--format", "{{.Server.Arch}}").Output()
+		if err != nil {
+			return target{}, fmt.Errorf("docker version: %w (is the docker engine running?)", err)
+		}
+		arch = strings.TrimSpace(string(out))
+	}
 	if arch == "" {
-		return target{}, fmt.Errorf("docker version reported no server architecture")
+		return target{}, fmt.Errorf("the docker engine reported no architecture")
 	}
 	return target{OS: "linux", Arch: arch}, nil
 }
