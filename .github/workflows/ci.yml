@@ -86,6 +86,27 @@ jobs:
       - name: run the suite through the harness
         run: go run ./examples/rqlite/harness
 
+  # -netns builds local nodes from unprivileged user and network namespaces,
+  # which Ubuntu's AppArmor policy forbids by default, so the matrix above
+  # skips the lab test. This job lifts the restriction and runs netfault's
+  # tests with the skip turned into a failure.
+  netns:
+    name: netns lab
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - name: let unprivileged users create user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: install nftables
+        run: sudo apt-get install -y nftables
+      - name: netfault tests (lab required)
+        run: go test -race -count=1 ./netfault
+        env:
+          NETFAULT_LAB_REQUIRED: "1"
+
   # The tutorial's last step provisions docker containers and runs the suite
   # against them over ssh. The matrix above skips that test where docker is
   # not usable; this job runs it with the skip turned into a failure, and
