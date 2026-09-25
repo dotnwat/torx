@@ -226,7 +226,7 @@ func buildNodes(descs []NodeDescriptor) ([]*Node, error) {
 func buildBackend(d BackendDescriptor) (Backend, error) {
 	switch d.Kind {
 	case "", "local":
-		return LocalBackend{}, nil
+		return localBackendFrom(d)
 	default:
 		if build, ok := lookupBackend(d.Kind); ok {
 			return build(d)

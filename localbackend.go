@@ -5,6 +5,7 @@ package torx
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,7 +20,46 @@ import (
 // LocalBackend runs commands as local subprocesses and treats node paths as
 // local filesystem paths. It is the v1 backend: no SSH and no remote agent, so
 // the whole framework runs against localhost with nothing installed.
-type LocalBackend struct{}
+//
+// NetNS, when set, is the path of a network namespace (such as
+// /proc/<pid>/ns/net) that every command the backend runs enters first,
+// through nsenter, so a node can have a network of its own while sharing the
+// host's processes and files. Entering it takes privilege over the namespace,
+// which a run under -netns has (see localLab). The command is still the
+// process the backend started -- nsenter replaces itself with it -- so
+// signals and process groups work as without it.
+//
+// A "local" descriptor's Config is the LocalBackend as JSON, empty for a plain
+// local node.
+type LocalBackend struct {
+	NetNS string `json:"netns,omitempty"`
+}
+
+// localBackendFrom builds the LocalBackend a "local" descriptor describes.
+func localBackendFrom(d BackendDescriptor) (LocalBackend, error) {
+	var b LocalBackend
+	if len(d.Config) == 0 {
+		return b, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(d.Config))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&b); err != nil {
+		return LocalBackend{}, fmt.Errorf("local backend config: %w", err)
+	}
+	return b, nil
+}
+
+// inNetNS returns cmd as it must run to enter the backend's network
+// namespace first, or cmd itself when the backend has none.
+func (b LocalBackend) inNetNS(cmd Cmd) Cmd {
+	if b.NetNS == "" {
+		return cmd
+	}
+	wrapped := cmd
+	wrapped.Path = "nsenter"
+	wrapped.Args = append([]string{"--net=" + b.NetNS, "--", cmd.Path}, cmd.Args...)
+	return wrapped
+}
 
 var _ Backend = LocalBackend{}
 
@@ -59,6 +99,7 @@ func killGroup(pid int) {
 }
 
 func (b LocalBackend) Exec(ctx context.Context, cmd Cmd) (ExecResult, error) {
+	cmd = b.inNetNS(cmd)
 	c := exec.CommandContext(ctx, cmd.Path, cmd.Args...)
 	configure(c, cmd)
 	// Cancellation kills the whole group, and WaitDelay bounds how long Run
@@ -97,6 +138,7 @@ func (b LocalBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
 	// stream's promise -- cancelling ctx kills the command as Close would --
 	// has to hold until Close, for the children the leader may have left in
 	// the group. The stream watches ctx itself, below.
+	cmd = b.inNetNS(cmd)
 	c := exec.Command(cmd.Path, cmd.Args...)
 	configure(c, cmd)
 	pr, pw, err := os.Pipe()

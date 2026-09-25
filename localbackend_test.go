@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -381,5 +382,35 @@ func TestLocalBackendStreamWaitIgnoresStdinHolder(t *testing.T) {
 	}
 	if err := p.Close(); err != nil {
 		t.Errorf("Close: %v", err)
+	}
+}
+
+func TestLocalBackendFromDescriptor(t *testing.T) {
+	b, err := localBackendFrom(BackendDescriptor{Kind: "local"})
+	if err != nil || b != (LocalBackend{}) {
+		t.Errorf("no config = %+v, %v; want a plain LocalBackend", b, err)
+	}
+	b, err = localBackendFrom(BackendDescriptor{Kind: "local", Config: []byte(`{"netns":"/proc/42/ns/net"}`)})
+	if err != nil || b.NetNS != "/proc/42/ns/net" {
+		t.Errorf("netns config = %+v, %v; want NetNS set", b, err)
+	}
+	if _, err := localBackendFrom(BackendDescriptor{Kind: "local", Config: []byte(`{"netnss":"/x"}`)}); err == nil {
+		t.Error("a misspelled field was accepted")
+	}
+}
+
+func TestInNetNSWrapsTheCommand(t *testing.T) {
+	cmd := Cmd{Path: "rqlited", Args: []string{"-node-id", "n0"}, Env: []string{"A=1"}, Dir: "/d", Stdin: []byte("in")}
+	if got := (LocalBackend{}).inNetNS(cmd); !reflect.DeepEqual(got, cmd) {
+		t.Errorf("without a namespace the command changed: %+v", got)
+	}
+	got := LocalBackend{NetNS: "/proc/42/ns/net"}.inNetNS(cmd)
+	want := Cmd{Path: "nsenter", Args: []string{"--net=/proc/42/ns/net", "--", "rqlited", "-node-id", "n0"},
+		Env: []string{"A=1"}, Dir: "/d", Stdin: []byte("in")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("wrapped = %+v\nwant %+v", got, want)
+	}
+	if cmd.Path != "rqlited" || len(cmd.Args) != 2 {
+		t.Errorf("wrapping changed the caller's command: %+v", cmd)
 	}
 }
