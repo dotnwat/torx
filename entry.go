@@ -63,9 +63,19 @@ func driverMain(args []string) int {
 	resultsDir := fs.String("results-dir", "results", "write the per-run results tree under this directory (empty to disable)")
 	runDir := fs.String("run-dir", "", "write results into exactly this pre-created directory (mutually exclusive with -results-dir)")
 	paramsFile := fs.String("params", "", "JSON file of parameter overrides replacing the named jobs' compiled-in variants")
+	seedFlag := fs.Uint64("seed", 0, "run seed each variant's seed is derived from (default: drawn at random)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+
+	// A run is randomized unless -seed pins it; the seed is printed with the
+	// summary and recorded in run.json, so any run can be repeated.
+	seed := RandomSeed()
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "seed" {
+			seed = *seedFlag
+		}
+	})
 
 	// -run-dir names the run directory itself; -results-dir a root to mint one
 	// under. Passing both is a contradiction, caught here where "set" is
@@ -105,7 +115,7 @@ func driverMain(args []string) int {
 		return 1
 	}
 
-	pool, err := selectPool(*poolFile, *nodes, requests)
+	pool, err := selectPool(*poolFile, *nodes, requests, seed)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "torx:", err)
 		return 2
@@ -132,7 +142,7 @@ func driverMain(args []string) int {
 	defer stop()
 
 	res := Run(ctx, pool, SelfExecLauncher{}, requests,
-		RunOptions{MaxParallel: *parallel, Reporters: reporters, ResultsDir: *resultsDir, RunDir: *runDir})
+		RunOptions{MaxParallel: *parallel, Reporters: reporters, ResultsDir: *resultsDir, RunDir: *runDir, Seed: seed})
 	ok := res.Ok()
 	if resultsFile != nil {
 		// The reporter has written every result by now; a close that fails is
@@ -150,8 +160,9 @@ func driverMain(args []string) int {
 
 // selectPool builds the pool a run executes against: from a manifest file when
 // poolFile is set, otherwise a pool of local nodes sized to nodes, or to the
-// largest job when nodes is not positive.
-func selectPool(poolFile string, nodes int, requests []JobRequest) (*Pool, error) {
+// largest job when nodes is not positive. Jobs are sized under the run seed,
+// as the driver sizes them.
+func selectPool(poolFile string, nodes int, requests []JobRequest, seed uint64) (*Pool, error) {
 	if poolFile != "" {
 		m, err := LoadManifest(poolFile)
 		if err != nil {
@@ -161,16 +172,16 @@ func selectPool(poolFile string, nodes int, requests []JobRequest) (*Pool, error
 	}
 	size := nodes
 	if size <= 0 {
-		size = maxDemand(requests)
+		size = maxDemand(requests, seed)
 	}
 	return localPool(size), nil
 }
 
 // maxDemand returns the largest node demand among the requests, at least 1.
-func maxDemand(requests []JobRequest) int {
+func maxDemand(requests []JobRequest, seed uint64) int {
 	demand := 1
 	for _, req := range requests {
-		if spec, err := sizeJob(req); err == nil {
+		if spec, err := sizeJob(req, seed); err == nil {
 			demand = max(demand, spec.Size())
 		}
 	}

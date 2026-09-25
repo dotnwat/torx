@@ -296,6 +296,17 @@ What `JobBase` gives you, and how to take control:
   never interprets `Data`; large outputs belong in artifacts, written with
   `jc.WriteArtifact` when the job holds them and collected from nodes when a
   service produced them.
+- A **randomized** job (a chaos test, a random-operations test, a
+  configuration drawn from a space of options) draws from `jc.Rand("name")`,
+  a generator for one named stream of the variant's seed, and gives each
+  goroutine a stream of its own. A run has one seed, drawn at random unless
+  `-seed N` fixes it, printed with the run's summary and recorded in
+  `run.json`; each variant's seed is derived from it and the variant's id
+  (`torx.VariantSeed`) and recorded on its result. Rerunning with the same
+  `-seed` and a selection of just the failing variant hands it the same seed,
+  so it makes the same choices again. The seed is the same in `Declare` as
+  in the worker, so a job may even draw its shape from it. A matrix of a
+  `trial` parameter runs one job under many seeds.
 
 Multi-service jobs just declare more services; the framework sums their demand
 into the pool it allocates and hands each service its nodes (`Bind`) in
@@ -353,7 +364,8 @@ go run ./path/to/suite -nodes 3 'my\..*'
 Useful flags: `-nodes N` (local pool size), `-parallel N` (concurrent jobs),
 `-results <file>` (newline-delimited JSON results), `-results-dir <dir>` (the
 per-run tree; empty to disable), `-run-dir <dir>` (below), `-params <file>`
-(below), and `-pool <manifest.json>` (below).
+(below), `-pool <manifest.json>` (below), and `-seed N` (the run seed a
+randomized job draws from; above).
 
 **External parametrization.** `-params FILE` replaces the named jobs'
 compiled-in variants with externally supplied ones, so a specific

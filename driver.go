@@ -41,8 +41,14 @@ type RunOptions struct {
 	Timeout     time.Duration // per-job timeout; 0 means none
 	ExitFirst   bool          // stop scheduling after the first failure
 	ResultsDir  string        // results root; the run gets a fresh directory under it (see MakeRunDir)
-	Sink        EventSink     // receives every job's events; must be concurrency-safe
-	Reporters   []Reporter    // consume each result as it lands, then the aggregate
+	// Seed is the run seed. Each variant's seed is derived from it and the
+	// variant's id (see VariantSeed), so a rerun with the same seed hands a
+	// variant the same one. The zero value is a seed like any other; a caller
+	// that wants a fresh run each time draws one with RandomSeed, as the CLI
+	// does unless -seed is given.
+	Seed      uint64
+	Sink      EventSink  // receives every job's events; must be concurrency-safe
+	Reporters []Reporter // consume each result as it lands, then the aggregate
 
 	// RunDir, when set, is the run directory itself, used exactly as given: no
 	// timestamped subdirectory is minted and no "latest" symlink is maintained.
@@ -164,7 +170,7 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 			record(failResult(variantID(req.ID, req.Params), req.Params, req.discErr))
 			continue
 		}
-		spec, err := sizeJob(req)
+		spec, err := sizeJob(req, opts.Seed)
 		if err != nil {
 			record(failResult(variantID(req.ID, req.Params), req.Params, err))
 			continue
@@ -237,7 +243,7 @@ func Run(ctx context.Context, pool *Pool, launcher WorkerLauncher, requests []Jo
 	// explains a non-zero exit (e.g. an unusable run directory) instead of
 	// closing a run of passing jobs with a clean line; failures from the
 	// reporters themselves are refreshed into the suite afterwards.
-	suite := SuiteResult{Jobs: results, Cancelled: ctx.Err() != nil, PersistErr: persistErr}
+	suite := SuiteResult{Jobs: results, Seed: opts.Seed, Cancelled: ctx.Err() != nil, PersistErr: persistErr}
 	for _, rep := range opts.Reporters {
 		noteErr(rep.Finish(suite))
 	}
@@ -283,12 +289,16 @@ func runOne(ctx context.Context, pool *Pool, launcher WorkerLauncher, req JobReq
 	done <- res
 }
 
-func sizeJob(req JobRequest) (PoolSpec, error) {
+// sizeJob declares the job to learn its node demand. The job context carries
+// the variant's seed, as it will in the worker, so a Declare that draws from
+// it sizes the job the way the worker will build it.
+func sizeJob(req JobRequest, runSeed uint64) (PoolSpec, error) {
 	factory, ok := lookupJob(req.ID)
 	if !ok {
 		return PoolSpec{}, fmt.Errorf("driver: unknown job %q", req.ID)
 	}
 	jc := NewJobContext(req.Params, nil)
+	jc.seed = VariantSeed(runSeed, variantID(req.ID, req.Params))
 	// Declare is job-supplied code, and sizeJob runs it in the driver process
 	// before any job is launched; a panic here must fail just this job rather
 	// than take down the whole run.
@@ -307,6 +317,7 @@ func buildAssignment(req JobRequest, sub *SubPool, opts RunOptions) Assignment {
 	return Assignment{
 		JobID:  req.ID,
 		Params: req.Params,
+		Seed:   VariantSeed(opts.Seed, variantID(req.ID, req.Params)),
 		Nodes:  descs,
 		Session: SessionConfig{
 			ResultsDir: opts.ResultsDir,

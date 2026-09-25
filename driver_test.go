@@ -81,7 +81,7 @@ func TestRunSchedulesAllJobs(t *testing.T) {
 }
 
 func TestSizeJobRecoversDeclarePanic(t *testing.T) {
-	if _, err := sizeJob(JobRequest{ID: "wtest.declarepanic"}); err == nil {
+	if _, err := sizeJob(JobRequest{ID: "wtest.declarepanic"}, 0); err == nil {
 		t.Fatal("sizeJob should return an error when Declare panics, not propagate the panic")
 	} else if !strings.Contains(err.Error(), "declare-boom") {
 		t.Errorf("error = %v, want it to mention declare-boom", err)
