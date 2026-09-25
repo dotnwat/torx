@@ -148,6 +148,10 @@ type JobResult struct {
 	// its result.json failed. Status still reflects what the job itself did, but
 	// the suite is not Ok, since results the run was asked for are missing.
 	PersistErr string `json:"persist_error,omitempty"`
+	// Seed is the variant's seed (see VariantSeed), recorded on every result
+	// a worker produced, so a randomized job's choices can be traced back to
+	// it. A rerun passes the run's seed, which derives this one again.
+	Seed uint64 `json:"seed,omitempty"`
 }
 
 // Duration is the wall-clock time the job took.
@@ -174,6 +178,9 @@ func (r JobResult) Render() string {
 // SuiteResult aggregates the results of a run.
 type SuiteResult struct {
 	Jobs []JobResult `json:"jobs"`
+	// Seed is the run seed every variant's seed was derived from; passing it
+	// back with -seed repeats the run's random choices.
+	Seed uint64 `json:"seed"`
 	// Cancelled is set when the run's context was cancelled (a deadline or an
 	// operator stop) before the driver finished scheduling every request. The
 	// recorded jobs are then only a prefix of what was asked for, so the run did
@@ -229,6 +236,7 @@ func (s SuiteResult) summaryLine() string {
 	c := s.Counts()
 	line := fmt.Sprintf("%d jobs: %d passed, %d failed, %d flaky, %d ignored",
 		len(s.Jobs), c[StatusPass], c[StatusFail], c[StatusFlaky], c[StatusIgnore])
+	line += fmt.Sprintf(" (seed %d)", s.Seed)
 	if s.Cancelled {
 		line += " (run cancelled before completion)"
 	}

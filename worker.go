@@ -102,6 +102,7 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 			}
 		}
 		res.Params = a.Params
+		res.Seed = a.Seed
 		res.PersistErr = strings.Join(persistErrs, "; ")
 		if err := writeResultJSON(jobDir, res); err != nil {
 			notePersist(err)
@@ -118,6 +119,7 @@ func execute(ctx context.Context, a Assignment, sink EventSink) JobResult {
 		return fail(fmt.Errorf("worker: unknown job %q", a.JobID))
 	}
 	jc = NewJobContext(a.Params, sink)
+	jc.seed = a.Seed
 	jc.resultsDir = jobDir
 	// Declare and Bind are (or drive) job-supplied code; confine a panic in
 	// either to this job's result, matching the recover wrapper Setup, Run, and
