@@ -88,8 +88,8 @@ jobs:
 
   # -netns builds local nodes from unprivileged user and network namespaces,
   # which Ubuntu's AppArmor policy forbids by default, so the matrix above
-  # skips the lab test. This job lifts the restriction and runs netfault's
-  # tests with the skip turned into a failure.
+  # skips the lab tests. This job lifts the restriction and runs netfault's
+  # and diskfault's tests with the skip turned into a failure.
   netns:
     name: netns lab
     runs-on: ubuntu-latest
@@ -102,10 +102,11 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: install nftables
         run: sudo apt-get install -y nftables
-      - name: netfault tests (lab required)
-        run: go test -race -count=1 ./netfault
+      - name: netfault and diskfault tests (lab required)
+        run: go test -race -count=1 ./netfault ./diskfault
         env:
           NETFAULT_LAB_REQUIRED: "1"
+          DISKFAULT_LAB_REQUIRED: "1"
 
   # The tutorial's last step provisions docker containers and runs the suite
   # against them over ssh. The matrix above skips that test where docker is
