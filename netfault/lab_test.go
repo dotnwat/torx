@@ -28,9 +28,9 @@ const (
 	// lab, into a failure: CI sets it where it has made sure the host can.
 	requiredEnv = "NETFAULT_LAB_REQUIRED"
 	suiteEnv    = "NETFAULT_TEST_SUITE"
-	serveArg  = "netfault-test-serve"
-	dialArg   = "netfault-test-dial"
-	probePort = "7000"
+	serveArg    = "netfault-test-serve"
+	dialArg     = "netfault-test-dial"
+	probePort   = "7000"
 )
 
 func TestMain(m *testing.M) {

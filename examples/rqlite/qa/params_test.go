@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -142,8 +143,19 @@ func TestResolveChaosParams(t *testing.T) {
 	if got[paramDuration] != 5 || got[paramNodes] != defaultNodes || got[paramQueued] != true || got[paramTolerate] != "" {
 		t.Errorf("resolved = %v; want the duration as an int and every default filled in", got)
 	}
+	for _, good := range []string{"all", "all,-disk-full,-crash", "crash,pause-leader"} {
+		if _, err := resolveChaosParams(torx.Params{paramFaults: good}); err != nil {
+			t.Errorf("faults %q refused: %v", good, err)
+		}
+	}
+	if faults, all := parseFaults("all,-disk-full"); !all || slices.Contains(faults, "disk-full") || !slices.Contains(faults, "crash") {
+		t.Errorf("parseFaults(all,-disk-full) = %v, %v", faults, all)
+	}
 	for _, bad := range []torx.Params{
 		{paramFaults: "crash,partition-typo"},
+		{paramFaults: "all,disk-full"},
+		{paramFaults: "all,-disk-fool"},
+		{paramFaults: "crash,-disk-full"},
 		{paramFaults: ""},
 		{paramDuration: 0},
 		{paramClients: 1.5},

@@ -183,7 +183,12 @@ splitting the nodes in two, or bridging two halves through one node), has
 the leader stop hearing its peers while they still hear it, slows or drops
 one node's packets, and black-holes the large packets from the leader to a
 follower while letting the small ones through, as a link with a broken MTU
-would -- faults injected with torx's `netfault` package. rqlite runs a configuration drawn at random:
+would -- faults injected with torx's `netfault` package. Under `-netns` each
+node's data directory is also a filesystem of limited size (torx's
+`diskfault`), which the nemesis fills up, the leader's half the time, and
+gives back. Whatever the pool, it also replaces a follower's disk the way an
+operator would: removes the node from the cluster, erases its data, and
+brings it back empty to join anew. rqlite runs a configuration drawn at random:
 snapshots every few entries instead of every few thousand, snapshot checks
 several times a second, a WAL threshold that snapshots on nearly every
 write, VACUUMs alongside, fast or slow elections. At the end every fault is
@@ -211,8 +216,8 @@ to each fault and each client operation, is drawn from the variant's seed
 (`jc.Rand`), so a failing variant is rerun with the run's `-seed` and the
 same selection.
 
-The compiled-in variant runs for twenty seconds and tolerates the issues
-below, reporting them as warnings, so a run of the whole suite passes on a
+The compiled-in variant runs for twenty seconds, leaves out `disk-full`,
+and tolerates the other issues below, reporting them as warnings, so a run of the whole suite passes on a
 release that has them. A search for bugs is a `-params` run, strict by
 default, with longer runs, many trials, and a pool large enough to run them
 side by side:
@@ -230,7 +235,8 @@ fails, saying why. The harness passes `-seed` on to the suite, so a failure
 is rerun with the seed its run printed.
 
 Its parameters are `nodes`, `duration` (seconds), `clients`, `faults` (a
-comma-separated list from `nemesis.go`, or `all`), `queued` (whether clients
+comma-separated list from `nemesis.go`, or `all` followed by any to leave
+out, as in `all,-disk-full`), `queued` (whether clients
 also write through the queue), `tolerate` (anomaly kinds reported as
 warnings), and `trial`.
 
@@ -286,6 +292,22 @@ warnings), and `trial`.
   job finds reads five and six seconds stale with a freshness of one
   second, and a follower held that way serves the same stale count for as
   long as the fault lasts.
+
+- **Replicas that diverge after a disk fills** (`divergence`, `stale-read`,
+  `lost`). rqlite applies a committed Raft entry to each node's SQLite
+  database, and when that fails on one node -- SQLite finds the disk full --
+  it reports the failure to the client the way it reports a constraint
+  violation, and moves on to the next entry. A constraint violation fails
+  alike on every node; a full disk does not. The other nodes applied the
+  entry, the node with the full disk skipped it, and once the disk has room
+  again the cluster is healthy, with a leader and taking writes, and its
+  replicas hold different rows for good. When the node was the leader, its
+  linearizable reads miss rows the cluster committed, and the client that
+  was told "database or disk is full" had its write applied everywhere else.
+  A few seconds of a full disk on the leader under write load is enough.
+  Separately, with its SQLite WAL checkpointed only when it snapshots, a
+  node whose snapshots fail for lack of space grows its WAL with every write
+  until nothing is left for the checkpoint that would shrink it.
 
 Two smaller things show up as warnings: a stop takes five seconds when a
 client holds a connection that has not yet sent a request (Go's HTTP server

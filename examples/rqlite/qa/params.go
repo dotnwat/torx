@@ -100,13 +100,18 @@ func resolveChaosParams(p torx.Params) (torx.Params, error) {
 		case paramFaults:
 			s, ok := v.(string)
 			if !ok || s == "" {
-				return nil, fmt.Errorf("%s must be a comma-separated list of faults or \"all\", got %v", k, v)
+				return nil, fmt.Errorf("%s must be a comma-separated list of faults, or \"all\" and faults to leave out as -name, got %v", k, v)
 			}
-			if s != "all" {
-				for f := range strings.SplitSeq(s, ",") {
-					if !validFault(f) {
-						return nil, fmt.Errorf("%s: unknown fault %q", k, f)
-					}
+			all := strings.HasPrefix(s+",", "all,")
+			for i, f := range strings.Split(s, ",") {
+				switch {
+				case all && i == 0:
+				case all && strings.HasPrefix(f, "-") && validFault(f[1:]):
+				case !all && validFault(f):
+				case all:
+					return nil, fmt.Errorf("%s: after \"all\", %q is not a fault to leave out (-name)", k, f)
+				default:
+					return nil, fmt.Errorf("%s: unknown fault %q", k, f)
 				}
 			}
 			out[k] = s

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dotnwat/torx"
+	"github.com/dotnwat/torx/diskfault"
 )
 
 // binary is the server, resolved from each node's PATH under this fixed name.
@@ -78,6 +79,7 @@ type Service struct {
 	members map[string]*member // node name -> member, from first start to stop
 	flags   []string           // extra rqlited flags every launch passes, from SetFlags
 	grace   time.Duration      // how long a stop waits for rqlited to exit, from SetStopGrace
+	limit   int64              // the size each data directory is limited to, from SetDataLimit
 	exits   []Exit             // processes that exited without the service stopping them
 }
 
@@ -136,6 +138,19 @@ func (s *Service) SetStopGrace(grace time.Duration) {
 	s.grace = grace
 }
 
+// SetDataLimit limits each node's data directory to size bytes, with a
+// filesystem of that size mounted over it (diskfault.Limit) before the node
+// first starts, so that a job can fill it. Call it before the service starts,
+// and only for nodes that can take disk faults (diskfault.Check).
+func (s *Service) SetDataLimit(size int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.limit = size
+}
+
+// DataDir is where the node's rqlited keeps its database and Raft log.
+func (s *Service) DataDir(n *torx.Node) string { return s.dataDir(n) }
+
 // Exits returns the processes that exited without the service stopping them,
 // in the order the service noticed.
 func (s *Service) Exits() []Exit {
@@ -157,6 +172,11 @@ func (s *Service) StartNode(ctx context.Context, n *torx.Node) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, ok := s.members[n.Name()]
+	if !ok && s.limit > 0 {
+		if err := diskfault.Limit(ctx, n, s.dataDir(n), s.limit); err != nil {
+			return err
+		}
+	}
 	if !ok {
 		httpPort, err := n.AllocatePort()
 		if err != nil {
@@ -237,9 +257,62 @@ func (s *Service) StopNode(ctx context.Context, n *torx.Node) error {
 }
 
 // CleanNode removes the node's scratch directory: the data directory holding
-// its SQLite database and Raft log, and the captured output.
+// its SQLite database and Raft log, and the captured output. A limited data
+// directory is unmounted first, discarding what it held.
 func (s *Service) CleanNode(ctx context.Context, n *torx.Node) error {
+	s.mu.Lock()
+	limited := s.limit > 0
+	s.mu.Unlock()
+	if limited {
+		if err := diskfault.Unlimit(ctx, n, s.dataDir(n)); err != nil {
+			return err
+		}
+	}
 	return n.Rm(ctx, n.ServiceScratch(s.Name()).Root)
+}
+
+// Wipe erases a stopped node's data directory -- its database, Raft log,
+// and snapshots -- as a replaced disk would, so its next Restart starts it
+// with no state and it joins the cluster anew. A node wiped while still a
+// member comes back having forgotten what it promised as one, which Raft
+// cannot tolerate; Remove it from the cluster first.
+func (s *Service) Wipe(ctx context.Context, n *torx.Node) error {
+	s.mu.Lock()
+	m, limit := s.members[n.Name()], s.limit
+	s.mu.Unlock()
+	if m == nil {
+		return fmt.Errorf("rqlite: %s has never been started", n.Name())
+	}
+	if s.Running(n) {
+		return fmt.Errorf("rqlite: %s is running; stop it before wiping its data", n.Name())
+	}
+	dir := s.dataDir(n)
+	if limit > 0 {
+		// A limited directory is a mount: a fresh one is an empty disk.
+		if err := diskfault.Unlimit(ctx, n, dir); err != nil {
+			return err
+		}
+		return diskfault.Limit(ctx, n, dir, limit)
+	}
+	return n.Rm(ctx, dir)
+}
+
+// Remove has the cluster remove n from its membership, asking through the
+// first running member other than n, which forwards the request to the
+// leader.
+func (s *Service) Remove(ctx context.Context, n *torx.Node) error {
+	var errs []error
+	for _, p := range s.running() {
+		if p.Name() == n.Name() {
+			continue
+		}
+		err := s.Client(p).Remove(ctx, n.Name())
+		if err == nil {
+			return nil
+		}
+		errs = append(errs, err)
+	}
+	return fmt.Errorf("rqlite: removing %s: %w", n.Name(), errors.Join(append(errs, errors.New("no member took the request"))...))
 }
 
 // Crash kills the node's rqlited outright -- SIGKILL, so no leader stepdown or

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dotnwat/torx"
+	"github.com/dotnwat/torx/diskfault"
 	"github.com/dotnwat/torx/examples/rqlite/qa/rqlite"
 	"github.com/dotnwat/torx/netfault"
 )
@@ -51,8 +52,12 @@ const (
 	// stop past slowStop is a warning, one past the grace an error.
 	chaosStopGrace = 15 * time.Second
 	slowStop       = 5 * time.Second
-	healTimeout    = 60 * time.Second
-	finalTimeout   = 30 * time.Second
+	// dataLimit is the size of a node's data directory when the nodes can
+	// take disk faults: ample for a run's data, and small enough to fill
+	// in a moment.
+	dataLimit    = 256 << 20
+	healTimeout  = 60 * time.Second
+	finalTimeout = 30 * time.Second
 )
 
 // chaosJob is rqlite.chaos: a randomized test of rqlite's guarantees under
@@ -76,7 +81,8 @@ type chaosJob struct {
 	duration  time.Duration
 	clients   int
 	faults    []string
-	allFaults bool // faults was "all", so the ones the nodes cannot take are left out
+	allFaults bool  // faults was "all", so the ones the nodes cannot take are left out
+	diskErr   error // why the nodes cannot take disk faults, nil when they can
 	queued    bool
 	tolerate  map[string]bool
 	config    chaosConfig
@@ -89,10 +95,28 @@ type chaosJob struct {
 const knownIssues = "duplicate,shutdown-hang,stale-fresh-read"
 
 // Matrix is one short variant that tolerates the known issues: the chaos job
-// as a smoke test. Hunting for bugs is a -params run with longer durations,
-// many trials, and nothing tolerated.
+// as a smoke test. It leaves out disk-full, under which rqlite's replicas
+// diverge (README.md), since tolerating that would mean tolerating lost and
+// stale reads too. Hunting for bugs is a -params run with longer durations,
+// many trials, every fault, and nothing tolerated.
 func (*chaosJob) Matrix() []torx.Params {
-	return []torx.Params{{paramDuration: 20, paramTolerate: knownIssues}}
+	return []torx.Params{{paramDuration: 20, paramFaults: "all,-disk-full", paramTolerate: knownIssues}}
+}
+
+// parseFaults reads the faults parameter: a comma-separated list of faults,
+// or "all" followed by any faults to leave out, each prefixed with "-". It
+// reports whether the list began with "all", in which case the faults the
+// nodes cannot take are left out too rather than failing the variant.
+func parseFaults(spec string) ([]string, bool) {
+	parts := strings.Split(spec, ",")
+	if parts[0] != "all" {
+		return parts, false
+	}
+	faults := slices.Sorted(maps.Keys(faultWeights))
+	for _, p := range parts[1:] {
+		faults = slices.DeleteFunc(faults, func(f string) bool { return "-"+f == p })
+	}
+	return faults, true
 }
 
 func (*chaosJob) ResolveParams(p torx.Params) (torx.Params, error) {
@@ -110,20 +134,28 @@ func (j *chaosJob) Declare(jc *torx.JobContext) {
 			j.tolerate[k] = true
 		}
 	}
-	j.faults = strings.Split(jc.Params.String(paramFaults, "all"), ",")
-	if len(j.faults) == 1 && j.faults[0] == "all" {
-		j.faults, j.allFaults = slices.Sorted(maps.Keys(faultWeights)), true
-	}
+	j.faults, j.allFaults = parseFaults(jc.Params.String(paramFaults, "all"))
 	j.db = rqlite.New(serviceName, j.nodes)
 	jc.Register(j.db)
 }
 
-// Setup draws the configuration rqlite runs with before starting it.
+// Setup draws the configuration rqlite runs with, and limits the nodes' data
+// directories when they can take disk faults, before starting it.
 func (j *chaosJob) Setup(ctx context.Context, jc *torx.JobContext) error {
 	j.config = drawConfig(jc.Rand("config"))
 	jc.Log("info", "rqlited flags: "+strings.Join(j.config.flags(), " "))
 	j.db.SetFlags(j.config.flags()...)
 	j.db.SetStopGrace(chaosStopGrace)
+	j.diskErr = nil
+	for _, n := range j.db.Nodes() {
+		if err := diskfault.Check(ctx, n, n.Scratch().Root); err != nil {
+			j.diskErr = err
+			break
+		}
+	}
+	if j.diskErr == nil {
+		j.db.SetDataLimit(dataLimit)
+	}
 	return j.JobBase.Setup(ctx, jc)
 }
 
@@ -140,17 +172,28 @@ func (j *chaosJob) Run(ctx context.Context, jc *torx.JobContext) error {
 	// The network faults need nodes with addresses of their own that nft and
 	// tc can act on, as a -netns run gives them. Without such nodes, "all"
 	// leaves them out, while a variant that names one fails here.
-	faults, netOK := j.faults, netfault.Check(ctx, j.db.Nodes())
-	if netOK != nil {
-		faults = nil
-		for _, f := range j.faults {
-			if !netFaults[f] {
-				faults = append(faults, f)
-			} else if !j.allFaults {
-				return fmt.Errorf("fault %s needs nodes whose network can be faulted (run with -netns): %w", f, netOK)
-			}
+	netOK := netfault.Check(ctx, j.db.Nodes())
+	var faults []string
+	for _, f := range j.faults {
+		var why error
+		switch {
+		case netFaults[f]:
+			why = netOK
+		case diskFaults[f]:
+			why = j.diskErr
 		}
+		switch {
+		case why == nil:
+			faults = append(faults, f)
+		case !j.allFaults:
+			return fmt.Errorf("fault %s needs nodes it can act on (run with -netns): %w", f, why)
+		}
+	}
+	if netOK != nil {
 		jc.Log("info", fmt.Sprintf("no network faults: %v", netOK))
+	}
+	if j.diskErr != nil {
+		jc.Log("info", fmt.Sprintf("no disk faults: %v", j.diskErr))
 	}
 	if len(faults) == 0 {
 		return errors.New("no faults to inject")
@@ -167,7 +210,7 @@ func (j *chaosJob) Run(ctx context.Context, jc *torx.JobContext) error {
 			j.client(runCtx, h, jc.Rand(fmt.Sprintf("client-%d", i)), fmt.Sprintf("client-%d", i), &next)
 		})
 	}
-	nem := &nemesis{db: j.db, h: h, jc: jc, rng: jc.Rand("nemesis"), faults: faults, net: netOK == nil}
+	nem := &nemesis{db: j.db, h: h, jc: jc, rng: jc.Rand("nemesis"), faults: faults, net: netOK == nil, disk: j.diskErr == nil}
 	nem.run(runCtx)
 	wg.Wait()
 
