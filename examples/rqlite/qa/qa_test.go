@@ -51,9 +51,18 @@ const largestJob = max(failoverNodes, rollingNodes, backupNodes)
 
 func TestSuiteEndToEnd(t *testing.T) {
 	requireRqlited(t)
-	reqs, err := torx.Discover()
+	all, err := torx.Discover()
 	if err != nil {
 		t.Fatalf("discover: %v", err)
+	}
+	// rqlite.chaos runs for its duration and draws its faults at random; the
+	// harness runs it, and a test that must be quick and repeatable leaves it
+	// out.
+	var reqs []torx.JobRequest
+	for _, r := range all {
+		if r.ID != "rqlite.chaos" {
+			reqs = append(reqs, r)
+		}
 	}
 	root := t.TempDir()
 	res := torx.Run(context.Background(), localPool(t, largestJob), torx.SelfExecLauncher{}, reqs,
