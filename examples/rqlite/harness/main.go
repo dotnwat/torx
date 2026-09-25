@@ -60,6 +60,8 @@ func run(args []string) int {
 	paramsFile := fs.String("params", "", "parameter override file for the suite, archived in the run directory")
 	nodes := fs.Int("nodes", 0, "local pool size (0 sizes it to the largest job)")
 	parallel := fs.Int("parallel", 1, "maximum concurrent jobs")
+	netns := fs.Bool("netns", false, "give each node a network namespace of its own, so jobs can inject network faults (Linux)")
+	seed := fs.String("seed", "", "run seed, to repeat a run's random choices (default: the suite draws one)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -113,10 +115,18 @@ func run(args []string) int {
 	if *nodes > 0 {
 		argv = append(argv, "-nodes", strconv.Itoa(*nodes))
 	}
+	backend := "local"
+	if *netns {
+		argv = append(argv, "-netns")
+		backend = "local-netns"
+	}
+	if *seed != "" {
+		argv = append(argv, "-seed", *seed)
+	}
 	inv := invocation{
 		Argv:        os.Args,
 		Created:     nowUTC(),
-		Backend:     "local",
+		Backend:     backend,
 		Git:         identity,
 		Rqlited:     rq,
 		Suite:       suite,
