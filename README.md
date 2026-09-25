@@ -470,6 +470,15 @@ the host and a kernel that lets an unprivileged user create a user namespace
 go run ./path/to/suite -netns -nodes 6 -parallel 2 'my\.chaos'
 ```
 
+The [`netfault`](netfault/) package injects faults into that network:
+`netfault.Partition(ctx, groups...)` (overlapping groups make a bridge),
+`Isolate`, `Block` (one way), `Blackhole` (drop only large packets, an MTU
+black hole), `Heal`, and `SetShape`/`Unshape` for delay, jitter, and loss. It
+drives `nft` and `tc` on each node through `n.Exec`, so it works on any node
+whose commands have privilege over its network -- a `-netns` node, a
+container with `CAP_NET_ADMIN`, a host reached as root -- and
+`netfault.Check(ctx, nodes)` says whether a set of nodes can take faults.
+
 Because a suite is one static binary, production and multi-node runs invoke it
 directly; `go run`/`go test` is one way to invoke the same binary, not a second
 code path.
