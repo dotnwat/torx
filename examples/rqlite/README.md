@@ -9,12 +9,13 @@ The system under test is [rqlite](https://rqlite.io), a distributed SQLite
 replicated with Raft. It suits a test suite well: one static binary, a plain
 HTTP and JSON API, two ports per node, a readiness endpoint, a membership
 endpoint that names the leader, and leader elections that finish in a couple
-of seconds -- so every job here runs in seconds, and the whole suite in under
-half a minute.
+of seconds -- so every job here runs in seconds, apart from the chaos job,
+which runs for as long as it is told to, and the whole suite in under a
+minute.
 
 Two things live here:
 
-- **`qa/`** is the suite: a torx binary with five jobs, and the service
+- **`qa/`** is the suite: a torx binary with six jobs, and the service
   package (`qa/rqlite`) that deploys an rqlite cluster onto torx nodes and
   speaks to it.
 - **`harness/`** is the launcher: the front end a person or CI runs. It owns
@@ -169,6 +170,102 @@ sizes are recorded in the result's data. The job is what job-level artifacts
 exist for: the backup arrives in the job's own process, not on any node, so
 no service could have collected it.
 
+**`rqlite.chaos`** is a randomized test of rqlite's guarantees under faults,
+in the manner of a Jepsen test. Clients add unique values to a table, through
+plain writes and through rqlite's write queue, and read them back at every
+consistency level, from whichever node they pick, while a nemesis injects one
+fault at a time: crashing a node (SIGKILL), crashing a majority, stopping one
+gracefully (SIGTERM), pausing one (SIGSTOP, then SIGCONT), each aimed at the
+leader more often than not, and having a node snapshot, reap its snapshot
+store, or step down as leader. rqlite runs a configuration drawn at random:
+snapshots every few entries instead of every few thousand, snapshot checks
+several times a second, a WAL threshold that snapshots on nearly every
+write, VACUUMs alongside, fast or slow elections. At the end every fault is
+healed, every node's write queue is flushed, and the job reads the table at
+the strong level. Then it checks:
+
+- the history of every operation (`checkSet` in `checkset.go`): no
+  acknowledged write lost; no read at `linearizable` or `strong` missing a
+  value known to be committed before it began, where a value is known
+  committed once its write was acknowledged or any read of any level saw it;
+  no value applied twice, none nobody wrote, none whose write definitely
+  failed. A write that failed with no answer as to whether it took effect (a
+  timeout, leadership lost while committing) may go either way. A stale
+  `weak` read is a warning, since rqlite documents that a just-deposed leader
+  may serve one.
+- that every node's own copy converges on the final read;
+- that no `rqlited` exited on its own, and that a graceful stop exited
+  within its grace period, not killed. A stop that hangs is sent SIGQUIT
+  before the kill, so its node's log ends in the stacks of every goroutine.
+
+The operation history is attached as `history.ndjson`, and what the checks
+found as `anomalies.json`. Every choice the job makes, from the configuration
+to each fault and each client operation, is drawn from the variant's seed
+(`jc.Rand`), so a failing variant is rerun with the run's `-seed` and the
+same selection.
+
+The compiled-in variant runs for twenty seconds and tolerates the two issues
+below, reporting them as warnings, so a run of the whole suite passes on a
+release that has them. A search for bugs is a `-params` run, strict by
+default, with longer runs, many trials, and a pool large enough to run them
+side by side:
+
+```json
+{ "rqlite.chaos": { "matrix": { "duration": [60], "trial": [1, 2, 3, 4, 5, 6, 7, 8] } } }
+```
+
+```sh
+go run ./examples/rqlite/harness -params hunt.json -parallel 8 -nodes 24 'rqlite\.chaos'
+```
+
+Its parameters are `nodes`, `duration` (seconds), `clients`, `faults` (a
+comma-separated list from `nemesis.go`, or `all`), `queued` (whether clients
+also write through the queue), `tolerate` (anomaly kinds reported as
+warnings), and `trial`.
+
+### What it found in rqlite v10.3.6
+
+- **Queued writes applied twice** (`duplicate`). rqlite's write queue
+  retries a batch whose execution failed, including when the failure says
+  nothing about whether the batch committed: "leadership lost while
+  committing log", or a connection to the leader lost mid-request. When the
+  first attempt did commit, the retry applies the batch a second time, and a
+  client that waited for the write (`queue&wait`) is told it succeeded once.
+  Most runs of the job that crash or pause the leader show it. The request
+  forwarding a follower does for any write has the same shape: it retries
+  once even when asked for no retries.
+- **A graceful stop that hangs** (`shutdown-hang`), for two reasons the
+  goroutine dumps the job takes tell apart.
+  - *For a minute, on a follower whose leader went silent.* A follower
+    forwards writes and some reads to the leader, and the forwarding ignores
+    the request being cancelled: against a leader that has gone silent, each
+    forwarded request holds its handler for its full timeout, thirty
+    seconds, and then retries for thirty more, whether or not its client is
+    still there. rqlited's SIGTERM path waits, without a deadline, for every
+    in-flight request to finish. The dump shows the main goroutine in
+    `http.(*Server).Shutdown` and a handler in `cluster.(*Client).Execute`,
+    reading from the silent leader.
+  - *Forever, on a leader, in hashicorp/raft.* The dump shows the main
+    goroutine in `store.(*Store).Close`, waiting for Raft to shut down, and
+    a replication goroutine per follower blocked in
+    `netPipeline.AppendEntries`. That is a deadlock in hashicorp/raft
+    v1.8.0's pipelined replication: when the goroutine decoding a
+    follower's responses gives up on one (the follower rejected the append,
+    or answered with a newer term, as every follower does once a stopping
+    leader has handed over), nothing reads the pipeline's responses any
+    more, and with rqlite's settings the pipeline's channels are unbuffered,
+    so the next two sends wedge the replication goroutine for good. Raft's
+    shutdown waits for it forever. Short of a shutdown, the same wedge
+    stops replication to that follower while heartbeats keep it from
+    calling an election -- the symptom of hashicorp/raft#612. It reproduces
+    with hashicorp/raft alone, without rqlite, and having the decoding
+    goroutine close the pipeline when it gives up fixes it.
+
+Two smaller things show up as warnings: a stop takes five seconds when a
+client holds a connection that has not yet sent a request (Go's HTTP server
+waits that long for such a connection during shutdown), and a node stopped
+while it is still joining the cluster exits with status 1.
+
 ## How the service is built
 
 `qa/rqlite/service.go` is the part worth reading closely; the choices below
@@ -233,6 +330,20 @@ fails the job rather than hanging it, and torx bounds each probe on its own,
 so a probe that stalls costs one attempt rather than the node's whole
 readiness window.
 
+**Faults beyond the crash.** `Pause` and `Resume` stop a node's process in
+its tracks and continue it, the fault that makes a node go silent rather than
+die; a paused process is resumed before any stop, so SIGTERM can act.
+`SetFlags` adds rqlited flags to every launch, which is how the chaos job
+runs its drawn configuration, and `SetStopGrace` changes the grace period.
+Every process is watched: one that exits without the service having stopped
+it is recorded, and `Exits` returns them, so a job can tell a crash it caused
+from one it did not.
+
+**A stop that hangs leaves its stacks.** The service stops a process with
+`torx.Stop` and a `Dump` of SIGQUIT, so rqlited, when it has not exited by the
+end of the grace period, prints every goroutine's stack into its log before
+it is killed.
+
 **Output is an artifact.** `StartCaptured` sends each `rqlited`'s output to
 `stdout.log` on its node and collects it after the job. The service sets the
 `CaptureRotate` policy, so a `Restart` moves the stopped process's log aside
@@ -245,8 +356,11 @@ beside what its replacement logged.
 `go test ./examples/rqlite/...` runs unit tests for the pure parts -- the
 client's request and response handling against rqlite's real response
 bodies, the command line the service builds, parameter resolution, membership
-checks, the harness's version parsing -- and one end-to-end test that runs the
-whole suite through the real driver/worker split on a local pool.
+checks, the chaos job's checker and error classification, the harness's
+version parsing -- and one end-to-end test that runs the suite through the
+real driver/worker split on a local pool. The end-to-end test leaves out
+`rqlite.chaos`, which draws its faults at random and runs for its duration;
+the harness run in CI covers it.
 
 The end-to-end test needs `rqlited`. Without it the test skips, saying so;
 with `TORX_RQLITE_REQUIRED=1` in the environment a missing binary fails it

@@ -152,6 +152,37 @@ func (c *Client) Execute(ctx context.Context, stmts ...Statement) ([]Result, err
 	return c.post(ctx, "/db/execute?transaction", stmts)
 }
 
+// ExecuteQueued runs stmts through the node's write queue: rqlite
+// acknowledges a queued write before it is committed, batching it with
+// others, unless wait is set, in which case the call returns once the batch
+// holding it has been committed. The statements are not a transaction. With
+// no statements and wait, the call is a checkpoint: it returns once
+// everything queued on the node before it has been committed.
+func (c *Client) ExecuteQueued(ctx context.Context, wait bool, stmts ...Statement) error {
+	if stmts == nil {
+		stmts = []Statement{} // encode an empty array, not null
+	}
+	path := "/db/execute?queue"
+	if wait {
+		path += "&wait"
+	}
+	body, err := json.Marshal(stmts)
+	if err != nil {
+		return fmt.Errorf("rqlite: encode request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("rqlite: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	data, err := c.do(req)
+	if err != nil {
+		return err
+	}
+	_, err = decodeResults(req.URL.Path, data, stmts)
+	return err
+}
+
 // Query runs one read-only statement at the given consistency level and
 // returns its rows.
 func (c *Client) Query(ctx context.Context, level string, stmt Statement) (Result, error) {
@@ -207,6 +238,67 @@ func (c *Client) Load(ctx context.Context, db []byte) error {
 		return err
 	}
 	_, err = decodeResults(req.URL.Path, data, nil)
+	return err
+}
+
+// Snapshot has the node snapshot its Raft log now, rather than when its
+// thresholds say to. A node with nothing new to snapshot answers 204, which is
+// not an error.
+func (c *Client) Snapshot(ctx context.Context) error {
+	return c.postEmpty(ctx, "/snapshot", nil)
+}
+
+// Reap has the node remove the snapshots and WAL files its snapshot store no
+// longer needs, now rather than on its own schedule.
+func (c *Client) Reap(ctx context.Context) error {
+	return c.postEmpty(ctx, "/reap", nil)
+}
+
+// Stepdown asks the leader to hand leadership to another voter -- to the
+// node with id target when it is not empty -- and, with wait, to return once
+// the handoff is done. A follower forwards the request to the leader.
+func (c *Client) Stepdown(ctx context.Context, wait bool, target string) error {
+	path := "/leader"
+	if wait {
+		path += "?wait"
+	}
+	var body []byte
+	if target != "" {
+		var err error
+		if body, err = json.Marshal(map[string]string{"id": target}); err != nil {
+			return fmt.Errorf("rqlite: encode request: %w", err)
+		}
+	}
+	return c.postEmpty(ctx, path, body)
+}
+
+// Remove removes the node with id from the cluster's membership. A follower
+// forwards the request to the leader.
+func (c *Client) Remove(ctx context.Context, id string) error {
+	body, err := json.Marshal(map[string]string{"id": id})
+	if err != nil {
+		return fmt.Errorf("rqlite: encode request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.base+"/remove", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("rqlite: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	_, err = c.do(req)
+	return err
+}
+
+// postEmpty POSTs body, as JSON when there is one, to an endpoint that
+// answers with no results envelope, and takes 200 or 204 as success.
+func (c *Client) postEmpty(ctx context.Context, path string, body []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("rqlite: %w", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	_, err = c.do(req, http.StatusNoContent)
 	return err
 }
 
@@ -287,12 +379,24 @@ func (c *Client) get(ctx context.Context, path string) ([]byte, error) {
 	return c.do(req)
 }
 
-// do sends req and returns the body of a 200 response. Any other status is an
-// error carrying the response text, which is where rqlite puts messages such
-// as "leader not found". A body past maxResponse is an error rather than a
-// truncated one: a backup cut short would be a corrupt file, not a shorter
-// answer.
-func (c *Client) do(req *http.Request) ([]byte, error) {
+// StatusError is a response with a status the call did not expect. Text is
+// the response body, which is where rqlite puts messages such as "leader not
+// found".
+type StatusError struct {
+	Path string
+	Code int
+	Text string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("rqlite: %s: HTTP %d: %s", e.Path, e.Code, e.Text)
+}
+
+// do sends req and returns the body of a 200 response, or of a response with
+// one of the other statuses in ok. Any other status is a *StatusError. A body
+// past maxResponse is an error rather than a truncated one: a backup cut short
+// would be a corrupt file, not a shorter answer.
+func (c *Client) do(req *http.Request, ok ...int) ([]byte, error) {
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("rqlite: %w", err)
@@ -305,8 +409,8 @@ func (c *Client) do(req *http.Request) ([]byte, error) {
 	if len(data) > maxResponse {
 		return nil, fmt.Errorf("rqlite: %s response exceeds %d bytes", req.URL.Path, maxResponse)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("rqlite: %s: HTTP %d: %s", req.URL.Path, resp.StatusCode, strings.TrimSpace(string(data)))
+	if resp.StatusCode != http.StatusOK && !slices.Contains(ok, resp.StatusCode) {
+		return nil, &StatusError{Path: req.URL.Path, Code: resp.StatusCode, Text: strings.TrimSpace(string(data))}
 	}
 	return data, nil
 }

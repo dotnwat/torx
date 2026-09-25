@@ -133,3 +133,25 @@ func TestCheckMembership(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveChaosParams(t *testing.T) {
+	got, err := resolveChaosParams(torx.Params{paramDuration: 5.0, paramFaults: "crash,pause-leader"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[paramDuration] != 5 || got[paramNodes] != defaultNodes || got[paramQueued] != true || got[paramTolerate] != "" {
+		t.Errorf("resolved = %v; want the duration as an int and every default filled in", got)
+	}
+	for _, bad := range []torx.Params{
+		{paramFaults: "crash,partition-typo"},
+		{paramFaults: ""},
+		{paramDuration: 0},
+		{paramClients: 1.5},
+		{paramQueued: "yes"},
+		{"nemesis": "on"},
+	} {
+		if _, err := resolveChaosParams(bad); err == nil {
+			t.Errorf("resolveChaosParams(%v) accepted it", bad)
+		}
+	}
+}

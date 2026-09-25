@@ -48,6 +48,14 @@ const (
 	stopGrace = 5 * time.Second
 )
 
+// stopPolicy is how the service stops rqlited after grace: SIGTERM, the grace
+// period, and, for a process still running after it, SIGQUIT before the kill,
+// on which the Go runtime writes every goroutine's stack to the captured log.
+// A stop that hangs is a finding, and the stacks are where it hung.
+func stopPolicy(grace time.Duration) torx.StopPolicy {
+	return torx.StopPolicy{Signal: syscall.SIGTERM, Grace: grace, Dump: syscall.SIGQUIT}
+}
+
 // Service runs an rqlite cluster of one rqlited per node.
 //
 // The first node bootstraps a one-node cluster and each later node joins
@@ -68,6 +76,20 @@ type Service struct {
 
 	mu      sync.Mutex
 	members map[string]*member // node name -> member, from first start to stop
+	flags   []string           // extra rqlited flags every launch passes, from SetFlags
+	grace   time.Duration      // how long a stop waits for rqlited to exit, from SetStopGrace
+	exits   []Exit             // processes that exited without the service stopping them
+}
+
+// Exit is an rqlited that exited on its own: not stopped by Crash, Shutdown,
+// or the framework's teardown. A server that dies under a test is the most
+// basic failure there is, and one a job that injects other faults must not
+// mistake for its own doing.
+type Exit struct {
+	Node string    `json:"node"`
+	Code int       `json:"code"` // the exit status, -1 for a signal
+	Err  string    `json:"error,omitempty"`
+	Time time.Time `json:"time"`
 }
 
 // member is a node's place in the cluster: the leased ports that address it
@@ -76,6 +98,8 @@ type member struct {
 	httpPort int
 	raftPort int
 	proc     torx.Process // the running rqlited, nil between a Crash or Shutdown and the Restart
+	paused   bool         // proc is stopped by SIGSTOP, from Pause until Resume or its end
+	stopping bool         // a Shutdown is stopping the member's last process
 	// unstopped is the error of a Crash or Shutdown that could not establish
 	// its rqlited was gone: the kill could not be carried out, or the transport
 	// lost track of the process. The old rqlited may still hold the member's
@@ -87,12 +111,37 @@ type member struct {
 // New builds a service named name that runs a cluster of nodes rqlited
 // processes, one per node.
 func New(name string, nodes int) *Service {
-	s := &Service{members: map[string]*member{}}
+	s := &Service{members: map[string]*member{}, grace: stopGrace}
 	s.ServiceBase = torx.NewServiceBase(name, torx.Homogeneous(nodes, torx.NodeSpec{}), s)
 	// A Restart launches a second rqlited on the node; keep what the crashed one
 	// logged up to its crash beside what its replacement logs.
 	s.SetCapturePolicy(torx.CaptureRotate)
 	return s
+}
+
+// SetFlags sets extra rqlited flags, such as "-raft-snap=64", that every
+// launch on every node passes, a Restart included. Call it before the service
+// starts: a job that draws its configuration at random calls it from Setup.
+func (s *Service) SetFlags(flags ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flags = append([]string(nil), flags...)
+}
+
+// SetStopGrace sets how long Shutdown and the teardown's stop wait for
+// rqlited to exit after SIGTERM before they kill it; stopGrace by default.
+func (s *Service) SetStopGrace(grace time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.grace = grace
+}
+
+// Exits returns the processes that exited without the service stopping them,
+// in the order the service noticed.
+func (s *Service) Exits() []Exit {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Exit(nil), s.exits...)
 }
 
 // StartNode waits for the node's predecessors to be ready, leases the node's
@@ -155,16 +204,27 @@ func (s *Service) StopNode(ctx context.Context, n *torx.Node) error {
 	s.mu.Lock()
 	m := s.members[n.Name()]
 	delete(s.members, n.Name())
+	var proc torx.Process
+	var paused bool
+	if m != nil {
+		proc, paused = m.proc, m.paused
+		m.proc, m.paused = nil, false
+	}
+	grace := s.grace
 	s.mu.Unlock()
 	if m == nil {
 		return nil
 	}
 	err := m.unstopped
-	if m.proc != nil {
-		code, serr := torx.Shutdown(ctx, m.proc, syscall.SIGTERM, stopGrace)
+	if proc != nil {
+		// A paused process cannot act on SIGTERM; let it run to its shutdown.
+		if paused {
+			_ = proc.Signal(ctx, syscall.SIGCONT)
+		}
+		code, serr := torx.Stop(ctx, proc, stopPolicy(grace))
 		switch {
 		case errors.Is(serr, torx.ErrShutdownTimeout):
-			torx.Logf(ctx, "warn", "%s did not exit within %v of SIGTERM and was killed", n.Name(), stopGrace)
+			torx.Logf(ctx, "warn", "%s did not exit within %v of SIGTERM and was killed", n.Name(), grace)
 		case serr != nil:
 			err = serr
 		case code != 0:
@@ -194,8 +254,8 @@ func (s *Service) Crash(ctx context.Context, n *torx.Node) error {
 	if m == nil || m.proc == nil {
 		return fmt.Errorf("rqlite: %s is not running", n.Name())
 	}
-	err := m.proc.Close()
-	m.proc = nil
+	err := m.proc.Close() // SIGKILL ends a paused process as well
+	m.proc, m.paused = nil, false
 	if err != nil {
 		m.unstopped = fmt.Errorf("rqlite: crashing %s: %w", n.Name(), err)
 		return m.unstopped
@@ -211,19 +271,35 @@ func (s *Service) Crash(ctx context.Context, n *torx.Node) error {
 // failures leave the node clean, the process being gone either way. Any other
 // error -- the signal or the kill could not be delivered, the wait was cut
 // short, the transport lost track of the process -- leaves the member
-// unstopped: torx.Shutdown reports a timeout only once its kill went through,
+// unstopped: torx.Stop reports a timeout only once its kill went through,
 // and past that it does not say whether the process is gone, so it is taken
 // to still be there.
+//
+// The service's lock is not held while the process stops, which can take the
+// whole grace period: the rest of the cluster, and the clients reaching it
+// through the service, carry on meanwhile, as they would around an operator's
+// stop. Restart refuses the member until the stop is done.
 func (s *Service) Shutdown(ctx context.Context, n *torx.Node) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	m := s.members[n.Name()]
 	if m == nil || m.proc == nil {
+		s.mu.Unlock()
 		return fmt.Errorf("rqlite: %s is not running", n.Name())
 	}
-	proc := m.proc
-	m.proc = nil
-	code, err := torx.Shutdown(ctx, proc, syscall.SIGTERM, stopGrace)
+	proc, paused, grace := m.proc, m.paused, s.grace
+	m.proc, m.paused, m.stopping = nil, false, true
+	s.mu.Unlock()
+
+	if paused {
+		// A paused process cannot act on SIGTERM. Should the resume fail, the
+		// stop's own signal and wait say what state the process is in.
+		_ = proc.Signal(ctx, syscall.SIGCONT)
+	}
+	code, err := torx.Stop(ctx, proc, stopPolicy(grace))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m.stopping = false
 	if err != nil {
 		err = fmt.Errorf("rqlite: shutting down %s: %w", n.Name(), err)
 		if !errors.Is(err, torx.ErrShutdownTimeout) {
@@ -235,6 +311,56 @@ func (s *Service) Shutdown(ctx context.Context, n *torx.Node) error {
 		return fmt.Errorf("rqlite: %s exited with status %d on SIGTERM, want 0", n.Name(), code)
 	}
 	return nil
+}
+
+// Pause stops the node's rqlited in its tracks with SIGSTOP: the process and
+// its connections stay, but it does nothing -- no heartbeats, no replies --
+// until Resume. To its peers a paused leader is one that went silent, and when
+// it resumes it still believes it leads until it hears otherwise: the fault
+// that tests whether a deposed leader can serve a stale read or accept a
+// write it cannot commit.
+func (s *Service) Pause(ctx context.Context, n *torx.Node) error {
+	return s.signalPause(ctx, n, syscall.SIGSTOP, true)
+}
+
+// Resume continues a node paused by Pause with SIGCONT.
+func (s *Service) Resume(ctx context.Context, n *torx.Node) error {
+	return s.signalPause(ctx, n, syscall.SIGCONT, false)
+}
+
+// signalPause sends sig to the node's running rqlited and records whether it
+// is now paused.
+func (s *Service) signalPause(ctx context.Context, n *torx.Node, sig syscall.Signal, paused bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.members[n.Name()]
+	if m == nil || m.proc == nil {
+		return fmt.Errorf("rqlite: %s is not running", n.Name())
+	}
+	if m.paused == paused {
+		return nil
+	}
+	if err := m.proc.Signal(ctx, sig); err != nil {
+		return fmt.Errorf("rqlite: %v to %s: %w", sig, n.Name(), err)
+	}
+	m.paused = paused
+	return nil
+}
+
+// Paused reports whether the node's rqlited is paused.
+func (s *Service) Paused(n *torx.Node) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.members[n.Name()]
+	return m != nil && m.paused
+}
+
+// Running reports whether the node has an rqlited process, paused or not.
+func (s *Service) Running(n *torx.Node) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.members[n.Name()]
+	return m != nil && m.proc != nil
 }
 
 // Restart launches rqlited again for a node stopped by Crash or Shutdown,
@@ -251,6 +377,9 @@ func (s *Service) Restart(ctx context.Context, n *torx.Node) error {
 	}
 	if m.unstopped != nil {
 		return fmt.Errorf("rqlite: %s cannot restart over a process that may still be running: %w", n.Name(), m.unstopped)
+	}
+	if m.stopping {
+		return fmt.Errorf("rqlite: %s cannot restart while its last process is still stopping", n.Name())
 	}
 	return s.launchLocked(ctx, n, m)
 }
@@ -342,20 +471,45 @@ func (s *Service) launchLocked(ctx context.Context, n *torx.Node, m *member) err
 	if m.proc != nil {
 		return fmt.Errorf("rqlite: %s is already running", n.Name())
 	}
-	args := commandLine(n.Name(), n.Addr(), m.httpPort, m.raftPort, s.peersLocked(n), s.dataDir(n))
+	args := commandLine(n.Name(), n.Addr(), m.httpPort, m.raftPort, s.peersLocked(n), s.flags, s.dataDir(n))
 	proc, err := s.StartCaptured(ctx, n, torx.Command(binary, args...))
 	if err != nil {
 		return err
 	}
-	m.proc = proc
+	m.proc, m.paused = proc, false
+	go s.watch(n, m, proc)
 	return nil
+}
+
+// watch waits for proc to exit and records the exit if the service did not
+// cause it: every stop the service makes takes the process off its member
+// first, so a process still on its member when it exits died on its own. The
+// member is then left stopped, as a Crash would leave it, so a Restart can
+// bring it back. Wait returns once the process is reaped, which the service's
+// own stops and the teardown guarantee, so the watcher does not outlive the
+// job.
+func (s *Service) watch(n *torx.Node, m *member, proc torx.Process) {
+	code, err := proc.Wait(context.Background())
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if m.proc != proc {
+		return
+	}
+	m.proc, m.paused = nil, false
+	e := Exit{Node: n.Name(), Code: code, Time: time.Now()}
+	if err != nil {
+		e.Err = err.Error()
+	}
+	s.exits = append(s.exits, e)
+	_ = proc.Close()
 }
 
 // commandLine is the rqlited argv for a member. It binds every interface and
 // advertises the node's reachable address, so peers and clients on other
 // hosts can dial it while a loopback-only local node works the same way;
-// joins through peers when it has any; and keeps its state under dataDir.
-func commandLine(id, host string, httpPort, raftPort int, peers []string, dataDir string) []string {
+// joins through peers when it has any; passes the extra flags; and keeps its
+// state under dataDir.
+func commandLine(id, host string, httpPort, raftPort int, peers, flags []string, dataDir string) []string {
 	args := []string{
 		"-node-id", id,
 		"-http-addr", net.JoinHostPort("0.0.0.0", strconv.Itoa(httpPort)),
@@ -366,6 +520,7 @@ func commandLine(id, host string, httpPort, raftPort int, peers []string, dataDi
 	if len(peers) > 0 {
 		args = append(args, "-join", strings.Join(peers, ","))
 	}
+	args = append(args, flags...)
 	return append(args, dataDir)
 }
 
@@ -419,13 +574,14 @@ func (s *Service) dataDir(n *torx.Node) string {
 	return filepath.Join(n.ServiceScratch(s.Name()).Root, "data")
 }
 
-// running lists the nodes with a live process, in node order.
+// running lists the nodes with a live process that is not paused, in node
+// order: the ones that can answer.
 func (s *Service) running() []*torx.Node {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var nodes []*torx.Node
 	for _, n := range s.Nodes() {
-		if m, ok := s.members[n.Name()]; ok && m.proc != nil {
+		if m, ok := s.members[n.Name()]; ok && m.proc != nil && !m.paused {
 			nodes = append(nodes, n)
 		}
 	}

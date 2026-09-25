@@ -15,7 +15,7 @@ import (
 )
 
 func TestCommandLineBindsBroadlyAndAdvertisesHost(t *testing.T) {
-	seed := commandLine("node-0", "10.0.0.5", 4001, 4002, nil, "/scratch/node-0/rqlite/data")
+	seed := commandLine("node-0", "10.0.0.5", 4001, 4002, nil, nil, "/scratch/node-0/rqlite/data")
 	want := []string{
 		"-node-id", "node-0",
 		"-http-addr", "0.0.0.0:4001", "-http-adv-addr", "10.0.0.5:4001",
@@ -29,12 +29,15 @@ func TestCommandLineBindsBroadlyAndAdvertisesHost(t *testing.T) {
 		t.Error("seed argv joins; a seed must bootstrap alone")
 	}
 
-	joiner := commandLine("node-2", "10.0.0.7", 4001, 4002, []string{"10.0.0.5:4002", "10.0.0.6:4002"}, "/d")
+	joiner := commandLine("node-2", "10.0.0.7", 4001, 4002, []string{"10.0.0.5:4002", "10.0.0.6:4002"}, []string{"-raft-snap=64"}, "/d")
 	if i := slices.Index(joiner, "-join"); i < 0 || joiner[i+1] != "10.0.0.5:4002,10.0.0.6:4002" {
 		t.Errorf("joiner argv lacks the comma-joined peers: %q", joiner)
 	}
 	if joiner[len(joiner)-1] != "/d" {
 		t.Errorf("data directory must be the final positional argument, got %q", joiner)
+	}
+	if joiner[len(joiner)-2] != "-raft-snap=64" {
+		t.Errorf("extra flags must come before the data directory, got %q", joiner)
 	}
 }
 
