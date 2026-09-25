@@ -199,6 +199,25 @@ func (c *Client) Query(ctx context.Context, level string, stmt Statement) (Resul
 	return res[0], nil
 }
 
+// QueryFresh runs one read-only statement at the none level, bounded by
+// freshness: a node that has not heard from the leader within freshness
+// refuses the read, and with strict, so does one whose data is older than
+// freshness -- the guarantee rqlite documents for freshness_strict.
+func (c *Client) QueryFresh(ctx context.Context, stmt Statement, freshness time.Duration, strict bool) (Result, error) {
+	path := "/db/query?level=" + LevelNone + "&freshness=" + url.QueryEscape(freshness.String())
+	if strict {
+		path += "&freshness_strict"
+	}
+	res, err := c.post(ctx, path, []Statement{stmt})
+	if err != nil {
+		return Result{}, err
+	}
+	if len(res) != 1 {
+		return Result{}, fmt.Errorf("rqlite: query returned %d results, want 1", len(res))
+	}
+	return res[0], nil
+}
+
 // QueryInt runs a single-value query, such as a COUNT(*), at level.
 func (c *Client) QueryInt(ctx context.Context, level string, stmt Statement) (int64, error) {
 	res, err := c.Query(ctx, level, stmt)

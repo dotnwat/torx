@@ -17,6 +17,7 @@ import (
 
 	"github.com/dotnwat/torx"
 	"github.com/dotnwat/torx/examples/rqlite/qa/rqlite"
+	"github.com/dotnwat/torx/netfault"
 )
 
 // Parameters of rqlite.chaos.
@@ -39,6 +40,10 @@ const (
 	readWindow  = 100             // a window read covers values within this many of the newest
 	fullReadPct = 5               // percent of reads that read the whole table
 	failBackoff = 50 * time.Millisecond
+	// readFreshness bounds a freshness read (modeFresh): a none read with
+	// freshness and freshness_strict, which rqlite documents as refusing to
+	// serve data more than the freshness out of date.
+	readFreshness = time.Second
 	// chaosStopGrace is how long a stopped node gets to exit. rqlited
 	// normally exits within milliseconds, but a client's connection that has
 	// not yet sent a request holds Go's HTTP server shutdown for five
@@ -66,21 +71,22 @@ const (
 // failure found under one seed is rerun with -seed and the same selection.
 type chaosJob struct {
 	torx.JobBase
-	db       *rqlite.Service
-	nodes    int
-	duration time.Duration
-	clients  int
-	faults   []string
-	queued   bool
-	tolerate map[string]bool
-	config   chaosConfig
+	db        *rqlite.Service
+	nodes     int
+	duration  time.Duration
+	clients   int
+	faults    []string
+	allFaults bool // faults was "all", so the ones the nodes cannot take are left out
+	queued    bool
+	tolerate  map[string]bool
+	config    chaosConfig
 }
 
 // knownIssues are the anomalies rqlite v10.3.6 is known to produce under this
 // job, which its compiled-in variant tolerates so that a run of the whole
 // suite passes on a release with them; a -params run is strict unless it says
 // otherwise. README.md describes each.
-const knownIssues = "duplicate,shutdown-hang"
+const knownIssues = "duplicate,shutdown-hang,stale-fresh-read"
 
 // Matrix is one short variant that tolerates the known issues: the chaos job
 // as a smoke test. Hunting for bugs is a -params run with longer durations,
@@ -106,7 +112,7 @@ func (j *chaosJob) Declare(jc *torx.JobContext) {
 	}
 	j.faults = strings.Split(jc.Params.String(paramFaults, "all"), ",")
 	if len(j.faults) == 1 && j.faults[0] == "all" {
-		j.faults = slices.Sorted(maps.Keys(faultWeights))
+		j.faults, j.allFaults = slices.Sorted(maps.Keys(faultWeights)), true
 	}
 	j.db = rqlite.New(serviceName, j.nodes)
 	jc.Register(j.db)
@@ -131,6 +137,25 @@ func (j *chaosJob) Run(ctx context.Context, jc *torx.JobContext) error {
 		return err
 	}
 
+	// The network faults need nodes with addresses of their own that nft and
+	// tc can act on, as a -netns run gives them. Without such nodes, "all"
+	// leaves them out, while a variant that names one fails here.
+	faults, netOK := j.faults, netfault.Check(ctx, j.db.Nodes())
+	if netOK != nil {
+		faults = nil
+		for _, f := range j.faults {
+			if !netFaults[f] {
+				faults = append(faults, f)
+			} else if !j.allFaults {
+				return fmt.Errorf("fault %s needs nodes whose network can be faulted (run with -netns): %w", f, netOK)
+			}
+		}
+		jc.Log("info", fmt.Sprintf("no network faults: %v", netOK))
+	}
+	if len(faults) == 0 {
+		return errors.New("no faults to inject")
+	}
+
 	h := NewHistory()
 	var next atomic.Int64 // the last value handed out; values start at 1
 	runCtx, stop := context.WithTimeout(ctx, j.duration)
@@ -142,7 +167,7 @@ func (j *chaosJob) Run(ctx context.Context, jc *torx.JobContext) error {
 			j.client(runCtx, h, jc.Rand(fmt.Sprintf("client-%d", i)), fmt.Sprintf("client-%d", i), &next)
 		})
 	}
-	nem := &nemesis{db: j.db, h: h, jc: jc, rng: jc.Rand("nemesis"), faults: j.faults}
+	nem := &nemesis{db: j.db, h: h, jc: jc, rng: jc.Rand("nemesis"), faults: faults, net: netOK == nil}
 	nem.run(runCtx)
 	wg.Wait()
 
@@ -246,7 +271,13 @@ func (j *chaosJob) client(ctx context.Context, h *History, rng *rand.Rand, name 
 				stmt = rqlite.Stmt("SELECT v FROM s WHERE v > ?", op.Lower)
 			}
 			op.Start = h.Now()
-			res, err := c.Query(octx, op.Mode, stmt)
+			var res rqlite.Result
+			var err error
+			if op.Mode == modeFresh {
+				res, err = c.QueryFresh(octx, stmt, readFreshness, true)
+			} else {
+				res, err = c.Query(octx, op.Mode, stmt)
+			}
 			op.End = h.Now()
 			if err == nil {
 				op.Values, err = int64s(res)
@@ -268,16 +299,22 @@ func (j *chaosJob) client(ctx context.Context, h *History, rng *rand.Rand, name 
 	}
 }
 
+// modeFresh is the read mode of a none read bounded by readFreshness in
+// strict mode.
+const modeFresh = "none-fresh"
+
 // pickLevel picks a read's consistency level, favoring the ones with a
 // guarantee to check.
 func pickLevel(rng *rand.Rand) string {
 	switch p := rng.IntN(100); {
-	case p < 45:
+	case p < 40:
 		return rqlite.LevelLinearizable
-	case p < 70:
+	case p < 60:
 		return rqlite.LevelStrong
-	case p < 90:
+	case p < 75:
 		return rqlite.LevelWeak
+	case p < 90:
+		return modeFresh
 	default:
 		return rqlite.LevelNone
 	}
