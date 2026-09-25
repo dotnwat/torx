@@ -26,4 +26,5 @@ func init() {
 	torx.Register("rqlite.failover", func() torx.Job { return &failoverJob{} })
 	torx.Register("rqlite.rolling", func() torx.Job { return &rollingJob{} })
 	torx.Register("rqlite.backup", func() torx.Job { return &backupJob{} })
+	torx.Register("rqlite.chaos", func() torx.Job { return &chaosJob{} })
 }

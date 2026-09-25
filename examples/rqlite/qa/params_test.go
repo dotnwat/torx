@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -130,6 +131,39 @@ func TestCheckMembership(t *testing.T) {
 		err := checkMembership(c.view, c.want)
 		if err == nil || !strings.Contains(err.Error(), c.msg) {
 			t.Errorf("%s: error = %v, want one containing %q", c.name, err, c.msg)
+		}
+	}
+}
+
+func TestResolveChaosParams(t *testing.T) {
+	got, err := resolveChaosParams(torx.Params{paramDuration: 5.0, paramFaults: "crash,pause-leader"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[paramDuration] != 5 || got[paramNodes] != defaultNodes || got[paramQueued] != true || got[paramTolerate] != "" {
+		t.Errorf("resolved = %v; want the duration as an int and every default filled in", got)
+	}
+	for _, good := range []string{"all", "all,-disk-full,-crash", "crash,pause-leader"} {
+		if _, err := resolveChaosParams(torx.Params{paramFaults: good}); err != nil {
+			t.Errorf("faults %q refused: %v", good, err)
+		}
+	}
+	if faults, all := parseFaults("all,-disk-full"); !all || slices.Contains(faults, "disk-full") || !slices.Contains(faults, "crash") {
+		t.Errorf("parseFaults(all,-disk-full) = %v, %v", faults, all)
+	}
+	for _, bad := range []torx.Params{
+		{paramFaults: "crash,partition-typo"},
+		{paramFaults: "all,disk-full"},
+		{paramFaults: "all,-disk-fool"},
+		{paramFaults: "crash,-disk-full"},
+		{paramFaults: ""},
+		{paramDuration: 0},
+		{paramClients: 1.5},
+		{paramQueued: "yes"},
+		{"nemesis": "on"},
+	} {
+		if _, err := resolveChaosParams(bad); err == nil {
+			t.Errorf("resolveChaosParams(%v) accepted it", bad)
 		}
 	}
 }
