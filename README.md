@@ -216,7 +216,14 @@ Guidelines that keep a service portable across the local and ssh backends:
   the usual graceful stop and escalates to the kill when the grace period
   runs out (reported as `torx.ErrShutdownTimeout`). Use it so teardown goes
   through the system's own shutdown path, and to drive rolling restarts and
-  signal-triggered reloads from a job.
+  signal-triggered reloads from a job. `torx.Stop(ctx, p, torx.StopPolicy{...})`
+  is the same stop with one more step: a `Dump` signal sent when the grace
+  period runs out, before the kill, on which the program writes out where it
+  is stuck. `syscall.SIGQUIT` has a Go program print every goroutine's stack
+  (and a JVM a thread dump) into the log `StartCaptured` collects, so a stop
+  that hangs leaves the evidence of why. `Signal` also pauses and resumes a
+  process (`SIGSTOP`, `SIGCONT`), the fault that makes a node go silent
+  without dying.
 - **One-shot commands** (a load generator that runs and exits) use
   `n.Exec(ctx, cmd)` instead of `StartCaptured`; it runs to completion and
   returns the captured `ExecResult` (exit code, stdout, stderr).

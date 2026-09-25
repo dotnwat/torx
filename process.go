@@ -63,11 +63,46 @@ type Process interface {
 // The signal reaches the command only once it has replaced the shell the
 // backend launched it through; stop a command after it has shown it is up (a
 // readiness check), not in the moments after its start.
+//
+// Shutdown is Stop with no dump signal.
 func Shutdown(ctx context.Context, p Process, sig os.Signal, grace time.Duration) (int, error) {
-	sigErr := p.Signal(ctx, sig)
+	return Stop(ctx, p, StopPolicy{Signal: sig, Grace: grace})
+}
+
+// StopPolicy says how Stop ends a command.
+type StopPolicy struct {
+	// Signal asks the command to exit, and Grace is how long it gets to.
+	Signal os.Signal
+	Grace  time.Duration
+	// Dump, when set, is sent if the grace period runs out, before the kill:
+	// a signal on which the command writes out its state, so that one that
+	// hung on its way out leaves the evidence of where. SIGQUIT has a Go
+	// program print every goroutine's stack and exit, and a JVM print a
+	// thread dump. The dump goes wherever the command's output goes, which
+	// for a command started with StartCaptured is its collected log.
+	// DumpGrace is how long the command gets to write it before the kill,
+	// defaultDumpGrace when zero.
+	Dump      os.Signal
+	DumpGrace time.Duration
+}
+
+// defaultDumpGrace is how long a command gets to write its dump. A Go
+// program's goroutine dump takes milliseconds; the rest is headroom for a
+// loaded host.
+const defaultDumpGrace = 2 * time.Second
+
+// Stop ends p as policy says: the signal, a bounded wait for the exit, and,
+// if the grace period runs out, the dump signal and a short wait for the dump
+// before the kill. It reports the outcome as Shutdown does; a stop that timed
+// out says in its error whether the dump signal was delivered. The dump does
+// not change the outcome -- a command that exits after writing its dump was
+// still stopped by the kill, as far as the stop is concerned, and its status
+// is -1.
+func Stop(ctx context.Context, p Process, policy StopPolicy) (int, error) {
+	sigErr := p.Signal(ctx, policy.Signal)
 	// Wait even when the signal failed: a command that had already exited is
 	// what makes Signal fail most often, and its status is the answer then.
-	wctx, cancel := context.WithTimeout(ctx, grace)
+	wctx, cancel := context.WithTimeout(ctx, policy.Grace)
 	code, waitErr := p.Wait(wctx)
 	// Note now whether it was the caller's context that ended the wait: the
 	// close can take a while (an ssh close waits for the node to report the
@@ -75,6 +110,22 @@ func Shutdown(ctx context.Context, p Process, sig os.Signal, grace time.Duration
 	// grace period that ran out into a wait the caller cut short.
 	callerErr := ctx.Err()
 	cancel()
+	// The grace period ran out when only wctx's deadline can have ended the
+	// wait: the signal went through and the caller's context is still live.
+	graceRanOut := waitErr != nil && sigErr == nil && callerErr == nil && errors.Is(waitErr, context.DeadlineExceeded)
+	dumped := false
+	if graceRanOut && policy.Dump != nil {
+		if p.Signal(ctx, policy.Dump) == nil {
+			dumped = true
+			dumpGrace := policy.DumpGrace
+			if dumpGrace <= 0 {
+				dumpGrace = defaultDumpGrace
+			}
+			dctx, dcancel := context.WithTimeout(ctx, dumpGrace)
+			_, _ = p.Wait(dctx) // the dump's own exit is not the stop's outcome
+			dcancel()
+		}
+	}
 	closeErr := p.Close()
 	switch {
 	case waitErr == nil:
@@ -88,10 +139,12 @@ func Shutdown(ctx context.Context, p Process, sig os.Signal, grace time.Duration
 		return -1, sigErr
 	case callerErr != nil:
 		return -1, waitErr
-	case errors.Is(waitErr, context.DeadlineExceeded):
-		// The grace period ran out: only wctx's deadline can have done that,
-		// as ctx's own error was ruled out above.
-		return -1, Wrap(ErrShutdownTimeout, "shutdown", fmt.Errorf("still running %v after %v; killed", sig, grace))
+	case graceRanOut:
+		how := "killed"
+		if dumped {
+			how = fmt.Sprintf("sent %v for a dump, then killed", policy.Dump)
+		}
+		return -1, Wrap(ErrShutdownTimeout, "shutdown", fmt.Errorf("still running %v after %v; %s", policy.Signal, policy.Grace, how))
 	default:
 		// The wait failed on its own before the grace period was up -- the
 		// transport lost track of the command -- and the kill went through.
