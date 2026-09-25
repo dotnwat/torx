@@ -14,6 +14,7 @@ import (
 
 	"github.com/dotnwat/torx"
 	"github.com/dotnwat/torx/examples/rqlite/qa/rqlite"
+	"github.com/dotnwat/torx/netfault"
 )
 
 // faultWeights names the faults the nemesis injects and how often it picks
@@ -31,7 +32,26 @@ var faultWeights = map[string]int{
 	"snapshot":       2, // have a node snapshot now
 	"reap":           1, // have a node reap its snapshot store now
 	"stepdown":       1, // have the leader hand leadership over
+
+	// Network faults, which need nodes netfault can act on (a -netns run).
+	"partition-leader": 3, // cut the leader off from every other node
+	"partition-half":   2, // split the nodes in two at random
+	"partition-bridge": 2, // split them in two with one node in both halves
+	"deafen-leader":    2, // the leader hears no other node, which still hears it
+	"slow":             1, // delay one node's packets
+	"lossy":            1, // drop a share of one node's packets
+	"mtu-blackhole":    2, // a follower loses the leader's large packets, and gets its small ones
 }
+
+// netFaults are the faults that act on the network between nodes.
+var netFaults = map[string]bool{
+	"partition-leader": true, "partition-half": true, "partition-bridge": true,
+	"deafen-leader": true, "slow": true, "lossy": true, "mtu-blackhole": true,
+}
+
+// blackholeSize is the smallest packet mtu-blackhole drops: larger than a
+// Raft heartbeat, smaller than most AppendEntries that carry entries.
+const blackholeSize = 256
 
 // validFault reports whether name is a fault the nemesis knows.
 func validFault(name string) bool {
@@ -56,6 +76,7 @@ type nemesis struct {
 	jc     *torx.JobContext
 	rng    *rand.Rand
 	faults []string
+	net    bool // whether the network faults can act on the nodes
 
 	anomalies []Anomaly // stops that did not go cleanly
 }
@@ -188,6 +209,62 @@ func (m *nemesis) inject(ctx context.Context, fault string) (func(context.Contex
 		}
 		return func(ctx context.Context) error { return m.db.Resume(ctx, n) }, names(n), nil
 
+	case "partition-leader":
+		l, err := m.target(ctx, true)
+		if err != nil {
+			return nil, nil, err
+		}
+		return m.healNet, names(l), netfault.Isolate(ctx, l, m.db.Nodes())
+
+	case "partition-half", "partition-bridge":
+		nodes := slices.Clone(m.db.Nodes())
+		m.rng.Shuffle(len(nodes), func(i, j int) { nodes[i], nodes[j] = nodes[j], nodes[i] })
+		half := len(nodes) / 2
+		a, b := nodes[:half], nodes[half:]
+		if fault == "partition-bridge" && len(nodes) >= 3 {
+			// The node at the split sits in both halves.
+			a = nodes[:half+1]
+		}
+		return m.healNet, []string{strings.Join(names(a...), "+") + "|" + strings.Join(names(b...), "+")},
+			netfault.Partition(ctx, a, b)
+
+	case "deafen-leader":
+		l, err := m.target(ctx, true)
+		if err != nil {
+			return nil, nil, err
+		}
+		var rest []*torx.Node
+		for _, n := range m.db.Nodes() {
+			if n != l {
+				rest = append(rest, n)
+			}
+		}
+		return m.healNet, names(l), netfault.Block(ctx, l, rest...)
+
+	case "mtu-blackhole":
+		l, err := m.target(ctx, true)
+		if err != nil {
+			return nil, nil, err
+		}
+		var followers []*torx.Node
+		for _, n := range m.db.Nodes() {
+			if n != l {
+				followers = append(followers, n)
+			}
+		}
+		f := followers[m.rng.IntN(len(followers))]
+		return m.healNet, []string{f.Name() + "<" + l.Name()}, netfault.Blackhole(ctx, f, blackholeSize, l)
+
+	case "slow", "lossy":
+		n := m.db.Nodes()[m.rng.IntN(len(m.db.Nodes()))]
+		shape := netfault.Shape{Delay: time.Duration(20+m.rng.IntN(280)) * time.Millisecond}
+		shape.Jitter = shape.Delay / 4
+		if fault == "lossy" {
+			shape = netfault.Shape{Loss: float64(10 + m.rng.IntN(40))}
+		}
+		heal := func(ctx context.Context) error { return netfault.Unshape(ctx, n) }
+		return heal, []string{fmt.Sprintf("%s %+v", n.Name(), shape)}, netfault.SetShape(ctx, n, shape)
+
 	case "snapshot", "reap", "stepdown":
 		n, err := m.target(ctx, false)
 		if err != nil {
@@ -207,6 +284,11 @@ func (m *nemesis) inject(ctx context.Context, fault string) (func(context.Contex
 		return nil, names(n), err
 	}
 	return nil, nil, fmt.Errorf("unknown fault %q", fault)
+}
+
+// healNet removes every partition and block among the nodes.
+func (m *nemesis) healNet(ctx context.Context) error {
+	return netfault.Heal(ctx, m.db.Nodes()...)
 }
 
 // target picks the node a fault hits: the leader when leader is set and one
@@ -242,6 +324,16 @@ func (m *nemesis) responsive() []*torx.Node {
 // restarting stopped ones, including any that exited on their own -- and
 // waits until every node is ready and caught up.
 func (m *nemesis) healAll(ctx context.Context) error {
+	if m.net {
+		if err := m.healNet(ctx); err != nil {
+			return err
+		}
+		for _, n := range m.db.Nodes() {
+			if err := netfault.Unshape(ctx, n); err != nil {
+				return err
+			}
+		}
+	}
 	for _, n := range m.db.Nodes() {
 		if m.db.Paused(n) {
 			if err := m.db.Resume(ctx, n); err != nil {

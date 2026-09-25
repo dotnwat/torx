@@ -177,7 +177,13 @@ consistency level, from whichever node they pick, while a nemesis injects one
 fault at a time: crashing a node (SIGKILL), crashing a majority, stopping one
 gracefully (SIGTERM), pausing one (SIGSTOP, then SIGCONT), each aimed at the
 leader more often than not, and having a node snapshot, reap its snapshot
-store, or step down as leader. rqlite runs a configuration drawn at random:
+store, or step down as leader. Run with `-netns`, which gives each node a
+network of its own, it also partitions the network (isolating the leader,
+splitting the nodes in two, or bridging two halves through one node), has
+the leader stop hearing its peers while they still hear it, slows or drops
+one node's packets, and black-holes the large packets from the leader to a
+follower while letting the small ones through, as a link with a broken MTU
+would -- faults injected with torx's `netfault` package. rqlite runs a configuration drawn at random:
 snapshots every few entries instead of every few thousand, snapshot checks
 several times a second, a WAL threshold that snapshots on nearly every
 write, VACUUMs alongside, fast or slow elections. At the end every fault is
@@ -190,9 +196,10 @@ the strong level. Then it checks:
   committed once its write was acknowledged or any read of any level saw it;
   no value applied twice, none nobody wrote, none whose write definitely
   failed. A write that failed with no answer as to whether it took effect (a
-  timeout, leadership lost while committing) may go either way. A stale
-  `weak` read is a warning, since rqlite documents that a just-deposed leader
-  may serve one.
+  timeout, leadership lost while committing) may go either way. A `none`
+  read bounded by `freshness=1s` and `freshness_strict` must not trail by
+  more than that second. A stale `weak` read is a warning, since rqlite
+  documents that a just-deposed leader may serve one.
 - that every node's own copy converges on the final read;
 - that no `rqlited` exited on its own, and that a graceful stop exited
   within its grace period, not killed. A stop that hangs is sent SIGQUIT
@@ -204,7 +211,7 @@ to each fault and each client operation, is drawn from the variant's seed
 (`jc.Rand`), so a failing variant is rerun with the run's `-seed` and the
 same selection.
 
-The compiled-in variant runs for twenty seconds and tolerates the two issues
+The compiled-in variant runs for twenty seconds and tolerates the issues
 below, reporting them as warnings, so a run of the whole suite passes on a
 release that has them. A search for bugs is a `-params` run, strict by
 default, with longer runs, many trials, and a pool large enough to run them
@@ -215,8 +222,12 @@ side by side:
 ```
 
 ```sh
-go run ./examples/rqlite/harness -params hunt.json -parallel 8 -nodes 24 'rqlite\.chaos'
+go run ./examples/rqlite/harness -netns -params hunt.json -parallel 8 -nodes 24 'rqlite\.chaos'
 ```
+
+Without `-netns` the network faults are left out; a variant that names one
+fails, saying why. The harness passes `-seed` on to the suite, so a failure
+is rerun with the seed its run printed.
 
 Its parameters are `nodes`, `duration` (seconds), `clients`, `faults` (a
 comma-separated list from `nemesis.go`, or `all`), `queued` (whether clients
@@ -260,6 +271,21 @@ warnings), and `trial`.
     calling an election -- the symptom of hashicorp/raft#612. It reproduces
     with hashicorp/raft alone, without rqlite, and having the decoding
     goroutine close the pipeline when it gives up fixes it.
+
+- **`freshness_strict` serving data seconds out of date**
+  (`stale-fresh-read`). rqlite documents that a `none` read with `freshness`
+  and `freshness_strict` checks that "the data it last received is not
+  out-of-date by (at most) the freshness interval". A follower decides it is
+  caught up when it has applied every command entry it has *received*, and
+  only looks at how old its data is when it is behind that. A follower that
+  hears the leader's heartbeats but receives no new entries -- behind a link
+  that loses large packets, or in the moments after one heals, while TCP's
+  backoff holds back the stalled replication stream; or behind the Raft
+  replication wedge above, for good -- has received nothing it has not
+  applied, so it serves its old data as fresh. Under the MTU black hole the
+  job finds reads five and six seconds stale with a freshness of one
+  second, and a follower held that way serves the same stale count for as
+  long as the fault lasts.
 
 Two smaller things show up as warnings: a stop takes five seconds when a
 client holds a connection that has not yet sent a request (Go's HTTP server

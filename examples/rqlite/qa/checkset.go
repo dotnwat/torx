@@ -46,6 +46,10 @@ const maxValuesShown = 20
 //     and a linearizable read must reflect everything committed before it.
 //     The same miss by a weak read is a warning, since rqlite documents that
 //     a leader deposed moments ago may still serve one.
+//   - stale-fresh-read: a none read bounded by freshness in strict mode
+//     (modeFresh) missed a value known committed more than readFreshness
+//     before it began. rqlite documents that such a read is refused rather
+//     than served from data out of date by more than the freshness.
 //   - duplicate: a value appears more than once. Every add writes a distinct
 //     value, once; the table does not enforce it, so a write applied twice
 //     shows.
@@ -135,8 +139,17 @@ func checkSet(ops []Op, final []int64) []Anomaly {
 	for i := range reads {
 		r := &reads[i]
 		contentAnomalies(fmt.Sprintf("a %s read at %s", r.Mode, r.Node), r, r.Values)
-		if r.Mode == rqlite.LevelNone {
+		// A read must see what was committed before it began, less its
+		// allowance: a freshness read may trail by its freshness.
+		var allowance time.Duration
+		kind, sev := "stale-read", sevError
+		switch r.Mode {
+		case rqlite.LevelNone:
 			continue // a none read promises nothing about currency
+		case rqlite.LevelWeak:
+			kind, sev = "weak-stale-read", sevWarn
+		case modeFresh:
+			kind, allowance = "stale-fresh-read", readFreshness
 		}
 		have := map[int64]bool{}
 		for _, v := range r.Values {
@@ -144,16 +157,12 @@ func checkSet(ops []Op, final []int64) []Anomaly {
 		}
 		var missing []int64
 		for _, v := range known[upperBound(known, r.Lower):] {
-			if visible[v] < r.Start && !have[v] {
+			if visible[v] < r.Start-allowance && !have[v] {
 				missing = append(missing, v)
 			}
 		}
 		if len(missing) == 0 {
 			continue
-		}
-		kind, sev := "stale-read", sevError
-		if r.Mode == rqlite.LevelWeak {
-			kind, sev = "weak-stale-read", sevWarn
 		}
 		first := missing[0]
 		out = append(out, anomaly(kind, sev, r, missing,

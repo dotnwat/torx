@@ -89,6 +89,17 @@ func TestCheckSet(t *testing.T) {
 			want:  []string{"weak-stale-read/warn"},
 		},
 		{
+			name:  "a freshness read may trail by its freshness",
+			ops:   []Op{add(1, 0, 10, Ok), read(modeFresh, 500, 510, 0)},
+			final: []int64{1},
+		},
+		{
+			name:  "a freshness read may not trail by more",
+			ops:   []Op{add(1, 0, 10, Ok), read(modeFresh, 1500, 1510, 0)},
+			final: []int64{1},
+			want:  []string{"stale-fresh-read/error"},
+		},
+		{
 			name:  "a none read promises nothing about currency",
 			ops:   []Op{add(1, 0, 10, Ok), read(rqlite.LevelNone, 20, 30, 0)},
 			final: []int64{1},

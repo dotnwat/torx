@@ -67,7 +67,7 @@ jobs:
     name: example (rqlite)
     runs-on: ubuntu-latest
     env:
-      RQLITE_VERSION: v10.3.5
+      RQLITE_VERSION: v10.3.6
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -85,6 +85,36 @@ jobs:
           TORX_RQLITE_REQUIRED: "1"
       - name: run the suite through the harness
         run: go run ./examples/rqlite/harness
+
+  # -netns builds local nodes from unprivileged user and network namespaces,
+  # which Ubuntu's AppArmor policy forbids by default, so the matrix above
+  # skips the lab test. This job lifts the restriction, runs netfault's
+  # tests with the skip turned into a failure, and runs the rqlite chaos job
+  # under -netns, where its network faults are in play.
+  netns:
+    name: netns lab
+    runs-on: ubuntu-latest
+    env:
+      RQLITE_VERSION: v10.3.6
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - name: let unprivileged users create user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: install nftables
+        run: sudo apt-get install -y nftables
+      - name: netfault tests (lab required)
+        run: go test -race -count=1 ./netfault
+        env:
+          NETFAULT_LAB_REQUIRED: "1"
+      - name: install rqlite
+        run: |
+          curl -fsSL "https://github.com/rqlite/rqlite/releases/download/${RQLITE_VERSION}/rqlite-${RQLITE_VERSION}-linux-amd64.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/rqlite-${RQLITE_VERSION}-linux-amd64" >> "$GITHUB_PATH"
+      - name: run the rqlite chaos job under -netns
+        run: go run ./examples/rqlite/harness -netns 'rqlite\.chaos'
 
   # The tutorial's last step provisions docker containers and runs the suite
   # against them over ssh. The matrix above skips that test where docker is

@@ -40,7 +40,7 @@ const (
 type invocation struct {
 	Argv        []string    `json:"argv"`         // the harness's own command line
 	Created     string      `json:"created"`      // RFC 3339, UTC
-	Backend     string      `json:"backend"`      // where the nodes came from; always local here
+	Backend     string      `json:"backend"`      // where the nodes came from: local, or local-netns under -netns
 	Git         gitInfo     `json:"git"`          // identity of the tree the suite was built from
 	Rqlited     rqlitedInfo `json:"rqlited"`      // the system under test the nodes resolved
 	Suite       string      `json:"suite"`        // the suite binary, inside the run directory
