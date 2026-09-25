@@ -371,8 +371,9 @@ go run ./path/to/suite -nodes 3 'my\..*'
 Useful flags: `-nodes N` (local pool size), `-parallel N` (concurrent jobs),
 `-results <file>` (newline-delimited JSON results), `-results-dir <dir>` (the
 per-run tree; empty to disable), `-run-dir <dir>` (below), `-params <file>`
-(below), `-pool <manifest.json>` (below), and `-seed N` (the run seed a
-randomized job draws from; above).
+(below), `-pool <manifest.json>` (below), `-netns` (local nodes with
+networks of their own; below), and `-seed N` (the run seed a randomized job
+draws from; above).
 
 **External parametrization.** `-params FILE` replaces the named jobs'
 compiled-in variants with externally supplied ones, so a specific
@@ -449,6 +450,25 @@ wrapper creates the group with `setsid` from util-linux or busybox, or with
 (`dash`), `ForceCommand` wrappers, and an sshd that does not isolate commands
 at all (Dropbear). A node with none of those refuses to stream rather than
 risk signalling the sshd itself, and the error says what to install.
+
+**Local nodes with networks of their own (`-netns`).** The local pool's
+nodes share the host's network, so a job cannot cut one off from another:
+there is no link between them to cut. On Linux, `-netns` gives each local
+node a network namespace of its own, joined to the others by a bridge, with
+an address of its own (`10.77.0.2`, `10.77.0.3`, ...), which is what
+`node.Addr()` returns. No root is needed: the driver re-executes itself in a
+user namespace of its own, where it has privilege over the namespaces it
+creates and nothing else, and the driver and its workers live on the bridge,
+so they reach every node while nothing in the lab reaches the host's network.
+A node's commands enter its namespace through `nsenter`, and its files are the
+host's, as for any local node. Each node's ports are its own, so a service
+that leases ports works unchanged. It needs `ip`, `nsenter`, and `sleep` on
+the host and a kernel that lets an unprivileged user create a user namespace
+(Ubuntu restricts that by default; see `kernel.apparmor_restrict_unprivileged_userns`).
+
+```bash
+go run ./path/to/suite -netns -nodes 6 -parallel 2 'my\.chaos'
+```
 
 Because a suite is one static binary, production and multi-node runs invoke it
 directly; `go run`/`go test` is one way to invoke the same binary, not a second

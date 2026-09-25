@@ -64,8 +64,22 @@ func driverMain(args []string) int {
 	runDir := fs.String("run-dir", "", "write results into exactly this pre-created directory (mutually exclusive with -results-dir)")
 	paramsFile := fs.String("params", "", "JSON file of parameter overrides replacing the named jobs' compiled-in variants")
 	seedFlag := fs.Uint64("seed", 0, "run seed each variant's seed is derived from (default: drawn at random)")
+	netns := fs.Bool("netns", false, "give each local node a network namespace of its own on a private bridge, so jobs can cut and shape the network between nodes (Linux; no root needed)")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	// -netns builds the lab from namespaces this process creates, which it
+	// can only do from a user namespace of its own: the driver re-executes
+	// itself inside one and exits with the status of the run in there.
+	if *netns {
+		if *poolFile != "" {
+			fmt.Fprintln(os.Stderr, "torx: -netns and -pool are mutually exclusive")
+			return 2
+		}
+		if !inLab() {
+			return enterLab()
+		}
 	}
 
 	// A run is randomized unless -seed pins it; the seed is printed with the
@@ -115,7 +129,16 @@ func driverMain(args []string) int {
 		return 1
 	}
 
-	pool, err := selectPool(*poolFile, *nodes, requests, seed)
+	var pool *Pool
+	if *netns {
+		var lab *localLab
+		pool, lab, err = newLabPool(poolSize(*nodes, requests, seed))
+		if lab != nil {
+			defer lab.Close()
+		}
+	} else {
+		pool, err = selectPool(*poolFile, *nodes, requests, seed)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "torx:", err)
 		return 2
@@ -170,11 +193,16 @@ func selectPool(poolFile string, nodes int, requests []JobRequest, seed uint64) 
 		}
 		return PoolFromManifest(m)
 	}
-	size := nodes
-	if size <= 0 {
-		size = maxDemand(requests, seed)
+	return localPool(poolSize(nodes, requests, seed)), nil
+}
+
+// poolSize is the size of a local pool: nodes when it is positive, otherwise
+// the largest job's demand.
+func poolSize(nodes int, requests []JobRequest, seed uint64) int {
+	if nodes > 0 {
+		return nodes
 	}
-	return localPool(size), nil
+	return maxDemand(requests, seed)
 }
 
 // maxDemand returns the largest node demand among the requests, at least 1.

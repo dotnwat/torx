@@ -100,7 +100,11 @@ func PoolFromManifest(m Manifest) (*Pool, error) {
 		var backend Backend
 		switch mn.Backend.Kind {
 		case "", "local":
-			backend = LocalBackend{}
+			lb, err := localBackendFrom(mn.Backend)
+			if err != nil {
+				return nil, fmt.Errorf("manifest: node %q: %w", mn.Name, err)
+			}
+			backend = lb
 		default:
 			if _, ok := lookupBackend(mn.Backend.Kind); !ok {
 				return nil, fmt.Errorf("manifest: node %q has unknown backend kind %q (is its package blank-imported?)", mn.Name, mn.Backend.Kind)
