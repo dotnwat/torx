@@ -479,6 +479,14 @@ whose commands have privilege over its network -- a `-netns` node, a
 container with `CAP_NET_ADMIN`, a host reached as root -- and
 `netfault.Check(ctx, nodes)` says whether a set of nodes can take faults.
 
+The [`diskfault`](diskfault/) package does the same for storage.
+`diskfault.Limit(ctx, n, dir, size)` mounts a size-limited tmpfs over a
+directory -- a service's data directory, before the service first writes
+it -- and `Fill` then takes every free byte, so the service's next write
+fails with ENOSPC, until `Free` gives the space back; `Unlimit` removes the
+limit. A `-netns` run's nodes may mount it, since they live in a mount
+namespace the lab's user namespace owns; so may a host reached as root.
+
 Because a suite is one static binary, production and multi-node runs invoke it
 directly; `go run`/`go test` is one way to invoke the same binary, not a second
 code path.
