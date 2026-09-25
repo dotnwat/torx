@@ -118,8 +118,14 @@ func newLabPool(n int) (*Pool, *localLab, error) {
 	lab := &localLab{}
 	prefix := netip.MustParsePrefix(labPrefix)
 	bridgeAddr := prefix.Addr().Next()
+	// The first step is the one that needs privilege in the lab's user
+	// namespace, which a kernel may withhold even though it let the
+	// namespace be created.
+	if err := labRun("ip", "link", "set", "lo", "up"); err != nil {
+		return nil, nil, fmt.Errorf("netns: %w (the lab's user namespace has no privilege over its network; "+
+			"on Ubuntu, unprivileged user namespaces are restricted by AppArmor: sysctl kernel.apparmor_restrict_unprivileged_userns=0)", err)
+	}
 	for _, args := range [][]string{
-		{"link", "set", "lo", "up"},
 		{"link", "add", labBridge, "type", "bridge"},
 		{"addr", "add", netip.PrefixFrom(bridgeAddr, prefix.Bits()).String(), "dev", labBridge},
 		{"link", "set", labBridge, "up"},
