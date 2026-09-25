@@ -237,14 +237,17 @@ func labUsable() error {
 			return fmt.Errorf("%s is not installed", tool)
 		}
 	}
-	cmd := exec.Command("true")
+	// Creating the namespaces is not enough: Ubuntu's AppArmor policy lets an
+	// unprivileged user create a user namespace but withholds privilege
+	// inside it, so try the lab's first step there.
+	cmd := exec.Command("ip", "link", "set", "lo", "up")
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET,
 		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
 		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
 	}
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("this kernel does not let an unprivileged user create a user namespace: %w", err)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("an unprivileged user namespace here has no privilege over its network (%w: %s); on Ubuntu, see kernel.apparmor_restrict_unprivileged_userns", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
