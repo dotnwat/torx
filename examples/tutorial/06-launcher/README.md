@@ -108,6 +108,36 @@ generators in the other containers, because the service binds every
 interface and advertises `n.Addr()`. A service that had hardcoded the
 loopback would have passed every earlier step and failed here.
 
+### Docker or Podman
+
+The launcher runs `docker` and `docker compose`, and either engine can be
+behind them:
+
+- **Docker**, rootful or rootless: Docker Desktop on a Mac, or Docker
+  Engine on Linux.
+- **Podman through Docker's CLI**: the `docker` CLI and its compose plugin,
+  pointed at Podman's Docker-compatible socket:
+
+  ```sh
+  systemctl --user enable --now podman.socket
+  export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock
+  ```
+
+- **Podman's own CLI as `docker`** (the `podman-docker` package), with that
+  same socket running and Docker Compose (`docker-compose`) installed, which
+  `podman compose` runs and hands the socket to. podman-compose does not
+  work in its place: it lacks flags the launcher passes, starting with
+  `--project-directory`.
+
+Two Linux details are handled for you. On an SELinux host (Fedora, RHEL)
+the driver's mount of the run directory is relabeled, the `z` in
+`compose.yaml`; without it the container can read nothing there. And on a
+rootless engine, rootless Docker or Podman run as yourself, the driver runs
+as container root, which the engine maps to you: any other container user
+maps to one of your subordinate ids, which cannot write the results. The
+launcher asks `docker info` which kind of engine it has, so either way the
+results in the run directory are yours.
+
 ### The topology, and why
 
 Three containers are the nodes, and a fourth, the **driver**, runs the
@@ -205,8 +235,9 @@ does; the suite would not change.
 ## Testing
 
 [`launcher/launcher_test.go`](launcher/launcher_test.go) unit-tests the
-pure parts (the project name, the PATH handling, the keys fitting together)
-and runs the launcher end to end on both backends as a person would, from
+pure parts (the project name, the PATH handling, the keys fitting together,
+reading each engine's `docker info`) and runs the launcher end to end on
+both backends as a person would, from
 the repository root, reading the run directory it announces; once with a
 `-results-dir` given relative to that root, which the launcher has to
 resolve before it puts the run directory on a PATH or in compose's flags.
