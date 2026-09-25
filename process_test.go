@@ -327,3 +327,66 @@ func TestShutdownReportsCloseFailureOverSignalError(t *testing.T) {
 		t.Errorf("Shutdown = (%d, %v), want (-1, the close's error)", code, err)
 	}
 }
+
+// dumpingOnQUIT is a command that ignores SIGTERM and, on SIGQUIT, writes
+// dumpfile and exits: the shape of a Go program that hung on its way out.
+func dumpingOnQUIT(dumpfile string) Cmd {
+	return Command("sh", "-c", "trap '' TERM; trap 'echo dumped > "+dumpfile+"; exit 2' QUIT; echo ready; while true; do sleep 0.1; done")
+}
+
+// TestStopDumpsBeforeKilling checks the dump step: a command that outlasts
+// the grace period is sent the dump signal and given the time to act on it
+// before the kill, and the timeout says the dump was sent.
+func TestStopDumpsBeforeKilling(t *testing.T) {
+	var b LocalBackend
+	dumpfile := filepath.Join(t.TempDir(), "dump")
+	p, err := b.Stream(context.Background(), dumpingOnQUIT(dumpfile))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer p.Close()
+	if got := readLine(t, p); got != "ready" {
+		t.Fatalf("first line = %q, want ready", got)
+	}
+
+	code, err := Stop(context.Background(), p, StopPolicy{
+		Signal: syscall.SIGTERM, Grace: 200 * time.Millisecond, Dump: syscall.SIGQUIT, DumpGrace: 5 * time.Second,
+	})
+	if !errors.Is(err, ErrShutdownTimeout) {
+		t.Fatalf("Stop err = %v, want ErrShutdownTimeout", err)
+	}
+	if !strings.Contains(err.Error(), "dump") {
+		t.Errorf("Stop err = %v, want it to say the dump was sent", err)
+	}
+	if code != -1 {
+		t.Errorf("exit status = %d, want -1: the dump's exit is not the stop's", code)
+	}
+	if data, err := os.ReadFile(dumpfile); err != nil || strings.TrimSpace(string(data)) != "dumped" {
+		t.Errorf("dump file = %q, %v; want the command to have written its dump before the kill", data, err)
+	}
+}
+
+// TestStopSendsNoDumpToAGracefulExit checks the dump is only for a command that
+// hung: one that exits within the grace period is not sent it.
+func TestStopSendsNoDumpToAGracefulExit(t *testing.T) {
+	var b LocalBackend
+	dumpfile := filepath.Join(t.TempDir(), "dump")
+	p, err := b.Stream(context.Background(), Command("sh", "-c",
+		"trap 'exit 0' TERM; trap 'echo dumped > "+dumpfile+"; exit 2' QUIT; echo ready; while true; do sleep 0.1; done"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer p.Close()
+	if got := readLine(t, p); got != "ready" {
+		t.Fatalf("first line = %q, want ready", got)
+	}
+	code, err := Stop(context.Background(), p, StopPolicy{
+		Signal: syscall.SIGTERM, Grace: 5 * time.Second, Dump: syscall.SIGQUIT,
+	})
+	if err != nil || code != 0 {
+		t.Fatalf("Stop = (%d, %v), want (0, nil)", code, err)
+	}
+	if _, err := os.Stat(dumpfile); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a command that exited within the grace period was sent the dump signal (stat: %v)", err)
+	}
+}
