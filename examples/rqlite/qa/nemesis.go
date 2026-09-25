@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dotnwat/torx"
+	"github.com/dotnwat/torx/diskfault"
 	"github.com/dotnwat/torx/examples/rqlite/qa/rqlite"
 	"github.com/dotnwat/torx/netfault"
 )
@@ -32,6 +33,11 @@ var faultWeights = map[string]int{
 	"snapshot":       2, // have a node snapshot now
 	"reap":           1, // have a node reap its snapshot store now
 	"stepdown":       1, // have the leader hand leadership over
+	"replace-disk":   1, // remove a follower, erase its data, and bring it back to join anew
+
+	// Disk faults, which need nodes whose data directory can be limited (a
+	// -netns run).
+	"disk-full": 2, // fill a node's data directory, leader or not, until the hold ends
 
 	// Network faults, which need nodes netfault can act on (a -netns run).
 	"partition-leader": 3, // cut the leader off from every other node
@@ -42,6 +48,9 @@ var faultWeights = map[string]int{
 	"lossy":            1, // drop a share of one node's packets
 	"mtu-blackhole":    2, // a follower loses the leader's large packets, and gets its small ones
 }
+
+// diskFaults are the faults that need a limited data directory.
+var diskFaults = map[string]bool{"disk-full": true}
 
 // netFaults are the faults that act on the network between nodes.
 var netFaults = map[string]bool{
@@ -77,6 +86,7 @@ type nemesis struct {
 	rng    *rand.Rand
 	faults []string
 	net    bool // whether the network faults can act on the nodes
+	disk   bool // whether the nodes' data directories are limited, for the disk faults
 
 	anomalies []Anomaly // stops that did not go cleanly
 }
@@ -209,6 +219,45 @@ func (m *nemesis) inject(ctx context.Context, fault string) (func(context.Contex
 		}
 		return func(ctx context.Context) error { return m.db.Resume(ctx, n) }, names(n), nil
 
+	case "replace-disk":
+		// A follower: replacing the leader's disk is replacing a follower's
+		// once it has stepped down, with an election in between.
+		l, err := m.target(ctx, true)
+		if err != nil {
+			return nil, nil, err
+		}
+		var followers []*torx.Node
+		for _, n := range m.responsive() {
+			if n != l {
+				followers = append(followers, n)
+			}
+		}
+		if len(followers) == 0 {
+			return nil, nil, errNoTarget
+		}
+		f := followers[m.rng.IntN(len(followers))]
+		if err := m.db.Crash(ctx, f); err != nil {
+			return nil, names(f), err
+		}
+		restart := func(ctx context.Context) error { return m.db.Restart(ctx, f) }
+		if err := m.db.Remove(ctx, f); err != nil {
+			// Still a member: it must come back with the data it had.
+			return restart, names(f), err
+		}
+		if err := m.db.Wipe(ctx, f); err != nil {
+			return restart, names(f), err
+		}
+		return restart, names(f), nil
+
+	case "disk-full":
+		n, err := m.target(ctx, m.rng.IntN(2) == 0)
+		if err != nil {
+			return nil, nil, err
+		}
+		dir := m.db.DataDir(n)
+		heal := func(ctx context.Context) error { return diskfault.Free(ctx, n, dir) }
+		return heal, names(n), diskfault.Fill(ctx, n, dir)
+
 	case "partition-leader":
 		l, err := m.target(ctx, true)
 		if err != nil {
@@ -324,6 +373,13 @@ func (m *nemesis) responsive() []*torx.Node {
 // restarting stopped ones, including any that exited on their own -- and
 // waits until every node is ready and caught up.
 func (m *nemesis) healAll(ctx context.Context) error {
+	if m.disk {
+		for _, n := range m.db.Nodes() {
+			if err := diskfault.Free(ctx, n, m.db.DataDir(n)); err != nil {
+				return err
+			}
+		}
+	}
 	if m.net {
 		if err := m.healNet(ctx); err != nil {
 			return err
