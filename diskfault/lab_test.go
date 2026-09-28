@@ -125,7 +125,53 @@ func (j *labJob) Run(ctx context.Context, jc *torx.JobContext) error {
 	if err := Unlimit(ctx, n, dir); err != nil {
 		return err
 	}
-	return Unlimit(ctx, n, filepath.Join(root, "absent"))
+	if err := Unlimit(ctx, n, filepath.Join(root, "absent")); err != nil {
+		return err
+	}
+	return volume(ctx, n, filepath.Join(root, "volume"))
+}
+
+// volume limits a directory that is a mount point already -- a service's own
+// volume -- and checks that the limit hides the volume, that Unlimit uncovers
+// it, and that unlimiting it again leaves the volume mounted.
+func volume(ctx context.Context, n *torx.Node, vol string) error {
+	if err := n.Mkdir(ctx, vol); err != nil {
+		return err
+	}
+	if err := run(ctx, n, "mount", "-t", "tmpfs", "volume", vol); err != nil {
+		return err
+	}
+	defer func() { _ = run(context.WithoutCancel(ctx), n, "umount", vol) }()
+	marker := filepath.Join(vol, "marker")
+	if err := n.WriteFile(ctx, marker, nil); err != nil {
+		return err
+	}
+	// visible checks whether the volume's file shows through vol, as want.
+	visible := func(want bool, state string) error {
+		ok, err := n.Exists(ctx, marker)
+		if err != nil {
+			return err
+		}
+		if ok != want {
+			return fmt.Errorf("the file on a volume in %s: visible %t, want %t", state, ok, want)
+		}
+		return nil
+	}
+	if err := Limit(ctx, n, vol, 1<<20); err != nil {
+		return err
+	}
+	if err := visible(false, "a limited volume"); err != nil {
+		return err
+	}
+	for _, state := range []string{"an unlimited volume", "a volume unlimited twice"} {
+		if err := Unlimit(ctx, n, vol); err != nil {
+			return err
+		}
+		if err := visible(true, state); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // labUsable says why this host cannot run a lab, or nil if it can.
