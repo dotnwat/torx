@@ -178,12 +178,15 @@ func Unshape(ctx context.Context, n *torx.Node) error {
 	if err != nil {
 		return err
 	}
-	res, err := n.Exec(ctx, torx.Command("tc", "qdisc", "del", "dev", dev, "root"))
+	cmd := torx.Command("tc", "qdisc", "del", "dev", dev, "root")
+	cmd.Env = []string{"LC_ALL=C"}
+	res, err := n.Exec(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("netfault: %s: tc: %w", n.Name(), err)
 	}
 	// With no shape there is no root qdisc of ours to delete, which tc
-	// reports as an error; that is the state asked for.
+	// reports as an error; that is the state asked for. tc says so in the C
+	// locale, since the node's own would translate it.
 	if res.ExitCode != 0 && !noQdisc(res.Stderr) {
 		return fmt.Errorf("netfault: %s: tc qdisc del: exit %d: %s", n.Name(), res.ExitCode, strings.TrimSpace(string(res.Stderr)))
 	}

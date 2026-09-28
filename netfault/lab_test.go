@@ -268,7 +268,11 @@ func TestFaultsInALab(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, self, "-netns", "-results-dir", "", "netfault.lab")
-	cmd.Env = append(os.Environ(), suiteEnv+"=1")
+	// The lab runs in a German locale, so a command whose complaint the
+	// package reads would complain in German unless the package asks for
+	// the C locale; where German is not installed, commands complain in
+	// English and this checks nothing.
+	cmd.Env = append(os.Environ(), suiteEnv+"=1", "LC_ALL=de_DE.UTF-8")
 	out, err := cmd.CombinedOutput()
 	if exit, ok := errors.AsType[*exec.ExitError](err); ok || err != nil {
 		t.Fatalf("suite under -netns failed (%v, %v):\n%s", err, exit, out)

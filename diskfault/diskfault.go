@@ -140,8 +140,11 @@ func unescape(s string) string {
 // gives the space back.
 func Fill(ctx context.Context, n *torx.Node, dir string) error {
 	// dd writes until the filesystem is full and then fails saying so, which
-	// is what is wanted; only a failure for another reason is an error.
-	res, err := n.Exec(ctx, torx.Command("dd", "if=/dev/zero", "of="+filepath.Join(dir, filler), "bs=64k"))
+	// is what is wanted; only a failure for another reason is an error. It
+	// says so in the C locale, since the node's own would translate it.
+	cmd := torx.Command("dd", "if=/dev/zero", "of="+filepath.Join(dir, filler), "bs=64k")
+	cmd.Env = []string{"LC_ALL=C"}
+	res, err := n.Exec(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("diskfault: %s: dd: %w", n.Name(), err)
 	}
