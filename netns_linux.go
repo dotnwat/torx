@@ -32,7 +32,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -112,9 +111,10 @@ type localLab struct {
 }
 
 // newLabPool builds a pool of n local nodes, each in a network namespace of
-// its own on the lab's bridge. It must run inside the lab (inLab). Close the
-// lab to release the namespaces; they die with the driver regardless.
-func newLabPool(n int) (*Pool, *localLab, error) {
+// its own on the lab's bridge, with their scratch under base. It must run
+// inside the lab (inLab). Close the lab to release the namespaces; they die
+// with the driver regardless.
+func newLabPool(n int, base string) (*Pool, *localLab, error) {
 	lab := &localLab{}
 	prefix := netip.MustParsePrefix(labPrefix)
 	bridgeAddr := prefix.Addr().Next()
@@ -134,7 +134,6 @@ func newLabPool(n int) (*Pool, *localLab, error) {
 			return nil, nil, err
 		}
 	}
-	base := filepath.Join(os.TempDir(), "torx")
 	nodes := make([]*Node, n)
 	addr := bridgeAddr
 	for i := range nodes {

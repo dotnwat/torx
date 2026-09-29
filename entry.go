@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 )
 
@@ -129,15 +128,29 @@ func driverMain(args []string) int {
 		return 1
 	}
 
+	// Local nodes keep their scratch in a directory of the run's own, so a
+	// run going at the same time on this host cannot delete what this one's
+	// services are writing.
+	var scratch string
+	if *poolFile == "" {
+		rs, err := newRunScratch()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "torx:", err)
+			return 2
+		}
+		defer rs.Close()
+		scratch = rs.dir
+	}
+
 	var pool *Pool
 	if *netns {
 		var lab *localLab
-		pool, lab, err = newLabPool(poolSize(*nodes, requests, seed))
+		pool, lab, err = newLabPool(poolSize(*nodes, requests, seed), scratch)
 		if lab != nil {
 			defer lab.Close()
 		}
 	} else {
-		pool, err = selectPool(*poolFile, *nodes, requests, seed)
+		pool, err = selectPool(*poolFile, *nodes, requests, seed, scratch)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "torx:", err)
@@ -183,9 +196,9 @@ func driverMain(args []string) int {
 
 // selectPool builds the pool a run executes against: from a manifest file when
 // poolFile is set, otherwise a pool of local nodes sized to nodes, or to the
-// largest job when nodes is not positive. Jobs are sized under the run seed,
-// as the driver sizes them.
-func selectPool(poolFile string, nodes int, requests []JobRequest, seed uint64) (*Pool, error) {
+// largest job when nodes is not positive, with their scratch under scratch.
+// Jobs are sized under the run seed, as the driver sizes them.
+func selectPool(poolFile string, nodes int, requests []JobRequest, seed uint64, scratch string) (*Pool, error) {
 	if poolFile != "" {
 		m, err := LoadManifest(poolFile)
 		if err != nil {
@@ -193,7 +206,7 @@ func selectPool(poolFile string, nodes int, requests []JobRequest, seed uint64) 
 		}
 		return PoolFromManifest(m)
 	}
-	return localPool(poolSize(nodes, requests, seed)), nil
+	return localPool(poolSize(nodes, requests, seed), scratch), nil
 }
 
 // poolSize is the size of a local pool: nodes when it is positive, otherwise
@@ -216,10 +229,10 @@ func maxDemand(requests []JobRequest, seed uint64) int {
 	return demand
 }
 
-// localPool builds a pool of n local nodes sharing one port allocator.
-func localPool(n int) *Pool {
+// localPool builds a pool of n local nodes sharing one port allocator, with
+// their scratch under base.
+func localPool(n int, base string) *Pool {
 	ports := NewPortAllocator("")
-	base := filepath.Join(os.TempDir(), "torx")
 	nodes := make([]*Node, n)
 	for i := range nodes {
 		name := fmt.Sprintf("node-%d", i)
