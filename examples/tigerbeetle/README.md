@@ -145,32 +145,32 @@ configurations; `history.ndjson` is every operation and fault.
 
 ## Findings
 
-Against TigerBeetle 0.17.9 (release, debug build) and main at 6f8e6b5;
-reproducers are in `results/tigerbeetle-findings/` (not committed).
+Against TigerBeetle 0.17.9 (release, debug build) and main at 6f8e6b5. Each
+is an issue here, with a standalone reproducer, its output, and a root-cause
+trail pinned to the release, tracked in #32.
 
-1. **Raising the batch size by a rolling restart crashes the backups.** A
-   replica started with `--development` takes requests of at most 32KiB
-   (`--limit-request`); without, 1MiB. The CLI's help says a cluster can
-   always raise its batch size by restarting without `--development`. Done
-   one replica at a time, as an operator keeps a cluster available, once a
-   replica restarted without it becomes primary, the next client to
+1. **Raising the batch size by a rolling restart crashes the backups**
+   (#28). A replica started with `--development` takes requests of at most
+   32KiB (`--limit-request`); without, 1MiB. The CLI's help says a cluster
+   can always raise its batch size by restarting without `--development`.
+   Done one replica at a time, as an operator keeps a cluster available,
+   once a replica restarted without it becomes primary, the next client to
    register makes every backup still on `--development` abort:
    `execute_op_register` asserts that the batch size the primary stamped on
    the registration fits the backup's own limit (`replica.zig:5580` in
-   0.17.9), and it does not. The cluster loses its quorum. PR #1981, which
-   introduced `--limit-request`, meant a replica that cannot take a large
-   prepare to panic loudly as an operator error; this prepare is small, and
-   the failure is an assertion. `batch-limit` provokes it, which is why the
-   compiled-in variant leaves it out.
-2. **Two experimental flags reach assertions instead of the CLI's errors.**
-   `--commit-stall-lag-min` greater than `--commit-stall-lag-max`, or
-   `--commit-stall-multiple-max=0`, abort the replica at startup with
+   0.17.9), and it does not. The cluster loses its quorum.
+   tigerbeetle#1981, which introduced `--limit-request`, meant a replica
+   that cannot take a large prepare to panic loudly as an operator error;
+   this prepare is small, and the failure is an assertion. `batch-limit`
+   provokes it, which is why the compiled-in variant leaves it out.
+2. **Two experimental flags reach assertions instead of the CLI's errors**
+   (#29). `--commit-stall-lag-min` greater than `--commit-stall-lag-max`,
+   or `--commit-stall-multiple-max=0`, abort the replica at startup with
    "reached unreachable code"; `cli.zig` says every argument is validated
    there.
-
 3. **A power loss and one bad sector on each of two disks leaves the
-   cluster down for good.** A replica restarted with a corrupt sector in its
-   WAL's headers cannot be sure of its log's head, and waits in
+   cluster down for good** (#30). A replica restarted with a corrupt sector
+   in its WAL's headers cannot be sure of its log's head, and waits in
    `recovering_head` for a primary to tell it. When two of three replicas
    are there at once -- the whole cluster lost power, or the primary and a
    backup crashed, and each has one bad sector, different ones -- the
@@ -184,7 +184,8 @@ reproducers are in `results/tigerbeetle-findings/` (not committed).
    the reproducer shows it is still reached this simply on 0.17.9 and main.
    `corrupt-headers` provokes it; `corrupt` stays clear of it.
 4. **A data file left by an interrupted `tigerbeetle recover` panics on
-   start** ("superblock not found"). Minor: the message says what is wrong.
+   start** (#31), "superblock not found". Minor: the message says what is
+   wrong.
 
 Nothing else, in the runs so far: the model agreed with the cluster on every
 result, read, scan, and expiry under every other fault above, on 3, 5, and 6
