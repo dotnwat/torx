@@ -21,4 +21,5 @@ const serviceName = "tigerbeetle"
 
 func init() {
 	torx.Register("tigerbeetle.smoke", func() torx.Job { return &smokeJob{} })
+	torx.Register("tigerbeetle.chaos", func() torx.Job { return &chaosJob{} })
 }
