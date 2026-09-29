@@ -58,6 +58,9 @@ type Assignment struct {
 	Params        Params           `json:"params,omitempty"`
 	Nodes         []NodeDescriptor `json:"nodes"`
 	Session       SessionConfig    `json:"session"`
+	// Seed is the variant's seed, derived by the driver from the run seed
+	// (see VariantSeed). A job draws its random choices from it.
+	Seed uint64 `json:"seed,omitempty"`
 }
 
 // Message is one record on the worker->driver stream: a lifecycle or log Event,

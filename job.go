@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	mrand "math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,6 +121,11 @@ func (JobBase) Teardown(ctx context.Context, jc *JobContext) error {
 type JobContext struct {
 	Params Params
 
+	// seed is the variant's seed (see VariantSeed): the driver sets it for
+	// sizing and the worker from the assignment, so Declare sees the same
+	// seed in both.
+	seed uint64
+
 	registry   ServiceRegistry
 	finalizers Finalizers
 	sink       EventSink
@@ -152,6 +158,18 @@ type JobContext struct {
 func NewJobContext(params Params, sink EventSink) *JobContext {
 	return &JobContext{Params: params, sink: sink}
 }
+
+// Seed is the variant's seed, derived from the run seed and the variant's id
+// (see VariantSeed). It is the same in Declare, where the driver sizes the job,
+// as in the worker, so a job may draw its shape from it and stay pure.
+func (jc *JobContext) Seed() uint64 { return jc.seed }
+
+// Rand returns a generator for the named stream of the variant's seed. Each
+// call returns a fresh generator at the start of its stream, so a component
+// draws from its own name and is unaffected by how much any other draws; a
+// generator is not safe for concurrent use, so give each goroutine a stream
+// of its own ("client-3", "nemesis").
+func (jc *JobContext) Rand(stream string) *mrand.Rand { return NewRand(jc.seed, stream) }
 
 // Register declares a service the job needs.
 func (jc *JobContext) Register(svc Service) { jc.registry.Add(svc) }
