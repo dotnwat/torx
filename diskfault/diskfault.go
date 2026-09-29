@@ -1,7 +1,7 @@
 //go:build unix
 
 // Package diskfault injects storage faults on torx nodes: a directory with a
-// hard size limit, and filling it up.
+// hard size limit, filling it up, and corrupting a file's contents.
 //
 // Limit mounts a size-limited tmpfs over a directory -- a service's data
 // directory, before the service first writes it -- and Fill takes every free
@@ -16,6 +16,11 @@
 // A tmpfs keeps its contents in memory, so a limited directory survives the
 // crash of the process writing it, as a disk would, but not the node's own
 // reboot, which a torx node does not have.
+//
+// Corrupt overwrites part of a file with random bytes, as a disk that
+// silently returns garbage for some sectors -- a latent sector error, a
+// misdirected write -- would leave it. It needs no privilege, only dd and
+// stat on the node, and a file its commands may write.
 package diskfault
 
 import (
@@ -160,6 +165,51 @@ func Free(ctx context.Context, n *torx.Node, dir string) error {
 		return fmt.Errorf("diskfault: %s: %w", n.Name(), err)
 	}
 	return nil
+}
+
+// Corrupt overwrites size bytes of the file at path on n, from offset on,
+// with random bytes, leaving the file's size as it was: a range that runs
+// past the end is cut at it. The write goes through the page cache, which the
+// kernel writes back before a read of the same range with O_DIRECT, so a
+// process reading the file that way sees it too, and it may land while the
+// file is open: a disk corrupts data under the process using it as readily
+// as at rest.
+func Corrupt(ctx context.Context, n *torx.Node, path string, offset, size int64) error {
+	if offset < 0 || size < 0 {
+		return fmt.Errorf("diskfault: %s: corrupting %s: offset %d and size %d must not be negative", n.Name(), path, offset, size)
+	}
+	// wc and dd as POSIX has them, so a BSD node takes the fault as a GNU
+	// one does: no stat -c, and no byte-counted seek or count.
+	res, err := n.Exec(ctx, torx.Command("sh", "-c", `wc -c < "$1"`, "sh", path))
+	if err != nil {
+		return fmt.Errorf("diskfault: %s: wc: %w", n.Name(), err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("diskfault: %s: reading the size of %s: exit %d: %s", n.Name(), path, res.ExitCode, strings.TrimSpace(string(res.Stderr)))
+	}
+	length, err := strconv.ParseInt(strings.TrimSpace(string(res.Stdout)), 10, 64)
+	if err != nil {
+		return fmt.Errorf("diskfault: %s: the size of %s: %w", n.Name(), path, err)
+	}
+	size = min(size, max(length-offset, 0))
+	if size == 0 {
+		return nil
+	}
+	bs := blockSize(offset, size)
+	return run(ctx, n, "dd", "if=/dev/urandom", "of="+path, "conv=notrunc",
+		"bs="+strconv.FormatInt(bs, 10),
+		"seek="+strconv.FormatInt(offset/bs, 10), "count="+strconv.FormatInt(size/bs, 10))
+}
+
+// blockSize is the largest power of two up to 64KiB that divides both offset
+// and size, so that dd, which seeks and counts in blocks, can write exactly
+// that range with blocks as large as the range allows.
+func blockSize(offset, size int64) int64 {
+	bs := int64(64 << 10)
+	for offset%bs != 0 || size%bs != 0 {
+		bs /= 2
+	}
+	return bs
 }
 
 // run runs name args on n and fails on a non-zero exit with what it said.

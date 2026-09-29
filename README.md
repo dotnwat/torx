@@ -486,6 +486,9 @@ it -- and `Fill` then takes every free byte, so the service's next write
 fails with ENOSPC, until `Free` gives the space back; `Unlimit` removes the
 limit. A `-netns` run's nodes may mount it, since they live in a mount
 namespace the lab's user namespace owns; so may a host reached as root.
+`diskfault.Corrupt(ctx, n, path, offset, size)` overwrites part of a file
+with random bytes, as a disk that silently returns garbage for a sector
+would, on any node, at rest or under the process using the file.
 
 Because a suite is one static binary, production and multi-node runs invoke it
 directly; `go run`/`go test` is one way to invoke the same binary, not a second
