@@ -105,10 +105,18 @@ func (JobBase) Setup(ctx context.Context, jc *JobContext) error {
 // logs are complete and before clean so they are not deleted first. Override to
 // customize, calling jc.CollectArtifacts between stopping and cleaning to keep the
 // services' logs.
+//
+// An artifact that cannot be collected -- the results tree's disk is full, the
+// file is gone from the node -- is results lost, not a node in doubt: it is
+// recorded on the result as a persistence failure, as a failed WriteArtifact
+// is, rather than returned, since a teardown error marks the job's nodes dirty
+// and quarantines them for the rest of the run.
 func (JobBase) Teardown(ctx context.Context, jc *JobContext) error {
 	var errs MultiError
 	errs.Append(jc.registry.StopAll(ctx))
-	errs.Append(jc.CollectArtifacts(ctx))
+	if err := jc.CollectArtifacts(ctx); err != nil {
+		jc.notePersist(fmt.Errorf("results: collect artifacts: %w", err))
+	}
 	errs.Append(jc.registry.CleanAll(ctx))
 	errs.Append(jc.finalizers.Run(ctx))
 	return errs.Err()
@@ -141,10 +149,10 @@ type JobContext struct {
 	mu      sync.Mutex
 	data    json.RawMessage
 	summary string
-	// persistErrs are the job artifacts that could not be written. The worker
-	// folds them into the result's PersistErr: the job's status still says what
-	// the job did, while the suite is not Ok, since results the run was asked
-	// for are missing.
+	// persistErrs are the job artifacts that could not be written or
+	// collected. The worker folds them into the result's PersistErr: the job's
+	// status still says what the job did, while the suite is not Ok, since
+	// results the run was asked for are missing.
 	persistErrs []error
 
 	// writeMu serializes artifact writes. A write truncates the file and then
@@ -250,6 +258,13 @@ func (jc *JobContext) WriteArtifact(name string, data []byte) {
 		return
 	}
 	jc.emit("info", fmt.Sprintf("wrote artifact %s (%d bytes)", name, len(data)), site)
+}
+
+// notePersist records a failure to persist the job's results.
+func (jc *JobContext) notePersist(err error) {
+	jc.mu.Lock()
+	defer jc.mu.Unlock()
+	jc.persistErrs = append(jc.persistErrs, err)
 }
 
 // persistErrors returns the artifact writes that failed, in order.

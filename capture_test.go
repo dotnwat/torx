@@ -346,6 +346,37 @@ func TestCollectArtifacts(t *testing.T) {
 	}
 }
 
+// idleService is a service whose lifecycle does nothing, for tests that need
+// only its node binding and artifacts.
+type idleService struct{ *ServiceBase }
+
+func (idleService) Start(context.Context) error { return nil }
+func (idleService) Stop(context.Context) error  { return nil }
+func (idleService) Clean(context.Context) error { return nil }
+func (idleService) Wait(context.Context) error  { return nil }
+
+func TestTeardownRecordsAFailedCollectionAsResultsLost(t *testing.T) {
+	n := captureTestNode(t)
+	svc := idleService{NewServiceBase("svc", Homogeneous(1, NodeSpec{}), nil)}
+	svc.Bind([]*Node{n})
+	svc.AddArtifact(n, Artifact{Name: "gone.log", Path: filepath.Join(n.Scratch().Root, "gone.log"), CollectOnPass: true})
+
+	jc := NewJobContext(nil, nil)
+	jc.Register(svc)
+	jc.resultsDir = t.TempDir()
+	jc.passed = true
+
+	// A teardown error marks the job's nodes dirty; an artifact that is gone
+	// says nothing about the node, so it must not be one.
+	if err := (JobBase{}).Teardown(context.Background(), jc); err != nil {
+		t.Fatalf("Teardown = %v, want nil: a failed collection loses results, not a node", err)
+	}
+	errs := jc.persistErrors()
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "gone.log") {
+		t.Errorf("persistence failures = %v, want the one collection that failed", errs)
+	}
+}
+
 func TestCollectArtifactsNoResultsDir(t *testing.T) {
 	jc := NewJobContext(nil, nil)
 	if err := jc.CollectArtifacts(context.Background()); err != nil {

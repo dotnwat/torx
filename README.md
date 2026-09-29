@@ -372,8 +372,8 @@ Useful flags: `-nodes N` (local pool size), `-parallel N` (concurrent jobs),
 `-results <file>` (newline-delimited JSON results), `-results-dir <dir>` (the
 per-run tree; empty to disable), `-run-dir <dir>` (below), `-params <file>`
 (below), `-pool <manifest.json>` (below), `-netns` (local nodes with
-networks of their own; below), and `-seed N` (the run seed a randomized job
-draws from; above).
+networks of their own; below), `-cgroups` (local nodes with cgroups of their
+own; below), and `-seed N` (the run seed a randomized job draws from; above).
 
 **External parametrization.** `-params FILE` replaces the named jobs'
 compiled-in variants with externally supplied ones, so a specific
@@ -486,6 +486,34 @@ it -- and `Fill` then takes every free byte, so the service's next write
 fails with ENOSPC, until `Free` gives the space back; `Unlimit` removes the
 limit. A `-netns` run's nodes may mount it, since they live in a mount
 namespace the lab's user namespace owns; so may a host reached as root.
+`diskfault.Corrupt(ctx, n, path, offset, size)` overwrites part of a file
+with random bytes, as a disk that silently returns garbage for a sector
+would, on any node, at rest or under the process using the file.
+
+**Local nodes with cgroups of their own (`-cgroups`).** A machine can fail
+without going down: it freezes for a while, runs out of CPU, swaps, or its
+disk slows to a crawl. On Linux with a systemd user manager, `-cgroups` runs
+every command of each local node in a cgroup (v2) of its own, so a job can
+do that to one node. No root is needed: the driver re-executes itself with
+`systemd-run --user --scope -p Delegate=yes`, a cgroup subtree it owns, puts
+itself in `driver/` there and each node in `node-<i>/`, and starts every
+command of a node in the node's cgroup. It combines with `-netns`: the lab
+lives inside the scope.
+
+```bash
+go run ./path/to/suite -cgroups -netns -nodes 6 'my\.chaos'
+```
+
+The [`resfault`](resfault/) package takes those resources away:
+`resfault.Freeze`/`Thaw` stop every process of a node at once (unlike
+SIGSTOP, unseen by the processes; a command started on a frozen node waits
+for the thaw, or for its context to end), `LimitCPU(n, 0.05)` caps a node at a twentieth of a CPU, `LimitMemory`
+throttles and reclaims a node's memory past a bound, `ThrottleIO(n, dir,
+limits)` bounds the bandwidth and operations per second of the block device
+under a directory -- a slow disk -- and `Reset` lifts them all.
+`resfault.Check(n)` says whether a node can take them. A slow disk needs a
+directory on a block device, not a tmpfs, and on a filesystem that
+compresses, data that compresses well barely reaches the device.
 
 Because a suite is one static binary, production and multi-node runs invoke it
 directly; `go run`/`go test` is one way to invoke the same binary, not a second

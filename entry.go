@@ -4,11 +4,11 @@ package torx
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 )
 
@@ -65,8 +65,30 @@ func driverMain(args []string) int {
 	paramsFile := fs.String("params", "", "JSON file of parameter overrides replacing the named jobs' compiled-in variants")
 	seedFlag := fs.Uint64("seed", 0, "run seed each variant's seed is derived from (default: drawn at random)")
 	netns := fs.Bool("netns", false, "give each local node a network namespace of its own on a private bridge, so jobs can cut and shape the network between nodes (Linux; no root needed)")
+	cgroups := fs.Bool("cgroups", false, "give each local node a cgroup of its own, so jobs can freeze a node and take away its CPU, memory, and disk bandwidth (Linux with a systemd user manager; no root needed)")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	// -cgroups needs a cgroup subtree the driver owns, which systemd hands a
+	// user's scope that asks for delegation: the driver re-executes itself
+	// in one, before -netns re-executes it again into the lab, so the lab
+	// lives in the scope too.
+	var cgroupRoot string
+	if *cgroups {
+		if *poolFile != "" {
+			fmt.Fprintln(os.Stderr, "torx: -cgroups and -pool are mutually exclusive")
+			return 2
+		}
+		if !inScope() {
+			return enterScope()
+		}
+		root, err := prepareCgroupRoot()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "torx:", err)
+			return 2
+		}
+		cgroupRoot = root
 	}
 
 	// -netns builds the lab from namespaces this process creates, which it
@@ -129,15 +151,29 @@ func driverMain(args []string) int {
 		return 1
 	}
 
+	// Local nodes keep their scratch in a directory of the run's own, so a
+	// run going at the same time on this host cannot delete what this one's
+	// services are writing.
+	var scratch string
+	if *poolFile == "" {
+		rs, err := newRunScratch()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "torx:", err)
+			return 2
+		}
+		defer rs.Close()
+		scratch = rs.dir
+	}
+
 	var pool *Pool
 	if *netns {
 		var lab *localLab
-		pool, lab, err = newLabPool(poolSize(*nodes, requests, seed))
+		pool, lab, err = newLabPool(poolSize(*nodes, requests, seed), cgroupRoot, scratch)
 		if lab != nil {
 			defer lab.Close()
 		}
 	} else {
-		pool, err = selectPool(*poolFile, *nodes, requests, seed)
+		pool, err = selectPool(*poolFile, *nodes, requests, seed, cgroupRoot, scratch)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "torx:", err)
@@ -183,9 +219,10 @@ func driverMain(args []string) int {
 
 // selectPool builds the pool a run executes against: from a manifest file when
 // poolFile is set, otherwise a pool of local nodes sized to nodes, or to the
-// largest job when nodes is not positive. Jobs are sized under the run seed,
-// as the driver sizes them.
-func selectPool(poolFile string, nodes int, requests []JobRequest, seed uint64) (*Pool, error) {
+// largest job when nodes is not positive, with their scratch under scratch,
+// each in a cgroup of its own under cgroupRoot when it is set. Jobs are sized
+// under the run seed, as the driver sizes them.
+func selectPool(poolFile string, nodes int, requests []JobRequest, seed uint64, cgroupRoot, scratch string) (*Pool, error) {
 	if poolFile != "" {
 		m, err := LoadManifest(poolFile)
 		if err != nil {
@@ -193,7 +230,7 @@ func selectPool(poolFile string, nodes int, requests []JobRequest, seed uint64) 
 		}
 		return PoolFromManifest(m)
 	}
-	return localPool(poolSize(nodes, requests, seed)), nil
+	return localPool(poolSize(nodes, requests, seed), cgroupRoot, scratch)
 }
 
 // poolSize is the size of a local pool: nodes when it is positive, otherwise
@@ -216,20 +253,47 @@ func maxDemand(requests []JobRequest, seed uint64) int {
 	return demand
 }
 
-// localPool builds a pool of n local nodes sharing one port allocator.
-func localPool(n int) *Pool {
+// localPool builds a pool of n local nodes sharing one port allocator, with
+// their scratch under base, each in a cgroup of its own under cgroupRoot when
+// it is set.
+func localPool(n int, cgroupRoot, base string) (*Pool, error) {
 	ports := NewPortAllocator("")
-	base := filepath.Join(os.TempDir(), "torx")
 	nodes := make([]*Node, n)
 	for i := range nodes {
 		name := fmt.Sprintf("node-%d", i)
+		backend, desc, err := localNodeBackend(LocalBackend{}, cgroupRoot, name)
+		if err != nil {
+			return nil, err
+		}
 		nodes[i] = NewNode(NodeConfig{
 			Name:       name,
-			Backend:    LocalBackend{},
-			Descriptor: BackendDescriptor{Kind: "local"},
+			Backend:    backend,
+			Descriptor: desc,
 			Scratch:    MakeScratch(base, name),
 			Ports:      ports,
 		})
 	}
-	return NewPool(nodes)
+	return NewPool(nodes), nil
+}
+
+// localNodeBackend completes b for the local node name -- its cgroup under
+// cgroupRoot, when that is set -- and returns it with the descriptor a worker
+// rebuilds it from.
+func localNodeBackend(b LocalBackend, cgroupRoot, name string) (LocalBackend, BackendDescriptor, error) {
+	if cgroupRoot != "" {
+		cg, err := nodeCgroup(cgroupRoot, name)
+		if err != nil {
+			return LocalBackend{}, BackendDescriptor{}, err
+		}
+		b.Cgroup = cg
+	}
+	desc := BackendDescriptor{Kind: "local"}
+	if b != (LocalBackend{}) {
+		config, err := json.Marshal(b)
+		if err != nil {
+			return LocalBackend{}, BackendDescriptor{}, err
+		}
+		desc.Config = config
+	}
+	return b, desc, nil
 }

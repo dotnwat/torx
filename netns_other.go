@@ -21,6 +21,6 @@ func enterLab() int {
 
 type localLab struct{}
 
-func newLabPool(int) (*Pool, *localLab, error) { return nil, nil, errNoLab }
+func newLabPool(int, string, string) (*Pool, *localLab, error) { return nil, nil, errNoLab }
 
 func (*localLab) Close() {}

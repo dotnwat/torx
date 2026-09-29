@@ -29,10 +29,63 @@ import (
 // process the backend started -- nsenter replaces itself with it -- so
 // signals and process groups work as without it.
 //
+// Cgroup, when set, is the path of a cgroup (v2) directory, such as
+// /sys/fs/cgroup/.../node-0, that every command the backend runs begins life
+// in, so the resources of everything a node runs can be taken away together
+// (see the resfault package). A run under -cgroups gives each local node one.
+// Freeze and Thaw stop and resume everything in it; a command started while
+// it is frozen waits for the thaw, or for its context to end, before it
+// starts. Freeze a node's cgroup only through Freeze: a command started into a
+// cgroup frozen behind the backend's back hangs the process starting it.
+//
 // A "local" descriptor's Config is the LocalBackend as JSON, empty for a plain
 // local node.
 type LocalBackend struct {
-	NetNS string `json:"netns,omitempty"`
+	NetNS  string `json:"netns,omitempty"`
+	Cgroup string `json:"cgroup,omitempty"`
+}
+
+// CgroupPath is the cgroup the backend's commands run in, "" for none.
+func (b LocalBackend) CgroupPath() string { return b.Cgroup }
+
+// place has c begin life in the backend's cgroup, if it has one, once the
+// cgroup is not frozen, and returns a function to call once c has started.
+// Until then the cgroup cannot be frozen: a process forked into a frozen
+// cgroup would freeze before it could exec, and Go's fork waits for the exec
+// on a thread the runtime cannot stop, so the whole process would hang.
+func (b LocalBackend) place(ctx context.Context, c *exec.Cmd) (func(), error) {
+	if b.Cgroup == "" {
+		return func() {}, nil
+	}
+	leave, err := gateFor(b.Cgroup).enter(ctx)
+	if err != nil {
+		return nil, err
+	}
+	closeFD, err := intoCgroup(c.SysProcAttr, b.Cgroup)
+	if err != nil {
+		leave()
+		return nil, err
+	}
+	return func() { closeFD(); leave() }, nil
+}
+
+// Freeze stops every process in the backend's cgroup where it stands, and
+// returns once the kernel reports them stopped. Commands started meanwhile
+// wait for Thaw.
+func (b LocalBackend) Freeze(ctx context.Context) error {
+	if b.Cgroup == "" {
+		return errors.New("backend: freeze: the node has no cgroup of its own (run with -cgroups)")
+	}
+	return gateFor(b.Cgroup).freeze(ctx, b.Cgroup)
+}
+
+// Thaw lets the processes Freeze stopped run on, and the commands waiting to
+// start, start.
+func (b LocalBackend) Thaw() error {
+	if b.Cgroup == "" {
+		return errors.New("backend: thaw: the node has no cgroup of its own (run with -cgroups)")
+	}
+	return gateFor(b.Cgroup).thaw(b.Cgroup)
 }
 
 // localBackendFrom builds the LocalBackend a "local" descriptor describes.
@@ -117,7 +170,15 @@ func (b LocalBackend) Exec(ctx context.Context, cmd Cmd) (ExecResult, error) {
 	c.Stdout = &stdout
 	c.Stderr = &stderr
 
-	err := c.Run()
+	release, err := b.place(ctx, c)
+	if err != nil {
+		return ExecResult{}, Wrap(ErrBackend, "backend: exec "+cmd.Path, err)
+	}
+	err = c.Start()
+	release()
+	if err == nil {
+		err = c.Wait()
+	}
 	res := ExecResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return res, Wrap(ErrBackend, "backend: exec "+cmd.Path, ctxErr)
@@ -141,6 +202,11 @@ func (b LocalBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
 	cmd = b.inNetNS(cmd)
 	c := exec.Command(cmd.Path, cmd.Args...)
 	configure(c, cmd)
+	release, err := b.place(ctx, c)
+	if err != nil {
+		return nil, Wrap(ErrBackend, "backend: stream "+cmd.Path, err)
+	}
+	defer release()
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return nil, Wrap(ErrBackend, "backend: stream "+cmd.Path, err)

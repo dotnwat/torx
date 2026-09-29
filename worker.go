@@ -226,7 +226,13 @@ func buildNodes(descs []NodeDescriptor) ([]*Node, error) {
 func buildBackend(d BackendDescriptor) (Backend, error) {
 	switch d.Kind {
 	case "", "local":
-		return localBackendFrom(d)
+		b, err := localBackendFrom(d)
+		if err != nil || b.Cgroup == "" {
+			return b, err
+		}
+		// A node's cgroup outlives the jobs that use it; one that was frozen
+		// or starved when its job ended must not be so for the next.
+		return b, resetCgroup(b.Cgroup)
 	default:
 		if build, ok := lookupBackend(d.Kind); ok {
 			return build(d)
