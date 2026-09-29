@@ -202,8 +202,13 @@ func resetCgroup(path string) error {
 
 // cgroupGate orders the commands this process starts into a cgroup against
 // its freezes: a start waits while the cgroup is frozen, and a freeze waits
-// for the starts in flight to exec.
+// for the starts in flight to exec. Freezes and thaws take turns (op), so a
+// thaw that comes while a freeze waits for a start goes after it: were it to
+// reopen the gate first, the freeze would then freeze the cgroup with starts
+// let through.
 type cgroupGate struct {
+	op sync.Mutex // held by a freeze or a thaw for its whole transition
+
 	mu       sync.Mutex
 	idle     *sync.Cond // broadcast when starting drops to zero
 	starting int
@@ -249,10 +254,13 @@ func (g *cgroupGate) enter(ctx context.Context) (func(), error) {
 }
 
 // freeze freezes the cgroup at path once no start is in flight, and waits
-// until the kernel reports it frozen.
+// until the kernel reports it frozen, or until a thaw that came meanwhile
+// has undone it.
 func (g *cgroupGate) freeze(ctx context.Context, path string) error {
+	g.op.Lock()
 	g.mu.Lock()
-	if !g.frozen {
+	closed := !g.frozen // this freeze closes the gate; an earlier one has not
+	if closed {
 		g.frozen = true
 		g.thawed = make(chan struct{})
 	}
@@ -260,9 +268,15 @@ func (g *cgroupGate) freeze(ctx context.Context, path string) error {
 		g.idle.Wait()
 	}
 	err := os.WriteFile(filepath.Join(path, "cgroup.freeze"), []byte("1"), 0)
+	thawed := g.thawed
+	if err != nil && closed {
+		// Not frozen after all: let the starts waiting on the gate go.
+		g.frozen = false
+		close(g.thawed)
+	}
 	g.mu.Unlock()
+	g.op.Unlock()
 	if err != nil {
-		_ = g.thaw(path)
 		return fmt.Errorf("cgroups: freezing %s: %w", path, err)
 	}
 	for {
@@ -274,6 +288,8 @@ func (g *cgroupGate) freeze(ctx context.Context, path string) error {
 			return nil
 		}
 		select {
+		case <-thawed:
+			return nil
 		case <-ctx.Done():
 			return fmt.Errorf("cgroups: waiting for %s to freeze: %w", path, ctx.Err())
 		case <-time.After(10 * time.Millisecond):
@@ -281,8 +297,11 @@ func (g *cgroupGate) freeze(ctx context.Context, path string) error {
 	}
 }
 
-// thaw thaws the cgroup at path and lets the starts waiting on it go.
+// thaw thaws the cgroup at path and lets the starts waiting on it go. A
+// freeze in progress finishes first.
 func (g *cgroupGate) thaw(path string) error {
+	g.op.Lock()
+	defer g.op.Unlock()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if err := os.WriteFile(filepath.Join(path, "cgroup.freeze"), []byte("0"), 0); err != nil {

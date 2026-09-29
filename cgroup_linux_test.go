@@ -83,3 +83,54 @@ func TestCgroupGateHoldsStartsWhileFrozen(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestCgroupGateThawDuringAPendingFreeze is a thaw that comes while a freeze
+// waits for a start in flight: the freeze must not freeze the cgroup after
+// the thaw has let starts through, or a start would fork into a frozen
+// cgroup and hang the process.
+func TestCgroupGateThawDuringAPendingFreeze(t *testing.T) {
+	dir := fakeCgroup(t)
+	g := gateFor(dir)
+	ctx := context.Background()
+	leave, err := g.enter(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	froze := make(chan error, 1)
+	go func() { froze <- g.freeze(ctx, dir) }()
+	pending := func() bool {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return g.frozen
+	}
+	for deadline := time.Now().Add(5 * time.Second); !pending(); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the freeze never closed the gate")
+		}
+	}
+	thawed := make(chan error, 1)
+	go func() { thawed <- g.thaw(dir) }()
+	time.Sleep(50 * time.Millisecond) // the thaw runs now, or waits for the freeze
+	leave()
+	for _, done := range []chan error{froze, thawed} {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the freeze or the thaw did not finish")
+		}
+	}
+	// The thaw came last: the cgroup is thawed, as the gate says it is.
+	if b, _ := os.ReadFile(filepath.Join(dir, "cgroup.freeze")); string(b) != "0" {
+		t.Fatalf("cgroup.freeze is %q after a freeze and then a thaw, want 0", b)
+	}
+	short, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	leave, err = g.enter(short)
+	if err != nil {
+		t.Fatalf("a start after the thaw: %v", err)
+	}
+	leave()
+}
