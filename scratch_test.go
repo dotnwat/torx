@@ -5,6 +5,7 @@ package torx
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -12,11 +13,11 @@ func TestRunScratchIsTheRunsOwnAndReapsTheGone(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	root := filepath.Join(os.TempDir(), scratchRoot)
 
-	// A run that is gone left its directory and lock file behind; a run
-	// that has only just made its directory has no lock file yet.
+	// A run that is gone left its directory and lock file behind; another
+	// was killed between making its directory and locking it.
 	gone := filepath.Join(root, "run-gone")
-	fresh := filepath.Join(root, "run-fresh")
-	for _, d := range []string{gone, fresh} {
+	unlocked := filepath.Join(root, "run-unlocked")
+	for _, d := range []string{gone, unlocked} {
 		if err := os.MkdirAll(filepath.Join(d, "node-0"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -29,11 +30,10 @@ func TestRunScratchIsTheRunsOwnAndReapsTheGone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(gone); !os.IsNotExist(err) {
-		t.Errorf("the gone run's directory is still there (%v)", err)
-	}
-	if _, err := os.Stat(fresh); err != nil {
-		t.Errorf("the fresh run's directory was removed: %v", err)
+	for _, d := range []string{gone, unlocked} {
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Errorf("%s is still there (%v)", d, err)
+		}
 	}
 
 	// A second run at the same time gets a directory of its own, and does
@@ -54,4 +54,38 @@ func TestRunScratchIsTheRunsOwnAndReapsTheGone(t *testing.T) {
 		t.Errorf("a closed run's directory is still there (%v)", err)
 	}
 	a.Close()
+}
+
+// TestRunScratchUnderConcurrentStarts has runs start at once, each reaping
+// the directories of runs that are gone as it makes its own: no run may
+// reap a directory another is still making, or return one that is gone.
+func TestRunScratchUnderConcurrentStarts(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failures []string
+	fail := func(s string) {
+		mu.Lock()
+		failures = append(failures, s)
+		mu.Unlock()
+	}
+	for range 16 {
+		wg.Go(func() {
+			for range 200 {
+				rs, err := newRunScratch()
+				if err != nil {
+					fail(err.Error())
+					continue
+				}
+				if _, err := os.Stat(filepath.Join(rs.dir, ".lock")); err != nil {
+					fail("returned a reaped directory: " + err.Error())
+				}
+				rs.Close()
+			}
+		})
+	}
+	wg.Wait()
+	if len(failures) > 0 {
+		t.Fatalf("%d of 3200 starts failed; first: %s", len(failures), failures[0])
+	}
 }

@@ -3,6 +3,7 @@
 package torx
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,6 +22,10 @@ const scratchRoot = "torx"
 // it for as long as it lives and removes it at the end. A directory whose lock
 // no process holds belongs to a run that ended without removing it -- one that
 // was killed -- and the next run to start removes it.
+//
+// Runs take turns starting, under a lock on $TMPDIR/torx itself: a run makes
+// its directory and takes its lock in its turn, so another run reaping in
+// its own turn never sees a live run's directory unlocked.
 type runScratch struct {
 	dir  string
 	lock *os.File
@@ -32,6 +37,20 @@ func newRunScratch() (*runScratch, error) {
 	root := filepath.Join(os.TempDir(), scratchRoot)
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("scratch: %w", err)
+	}
+	turn, err := os.OpenFile(filepath.Join(root, ".lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("scratch: %w", err)
+	}
+	defer func() { _ = turn.Close() }() // ends the turn
+	for {
+		err = syscall.Flock(int(turn.Fd()), syscall.LOCK_EX)
+		if !errors.Is(err, syscall.EINTR) {
+			break
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("scratch: waiting for the runs starting before this one: %w", err)
 	}
 	reapScratch(root)
 	dir, err := os.MkdirTemp(root, "run-")
@@ -72,8 +91,9 @@ func lockScratch(dir string, create bool) (*os.File, error) {
 }
 
 // reapScratch removes the run directories under root whose runs are gone:
-// their lock file is there and no process holds it. A directory without a
-// lock file may belong to a run that has only just made it, and is left.
+// no process holds their lock, or they have no lock file, their run killed
+// between making the directory and locking it. The caller holds root's lock,
+// so no run is making one now.
 func reapScratch(root string) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -85,10 +105,12 @@ func reapScratch(root string) {
 		}
 		dir := filepath.Join(root, e.Name())
 		lock, err := lockScratch(dir, false)
-		if err != nil {
-			continue // a live run's, or one without a lock file yet
+		switch {
+		case err == nil:
+			_ = os.RemoveAll(dir)
+			_ = lock.Close()
+		case errors.Is(err, os.ErrNotExist):
+			_ = os.RemoveAll(dir)
 		}
-		_ = os.RemoveAll(dir)
-		_ = lock.Close()
 	}
 }
