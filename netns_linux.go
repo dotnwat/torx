@@ -25,7 +25,6 @@
 package torx
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -111,10 +110,11 @@ type localLab struct {
 }
 
 // newLabPool builds a pool of n local nodes, each in a network namespace of
-// its own on the lab's bridge, with their scratch under base. It must run
-// inside the lab (inLab). Close the lab to release the namespaces; they die
-// with the driver regardless.
-func newLabPool(n int, base string) (*Pool, *localLab, error) {
+// its own on the lab's bridge, with their scratch under base, and in a cgroup
+// of its own under cgroupRoot when that is set. It must run inside the lab
+// (inLab). Close the lab to release the namespaces; they die with the driver
+// regardless.
+func newLabPool(n int, cgroupRoot, base string) (*Pool, *localLab, error) {
 	lab := &localLab{}
 	prefix := netip.MustParsePrefix(labPrefix)
 	bridgeAddr := prefix.Addr().Next()
@@ -148,12 +148,16 @@ func newLabPool(n int, base string) (*Pool, *localLab, error) {
 			return nil, nil, err
 		}
 		name := fmt.Sprintf("node-%d", i)
-		config, _ := json.Marshal(LocalBackend{NetNS: ns})
+		backend, desc, err := localNodeBackend(LocalBackend{NetNS: ns}, cgroupRoot, name)
+		if err != nil {
+			lab.Close()
+			return nil, nil, err
+		}
 		nodes[i] = NewNode(NodeConfig{
 			Name:       name,
 			Addr:       addr.String(),
-			Backend:    LocalBackend{NetNS: ns},
-			Descriptor: BackendDescriptor{Kind: "local", Config: config},
+			Backend:    backend,
+			Descriptor: desc,
 			Scratch:    MakeScratch(base, name),
 			Ports:      NewRangePortAllocator(labPortMin, labPortMax),
 		})
