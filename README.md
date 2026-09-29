@@ -504,6 +504,17 @@ lives inside the scope.
 go run ./path/to/suite -cgroups -netns -nodes 6 'my\.chaos'
 ```
 
+The [`resfault`](resfault/) package takes those resources away:
+`resfault.Freeze`/`Thaw` stop every process of a node at once (unlike
+SIGSTOP, unseen by the processes; a command started on a frozen node waits
+for the thaw, or for its context to end), `LimitCPU(n, 0.05)` caps a node at a twentieth of a CPU, `LimitMemory`
+throttles and reclaims a node's memory past a bound, `ThrottleIO(n, dir,
+limits)` bounds the bandwidth and operations per second of the block device
+under a directory -- a slow disk -- and `Reset` lifts them all.
+`resfault.Check(n)` says whether a node can take them. A slow disk needs a
+directory on a block device, not a tmpfs, and on a filesystem that
+compresses, data that compresses well barely reaches the device.
+
 Because a suite is one static binary, production and multi-node runs invoke it
 directly; `go run`/`go test` is one way to invoke the same binary, not a second
 code path.
