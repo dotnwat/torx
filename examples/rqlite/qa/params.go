@@ -67,3 +67,57 @@ func intValue(v any) (int, bool) {
 	}
 	return 0, false
 }
+
+// resolveChaosParams canonicalizes one parameter set of rqlite.chaos, for the
+// same reasons resolveClusterParams does: a mistyped fault name must fail the
+// variant rather than quietly run without that fault.
+func resolveChaosParams(p torx.Params) (torx.Params, error) {
+	out := torx.Params{
+		paramNodes: defaultNodes, paramDuration: defaultDuration, paramClients: defaultClients,
+		paramFaults: "all", paramTrial: 1, paramQueued: true, paramTolerate: "",
+	}
+	for k, v := range p {
+		switch k {
+		case paramNodes, paramDuration, paramClients, paramTrial:
+			n, ok := intValue(v)
+			limit := map[string]int{paramNodes: maxNodes, paramDuration: maxDuration, paramClients: maxClients, paramTrial: math.MaxInt32}[k]
+			if !ok || n < 1 || n > limit {
+				return nil, fmt.Errorf("%s must be an integer in [1, %d], got %v", k, limit, v)
+			}
+			out[k] = n
+		case paramQueued:
+			b, ok := v.(bool)
+			if !ok {
+				return nil, fmt.Errorf("%s must be a boolean, got %v", k, v)
+			}
+			out[k] = b
+		case paramTolerate:
+			s, ok := v.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s must be a comma-separated list of anomaly kinds, got %v", k, v)
+			}
+			out[k] = s
+		case paramFaults:
+			s, ok := v.(string)
+			if !ok || s == "" {
+				return nil, fmt.Errorf("%s must be a comma-separated list of faults, or \"all\" and faults to leave out as -name, got %v", k, v)
+			}
+			all := strings.HasPrefix(s+",", "all,")
+			for i, f := range strings.Split(s, ",") {
+				switch {
+				case all && i == 0:
+				case all && strings.HasPrefix(f, "-") && validFault(f[1:]):
+				case !all && validFault(f):
+				case all:
+					return nil, fmt.Errorf("%s: after \"all\", %q is not a fault to leave out (-name)", k, f)
+				default:
+					return nil, fmt.Errorf("%s: unknown fault %q", k, f)
+				}
+			}
+			out[k] = s
+		default:
+			return nil, fmt.Errorf("unknown parameter %q", k)
+		}
+	}
+	return out, nil
+}
