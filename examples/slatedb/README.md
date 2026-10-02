@@ -155,15 +155,27 @@ object-store request as the store saw it, with the faults injected),
 `allow` lists issues of SlateDB to report as warnings rather than fail on,
 so that a run that keeps finding one can find others:
 
-- `worker-store-error` (allowed by default): a standalone compaction
+- `worker-store-error` (allowed by default; #49): a standalone compaction
   worker does not retry object-store errors as every other process does,
   so one that outlasts the object-store client's own retries ends its
   loop for good.
 
 The clock faults are off by default for the same reason: a compaction
-worker whose clock is a few milliseconds behind the compactor's dies, and
-a writer whose clock steps back fails for good.
+worker whose clock is a few milliseconds behind the compactor's dies
+(#48), and a writer whose clock is behind the database's last tick fails
+for good (#47).
 
 ## Findings
 
-See `results/slatedb-findings/DRAFTS.md` (gitignored) until they are filed.
+Against SlateDB 0.17.0 and main, tracked in #51, each with a standalone
+reproducer:
+
+- #47: a writer whose clock is behind the database's last tick by more than
+  about 10 seconds -- one that fails over to a host whose clock is behind
+  the previous writer's -- fails for good on its first write.
+- #48: a compaction worker whose clock is 20 ms or more behind the
+  compactor's fails its compactions, and its loop ends.
+- #49: a standalone compaction worker does not retry object-store errors
+  as every other process does, and a short outage ends its loop
+  (`allow=worker-store-error`).
+- #50: `SystemClockTicker` panics when its clock moves backwards.
