@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -15,6 +16,10 @@ import (
 // workerGracePeriod is how long a cancelled worker has to exit after SIGTERM
 // before it is force-killed.
 const workerGracePeriod = 10 * time.Second
+
+// workerTagEnv names the environment entry that tags a worker, and every
+// process it starts, with a tag of the launch's own.
+const workerTagEnv = "TORX_WORKER_TAG"
 
 // eventDrainGrace bounds how long Launch keeps draining the worker's event pipe
 // after the worker has exited. The drain normally ends at EOF the instant the
@@ -50,8 +55,13 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 		args = []string{"worker"}
 	}
 
+	// Every process the worker starts inherits its tag, so that whatever
+	// it leaves running -- dying abruptly, killed for memory, say, before its
+	// teardown, or simply not stopping something -- can be found and killed
+	// once it is gone.
+	tag := strconv.FormatUint(RandomSeed(), 36)
 	cmd := exec.CommandContext(ctx, path, args...)
-	cmd.Env = append(os.Environ(), l.Env...)
+	cmd.Env = append(append(os.Environ(), l.Env...), workerTagEnv+"="+tag)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	// Own process group so cancellation reaches the whole worker tree.
@@ -123,6 +133,13 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	close(drainDone)
 	_ = eventR.Close()
 	waitErr := <-waitCh
+	if n, err := killTagged(tag); n > 0 || err != nil {
+		msg := fmt.Sprintf("driver: killed %d processes the worker left running", n)
+		if err != nil {
+			msg += ": " + err.Error()
+		}
+		sink.Emit(Event{Kind: EventLog, Time: time.Now(), Source: variantID(a.JobID, a.Params), Component: "driver", Level: "warn", Message: msg})
+	}
 
 	if !haveResult {
 		// The worker died before reporting a result, so its teardown never
