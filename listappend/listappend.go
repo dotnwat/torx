@@ -15,7 +15,8 @@
 //   - rw: T1 read a list that T2's append came right after: T2 overwrote
 //     what T1 read (T1 -> T2), an anti-dependency.
 //
-// and, optionally, realtime: T1 committed before T2 began (T1 -> T2).
+// A committed append that no read saw came after every version one did,
+// so it follows the last of them the same ways. And, optionally, realtime: T1 committed before T2 began (T1 -> T2).
 // A cycle of dependencies is an anomaly; which cycles a level forbids is
 // the level's definition. Serializability forbids every cycle;
 // snapshot isolation allows only those with two rw edges in a row, so it
@@ -345,6 +346,7 @@ func (c *checker) edges() {
 			}
 		}
 	}
+	latest := map[string][]int{} // key -> the transactions that read its whole version order
 	for i, t := range c.txns {
 		if t.Status != Committed {
 			continue
@@ -360,6 +362,39 @@ func (c *checker) edges() {
 				if w, ok := c.writer[m.Key][order[len(m.Read)]]; ok {
 					add(i, w, RW)
 				}
+			}
+			if slices.Equal(order, m.Read) {
+				latest[m.Key] = append(latest[m.Key], i)
+			}
+		}
+	}
+	// A committed append no read saw came after every version one did, so
+	// its writer follows the writer of the last of those (ww) and whoever
+	// read it (rw); a read of an earlier version gets there through them.
+	// Without these a history nobody read the end of -- write skew with no
+	// later reader -- would have no anti-dependencies at all.
+	observed := map[string]map[string]bool{}
+	for k, order := range c.order {
+		observed[k] = map[string]bool{}
+		for _, v := range order {
+			observed[k][v] = true
+		}
+	}
+	for i, t := range c.txns {
+		if t.Status != Committed {
+			continue
+		}
+		for _, m := range t.Mops {
+			if !m.Append || observed[m.Key][m.Value] {
+				continue
+			}
+			if order := c.order[m.Key]; len(order) > 0 {
+				if w, ok := c.writer[m.Key][order[len(order)-1]]; ok {
+					add(w, i, WW)
+				}
+			}
+			for _, reader := range latest[m.Key] {
+				add(reader, i, RW)
 			}
 		}
 	}

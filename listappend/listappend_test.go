@@ -54,6 +54,23 @@ func TestAnomalies(t *testing.T) {
 			txn(2, r("x"), r("y"), a("y", "1")),
 			txn(3, r("x", "1"), r("y", "1")),
 		}, Options{}, []string{"G2"}},
+		{"write skew nobody read the end of", []Txn{
+			txn(1, r("y"), a("x", "1")),
+			txn(2, r("x"), a("y", "2")),
+		}, Options{}, []string{"G2"}},
+		{"lost update nobody read the end of", []Txn{
+			// Which of the unread appends came first is unknown, so the
+			// ww edge between them is: G2, where a read of both would
+			// have shown G-single.
+			txn(1, r("x"), a("x", "1")),
+			txn(2, r("x", "1"), a("x", "2")),
+			txn(3, r("x", "1"), a("x", "3")),
+		}, Options{}, []string{"G2"}},
+		{"serial, its last appends unread", []Txn{
+			txn(1, r("x"), a("x", "1")),
+			txn(2, r("x", "1"), a("x", "2"), a("y", "2")),
+			txn(3, r("y"), a("z", "3")),
+		}, Options{}, nil},
 		{"G-nonadjacent", []Txn{
 			// T1 -rw-> T2 -wr-> T3 -rw-> T4 -wr-> T1: two rw edges, apart.
 			txn(1, r("x"), r("w", "4")),
@@ -64,9 +81,11 @@ func TestAnomalies(t *testing.T) {
 		}, Options{}, []string{"G-nonadjacent"}},
 		{"G1a", []Txn{aborted, txn(2, r("x", "1"))}, Options{}, []string{"G1a"}},
 		{"G1b", []Txn{
+			// What T2 read is after T1's first append and before its
+			// second, a cycle too.
 			txn(1, a("x", "1"), a("x", "2")),
 			txn(2, r("x", "1")),
-		}, Options{}, []string{"G1b"}},
+		}, Options{}, []string{"G-single", "G1b"}},
 		{"incompatible order", []Txn{
 			txn(1, a("x", "1")),
 			txn(2, a("x", "2")),
@@ -77,9 +96,10 @@ func TestAnomalies(t *testing.T) {
 			txn(1, a("x", "1"), r("x")),
 		}, Options{}, []string{"internal"}},
 		{"lost with realtime", []Txn{
+			// T2 began after T1 committed and read what T1 overwrote.
 			txn(1, a("x", "1")),
 			txn(2, r("x")),
-		}, Options{Realtime: true}, []string{"lost"}},
+		}, Options{Realtime: true}, []string{"G-single", "lost"}},
 		{"stale read without realtime is fine", []Txn{
 			txn(1, a("x", "1")),
 			txn(2, r("x")),
