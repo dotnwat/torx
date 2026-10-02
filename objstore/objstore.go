@@ -289,11 +289,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Bucket: req.bucket,
 		Key:    req.key,
 	}
-	if v := r.Header.Get("If-None-Match"); v != "" {
-		ev.Cond = "If-None-Match: " + v
-	}
-	if v := r.Header.Get("If-Match"); v != "" {
-		ev.Cond = strings.TrimSpace(ev.Cond + " If-Match: " + v)
+	for _, h := range []string{"If-None-Match", "If-Match", "X-Amz-Copy-Source-If-Match", "X-Amz-Copy-Source-If-None-Match"} {
+		if v := r.Header.Get(h); v != "" {
+			ev.Cond = strings.TrimSpace(ev.Cond + " " + h + ": " + v)
+		}
 	}
 	if v := r.Header.Get("Range"); v != "" {
 		ev.Range = v
@@ -653,6 +652,27 @@ func precondition(w http.ResponseWriter, r *http.Request, cur *object) bool {
 	return true
 }
 
+// sourceCondition checks a copy's conditions on its source against what
+// the source holds, and answers the request if they fail. s.mu is held, so
+// the source the conditions held of is the one copied.
+func sourceCondition(w http.ResponseWriter, r *http.Request, src *object) bool {
+	for _, h := range []string{"X-Amz-Copy-Source-If-Modified-Since", "X-Amz-Copy-Source-If-Unmodified-Since"} {
+		if r.Header.Get(h) != "" {
+			writeError(w, http.StatusNotImplemented, "NotImplemented", "a copy takes no "+h)
+			return false
+		}
+	}
+	if v := r.Header.Get("X-Amz-Copy-Source-If-Match"); v != "" && !etagMatch(v, src.ETag) {
+		writeError(w, http.StatusPreconditionFailed, "PreconditionFailed", "the source's ETag does not match")
+		return false
+	}
+	if v := r.Header.Get("X-Amz-Copy-Source-If-None-Match"); v != "" && etagMatch(v, src.ETag) {
+		writeError(w, http.StatusPreconditionFailed, "PreconditionFailed", "the source's ETag matches")
+		return false
+	}
+	return true
+}
+
 func etagMatch(header, etag string) bool {
 	for v := range strings.SplitSeq(header, ",") {
 		v = strings.TrimSpace(v)
@@ -725,7 +745,7 @@ func (s *Server) copy(w http.ResponseWriter, r *http.Request, req request) {
 		writeError(w, http.StatusNotFound, "NoSuchKey", "no such key: "+src)
 		return
 	}
-	if !precondition(w, r, b[req.key]) {
+	if !sourceCondition(w, r, from) || !precondition(w, r, b[req.key]) {
 		return
 	}
 	o := &object{data: from.data}

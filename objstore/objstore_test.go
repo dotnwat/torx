@@ -239,6 +239,36 @@ func TestDeletesAndCopy(t *testing.T) {
 	}
 }
 
+// TestCopyConditions: a copy's conditions on its source are held to, so a
+// copy of what a client last saw does not copy what replaced it.
+func TestCopyConditions(t *testing.T) {
+	s, c := newStore(t, Options{})
+	resp, _ := c.must("PUT", "/b/src", []byte("old"), 200)
+	old := resp.Header.Get("ETag")
+	resp, _ = c.must("PUT", "/b/src", []byte("new"), 200)
+	cur := resp.Header.Get("ETag")
+
+	c.must("PUT", "/b/dst", nil, 412, "X-Amz-Copy-Source", "/b/src", "X-Amz-Copy-Source-If-Match", old)
+	c.must("PUT", "/b/dst", nil, 412, "X-Amz-Copy-Source", "/b/src", "X-Amz-Copy-Source-If-None-Match", cur)
+	c.must("PUT", "/b/dst", nil, 501, "X-Amz-Copy-Source", "/b/src", "X-Amz-Copy-Source-If-Unmodified-Since", "Thu, 01 Jan 2026 00:00:00 GMT")
+	if _, _, ok := s.Get("b", "dst"); ok {
+		t.Fatal("a copy whose condition failed took effect")
+	}
+	h := s.History()
+	if ev := h[len(h)-3]; ev.Applied || ev.Cond != "X-Amz-Copy-Source-If-Match: "+old {
+		t.Fatalf("history of a refused copy: %+v", ev)
+	}
+
+	c.must("PUT", "/b/dst", nil, 200, "X-Amz-Copy-Source", "/b/src", "X-Amz-Copy-Source-If-Match", cur)
+	if data, _, _ := s.Get("b", "dst"); string(data) != "new" {
+		t.Fatalf("copy: %q", data)
+	}
+	// Conditions on the source and on the destination both hold, or the
+	// copy has no effect.
+	c.must("PUT", "/b/dst", nil, 412, "X-Amz-Copy-Source", "/b/src", "X-Amz-Copy-Source-If-None-Match", old, "If-None-Match", "*")
+	c.must("PUT", "/b/dst2", nil, 200, "X-Amz-Copy-Source", "/b/src", "X-Amz-Copy-Source-If-None-Match", old, "If-None-Match", "*")
+}
+
 func TestMultipart(t *testing.T) {
 	s, c := newStore(t, Options{})
 	_, b := c.must("POST", "/b/big?uploads", nil, 200, "x-amz-meta-id", "u1")

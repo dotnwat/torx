@@ -25,8 +25,8 @@ type Event struct {
 	Key    string `json:"key,omitempty"`
 	// Keys are the keys a batch of deletes removed.
 	Keys []string `json:"keys,omitempty"`
-	// Cond is its If-None-Match and If-Match headers, if any; Range its
-	// Range header.
+	// Cond is its If-None-Match and If-Match headers, and a copy's of its
+	// source, if any; Range its Range header.
 	Cond  string `json:"cond,omitempty"`
 	Range string `json:"range,omitempty"`
 	// Fault is the fault injected, "rule:action", if any.
