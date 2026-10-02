@@ -80,6 +80,18 @@ func TestAnomalies(t *testing.T) {
 			txn(5, r("x", "2"), r("z", "4")),
 		}, Options{}, []string{"G-nonadjacent"}},
 		{"G1a", []Txn{aborted, txn(2, r("x", "1"))}, Options{}, []string{"G1a"}},
+		{"G1a after an append of its own", []Txn{aborted, txn(2, a("x", "2"), r("x", "1", "2"))}, Options{}, []string{"G1a"}},
+		{"G1a of an append nobody made", []Txn{txn(1, a("x", "1"), r("x", "0", "1"))}, Options{}, []string{"G1a"}},
+		{"G1b after an append of its own", []Txn{
+			txn(1, a("x", "1"), a("y", "1"), a("x", "2")),
+			txn(2, a("x", "3"), r("x", "1", "3"), r("y", "1")),
+			txn(3, r("x", "1", "3", "2")),
+		}, Options{}, []string{"G0", "G1b"}},
+		{"lost after an append of its own", []Txn{
+			// T1's append is unread, so after T2's; T1 committed first.
+			txn(1, a("x", "1")),
+			txn(2, a("x", "2"), r("x", "2")),
+		}, Options{Realtime: true}, []string{"G1c", "lost"}},
 		{"G1b", []Txn{
 			// What T2 read is after T1's first append and before its
 			// second, a cycle too.

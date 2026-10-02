@@ -273,16 +273,29 @@ func (c *checker) orders() {
 	}
 }
 
-// reads checks what each read saw: no aborted appends, no intermediate
-// states, no appends nobody made, and with Realtime nothing committed
-// before it began missing.
+// reads checks what each read saw of what others appended, whether or not
+// its transaction had appended to the key by then: no aborted appends, no
+// intermediate states, no appends nobody made, and with Realtime nothing
+// committed before it began missing.
 func (c *checker) reads() {
-	for _, t := range c.txns {
+	for i, t := range c.txns {
 		if t.Status != Committed {
 			continue
 		}
-		for _, m := range external(t) {
+		// Every read is checked, each element once: one that follows the
+		// transaction's own append of the key shows what others appended
+		// as much as one that came before it.
+		checked := map[[2]string]bool{}
+		first := map[string]bool{}
+		for _, m := range t.Mops {
+			if m.Append {
+				continue
+			}
 			for _, v := range m.Read {
+				if checked[[2]string{m.Key, v}] {
+					continue
+				}
+				checked[[2]string{m.Key, v}] = true
 				w, ok := c.writer[m.Key][v]
 				if !ok {
 					c.report(Anomaly{Kind: "G1a", Key: m.Key, Txns: []int{t.ID},
@@ -294,9 +307,23 @@ func (c *checker) reads() {
 						Detail: fmt.Sprintf("txn %d read %s, appended to %s by aborted txn %d", t.ID, v, m.Key, c.txns[w].ID)})
 				}
 			}
-			if len(m.Read) > 0 {
-				last := m.Read[len(m.Read)-1]
-				if w, ok := c.writer[m.Key][last]; ok && w != c.index[t.ID] {
+			// The rest is checked in the transaction's first read of the
+			// key: its later ones are held to that one by internal.
+			if first[m.Key] {
+				continue
+			}
+			first[m.Key] = true
+			// What others wrote ends before the transaction's own appends.
+			others := m.Read
+			for len(others) > 0 {
+				if w, ok := c.writer[m.Key][others[len(others)-1]]; !ok || w != i {
+					break
+				}
+				others = others[:len(others)-1]
+			}
+			if len(others) > 0 {
+				last := others[len(others)-1]
+				if w, ok := c.writer[m.Key][last]; ok {
 					var mine []string
 					for _, x := range c.txns[w].Mops {
 						if x.Append && x.Key == m.Key {
