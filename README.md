@@ -45,6 +45,11 @@ what to look at.
   rqlite, with the same building blocks: a cluster service whose nodes join
   in order, parametrized and fault-injection jobs, a backup taken and
   restored, and the launcher a team would run it through.
+- [`examples/slatedb`](examples/slatedb/) hunts for bugs in SlateDB, a
+  key-value store kept in object storage: the bucket is an `objstore` the job
+  serves and faults, and a chaos job checks linearizability, snapshots, and
+  transactions (`listappend`) while it crashes, pauses, and fails over the
+  database's processes.
 
 # Reference
 
