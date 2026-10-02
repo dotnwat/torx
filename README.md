@@ -209,6 +209,10 @@ Guidelines that keep a service portable across the local and ssh backends:
   test does, calls `s.SetCapturePolicy(torx.CaptureRotate)` at construction so
   each launch moves the previous process's log aside as `stdout.<k>.log` and
   collects it too, instead of discarding it (the default, `CaptureTruncate`).
+  A service that runs several processes on one node at once -- a database's
+  writer beside its compactor -- gives each a log of its own with
+  `s.StartCapturedAs(ctx, n, name, cmd)`, which writes `<name>.log` and
+  rotates each name's launches apart; `s.CapturePath(n, name)` says where.
 - **Stop through the process handle.** `StartCaptured` (and `n.Stream`) return
   a `torx.Process`: `Signal` reaches the program itself, not a shell around
   it, `Wait` reports its exit status, and `Close` kills its whole process
@@ -537,6 +541,34 @@ after its call, or never. `linearize.Partition` splits a history by key,
 illegal history to its core: the few operations that, with every other one
 weakened, still admit no order -- usually a write, a read that saw it, and
 a read that did not.
+
+The [`listappend`](listappend/) package checks a record of transactions,
+after Elle: transactions read lists and append unique elements to them, so
+the reads of a key reveal the order of its versions, and from that order
+every dependency between transactions -- write-write, write-read, and
+read-write (anti-dependencies), and with `Options{Realtime: true}` real
+time. `listappend.Check` returns each kind of anomaly it finds, a cycle as
+its witness: G0, G1c, G-single, G-nonadjacent, G2; and what needs no cycle:
+aborted and intermediate reads, reads that disagree on a key's order, and
+committed appends a later read missed. `listappend.Forbidden(level)` says
+which kinds an isolation level -- serializable, snapshot isolation, read
+committed -- forbids.
+
+**A store the job serves.** Some systems keep their data in an object
+store. The [`objstore`](objstore/) package is one a job runs in its worker:
+an in-memory server of the part of S3's HTTP API that object-store clients
+use, with conditional writes, whose faults the job injects and whose every
+request it records. `objstore.New(opts)` and `(*Server).Serve(addr)` start
+it; give it an address the nodes reach, `n.CallerAddr()`, which is the
+worker's address on the route to a node -- the loopback, the `-netns` lab's
+bridge, or the interface facing a remote node. `AddRule` injects faults into
+the requests of the clients (told apart by the access key they sign with),
+operations, and key prefixes a rule names, with a probability: a failure or a
+reset before the request takes effect or after, a delay the client may give
+up on, a stall that lands after it did, a hang. `History` returns every
+request with the fault it got and what it did, and `WriteTar` archives the
+objects. [`objstore/cmd/objstore`](objstore/cmd/objstore/) serves one on its
+own, with an HTTP API for rules, for reproducer scripts.
 
 Because a suite is one static binary, production and multi-node runs invoke it
 directly; `go run`/`go test` is one way to invoke the same binary, not a second
