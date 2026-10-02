@@ -568,7 +568,8 @@ operations, and key prefixes a rule names, with a probability: a failure or a
 reset before the request takes effect or after, a delay the client may give
 up on, a stall that lands after it did, a hang. `History` returns every
 request with the fault it got and what it did, and `WriteTar` archives the
-objects. [`objstore/cmd/objstore`](objstore/cmd/objstore/) serves one on its
+objects; both are final once `Close` returns, which waits out the requests
+in flight. [`objstore/cmd/objstore`](objstore/cmd/objstore/) serves one on its
 own, with an HTTP API for rules, for reproducer scripts.
 
 Because a suite is one static binary, production and multi-node runs invoke it

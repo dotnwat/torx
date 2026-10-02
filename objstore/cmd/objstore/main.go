@@ -114,6 +114,9 @@ func main() {
 	case <-sig:
 	}
 	_ = srv.Close()
+	// The requests that were in flight end before the history is written,
+	// so it has them all.
+	_ = s.Close()
 	if *history != "" {
 		f, err := os.Create(*history)
 		if err != nil {

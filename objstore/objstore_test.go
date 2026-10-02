@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -461,6 +462,55 @@ func TestFaults(t *testing.T) {
 }
 
 // sortedBySeq returns the faulted events in the order they arrived.
+// TestClose: Close returns with no request in flight, so what the store
+// holds and its history are final: a put stalled by a fault is cut off
+// without its effect, not left to land later.
+func TestClose(t *testing.T) {
+	faulted := make(chan struct{}, 1)
+	s, c := newStore(t, Options{Logf: func(string, ...any) { faulted <- struct{}{} }})
+	s.AddRule(Rule{Name: "slow", Ops: []Op{OpPut}, Prob: 1, Action: Stall, Delay: time.Hour})
+	answered := make(chan error, 1)
+	go func() {
+		_, _, err := c.do("PUT", "/b/k", []byte("v"))
+		answered <- err
+	}()
+	<-faulted
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h := s.History()
+	if len(h) != 1 || h[0].Applied || h[0].Status != -1 || h[0].Fault != "slow:stall" {
+		t.Fatalf("history at Close: %+v", h)
+	}
+	if _, _, ok := s.Get("b", "k"); ok {
+		t.Fatal("a put stalled past Close took effect")
+	}
+	if err := <-answered; err == nil {
+		t.Fatal("a put stalled past Close was answered")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("a second Close: %v", err)
+	}
+
+	// A store mounted in a server of the caller's takes nothing in once
+	// closed.
+	s = New(Options{})
+	s.CreateBucket("b")
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+	c = &client{t: t, endpoint: ts.URL, key: "AKID1", http: &http.Client{Timeout: 5 * time.Second}}
+	c.must("PUT", "/b/before", []byte("v"), 200)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.do("PUT", "/b/after", []byte("v")); err == nil {
+		t.Fatal("a closed store answered a put")
+	}
+	if _, _, ok := s.Get("b", "after"); ok || len(s.History()) != 1 {
+		t.Fatalf("a closed store served a put: %+v", s.History())
+	}
+}
+
 func sortedBySeq(s *Server, _ []string) []string {
 	h := s.History()
 	slices.SortFunc(h, func(a, b Event) int { return int(a.Seq - b.Seq) })

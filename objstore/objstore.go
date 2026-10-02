@@ -143,6 +143,14 @@ type Server struct {
 
 	srv *http.Server
 	wg  sync.WaitGroup
+
+	// closeMu guards closed, set by Close, after which no request is
+	// taken in; inflight counts those taken in and not yet finished, and
+	// done is closed with the store, to end a fault's wait.
+	closeMu  sync.Mutex
+	closed   bool
+	inflight sync.WaitGroup
+	done     chan struct{}
 }
 
 // New returns a store with no buckets.
@@ -159,6 +167,7 @@ func New(opts Options) *Server {
 		buckets: map[string]map[string]*object{},
 		uploads: map[string]*upload{},
 		rng:     rng,
+		done:    make(chan struct{}),
 	}
 }
 
@@ -175,14 +184,53 @@ func (s *Server) Serve(addr string) (string, error) {
 	return "http://" + ln.Addr().String(), nil
 }
 
-// Close stops serving, cutting off the requests in flight.
+// Close stops serving and returns when no request is in flight: one
+// waiting out a fault is cut off there, a stalled one without its effect,
+// and one taking effect finishes. What the store holds and its history are
+// final once it returns, so WriteTar and WriteHistory after it miss
+// nothing. A store mounted in a server of the caller's, not started with
+// Serve, hangs up on requests that arrive after Close; close that server
+// first, so that requests still sending their bodies end.
 func (s *Server) Close() error {
-	if s.srv == nil {
-		return nil
+	s.closeMu.Lock()
+	first := !s.closed
+	if first {
+		s.closed = true
+		close(s.done)
 	}
-	err := s.srv.Close()
+	s.closeMu.Unlock()
+	var err error
+	if first && s.srv != nil {
+		err = s.srv.Close()
+	}
 	s.wg.Wait()
+	s.inflight.Wait()
 	return err
+}
+
+// enter takes a request in, unless the store is closed.
+func (s *Server) enter() bool {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.inflight.Add(1)
+	return true
+}
+
+// wait waits out a fault's delay, and reports whether it did: not if gone
+// -- the client giving up -- or the store's closing came first.
+func (s *Server) wait(d time.Duration, gone <-chan struct{}) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-gone:
+	case <-s.done:
+	}
+	return false
 }
 
 // CreateBucket makes an empty bucket, if there is none of that name.
@@ -280,6 +328,11 @@ type request struct {
 
 // ServeHTTP serves one S3 request.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.enter() {
+		hangUp(w)
+		return
+	}
+	defer s.inflight.Done()
 	req := s.parse(r)
 	ev := &Event{
 		Seq:    s.seq.Add(1),
@@ -346,21 +399,30 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			hangUp(w)
 			return
 		case Delay:
-			t := time.NewTimer(f.Delay)
-			select {
-			case <-t.C:
-			case <-r.Context().Done():
-				t.Stop()
-				ev.Status = -1 // the client gave up; the request has no effect
+			if !s.wait(f.Delay, r.Context().Done()) {
+				// The client gave up, or the store closed: the request
+				// has no effect, and no answer -- returning would send
+				// a 200.
+				ev.Status = -1
+				hangUp(w)
 				return
 			}
 		case Stall:
 			// The request takes effect after the delay whether or not the
-			// client is still there to hear of it.
-			time.Sleep(f.Delay)
+			// client is still there to hear of it, unless the store closes
+			// first.
+			if !s.wait(f.Delay, nil) {
+				ev.Status = -1
+				hangUp(w)
+				return
+			}
 		case Hang:
-			<-r.Context().Done()
+			select {
+			case <-r.Context().Done():
+			case <-s.done:
+			}
 			ev.Status = -1
+			hangUp(w)
 			return
 		}
 	}
@@ -380,12 +442,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			hangUp(w)
 			return
 		case DelayAfter:
-			t := time.NewTimer(f.Delay)
-			select {
-			case <-t.C:
-			case <-r.Context().Done():
-				t.Stop()
+			if !s.wait(f.Delay, r.Context().Done()) {
 				ev.Status = -1
+				hangUp(w)
 				return
 			}
 		}
