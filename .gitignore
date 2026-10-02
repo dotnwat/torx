@@ -18,3 +18,8 @@
 .idea/
 .vscode/
 *.swp
+
+# slatedb-node builds against whichever SlateDB the harness names, each
+# rewriting the lock file.
+/examples/slatedb/node/target/
+/examples/slatedb/node/Cargo.lock
