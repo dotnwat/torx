@@ -515,6 +515,29 @@ under a directory -- a slow disk -- and `Reset` lifts them all.
 directory on a block device, not a tmpfs, and on a filesystem that
 compresses, data that compresses well barely reaches the device.
 
+**A nemesis, and a checker.** A chaos job injects faults while clients load
+the system, records what each client saw, and checks the record. The
+[`nemesis`](nemesis/) package is the loop that injects the faults: given
+faults by name and weight, each an `Inject` that returns how to heal it,
+`(*nemesis.Nemesis).Run(ctx)` draws one, holds it, heals it, rests, and goes
+again until `ctx` ends, heals the last fault even then, and reports every
+fault and heal to a `Record` hook, for the job's history. `nemesis.Holds`
+keeps track of what a fault holds down, so that a supervisor -- the
+nemesis's `Before` hook -- restarts only what exited on its own.
+
+The [`linearize`](linearize/) package checks the record. Given a model of
+the object -- an initial state and a step function -- and the operations
+clients issued, each with its call and return time, `linearize.Check` says
+whether some order of the operations, consistent with their real-time
+order, is a legal sequential run of the model: whether the object was
+linearizable, as a strongly consistent store promises. An operation whose
+answer was lost returns at `linearize.Pending`, and may take effect any time
+after its call, or never. `linearize.Partition` splits a history by key,
+`CheckWithin` bounds a search's memory, and `linearize.Minimize` shrinks an
+illegal history to its core: the few operations that, with every other one
+weakened, still admit no order -- usually a write, a read that saw it, and
+a read that did not.
+
 Because a suite is one static binary, production and multi-node runs invoke it
 directly; `go run`/`go test` is one way to invoke the same binary, not a second
 code path.
