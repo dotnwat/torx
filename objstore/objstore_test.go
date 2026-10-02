@@ -180,6 +180,17 @@ func TestList(t *testing.T) {
 	if got := keys(c.list("prefix=b/&delimiter=/")); got != "b/x/*,b/y/*" {
 		t.Fatalf("prefix and delimiter: %s", got)
 	}
+	// A group must sort after start-after itself to be listed: a key in
+	// it that does is not enough.
+	if got := keys(c.list("delimiter=/&start-after=a/1")); got != "c,b/*" {
+		t.Fatalf("delimiter, start-after in a group: %s", got)
+	}
+	if got := keys(c.list("delimiter=/&start-after=a")); got != "c,a/*,b/*" {
+		t.Fatalf("delimiter, start-after before a group: %s", got)
+	}
+	if got := keys(c.list("prefix=b/&delimiter=/&start-after=b/x/0&max-keys=1")); got != "b/y/*" {
+		t.Fatalf("prefix, delimiter, start-after in a group: %s", got)
+	}
 	// Paging, with and without a delimiter.
 	var all []string
 	tok := ""

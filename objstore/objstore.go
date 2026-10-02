@@ -930,7 +930,8 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request, req request) {
 	}
 	prefix := q.Get("prefix")
 	delim := q.Get("delimiter")
-	after := q.Get("start-after")
+	startAfter := q.Get("start-after")
+	after := startAfter
 	if tok := q.Get("continuation-token"); tok != "" {
 		after = max(after, tok)
 	}
@@ -967,7 +968,9 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request, req request) {
 				e.prefix = k[:len(prefix)+i+len(delim)]
 			}
 		}
-		if e.prefix != "" && seen[e.prefix] {
+		// A group that does not sort after start-after is left out whole,
+		// as S3 leaves it, though keys in it do.
+		if e.prefix != "" && (seen[e.prefix] || e.prefix <= startAfter) {
 			continue
 		}
 		if len(entries) == maxKeys {
