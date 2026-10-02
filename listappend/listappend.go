@@ -27,13 +27,15 @@
 //
 // Check also reports what needs no cycle: an aborted transaction's append
 // read (G1a), a read of an intermediate state (G1b), reads of one key that
-// disagree on its order, an element read twice in a list, a transaction
-// whose reads disagree with its own appends, and -- with Realtime -- a
-// committed append missing from a read that began after it committed.
+// disagree on its order or with the order a transaction appended to it
+// in, an element read twice in a list, a transaction whose reads disagree
+// with its own appends, and -- with Realtime -- a committed append missing
+// from a read that began after it committed.
 package listappend
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 )
@@ -135,14 +137,17 @@ type checker struct {
 	index  map[int]int // ID -> position
 	opts   Options
 	writer map[string]map[string]int // key -> value -> position of the txn that appended it
-	order  map[string][]string       // key -> version order
-	adj    [][]edge
-	out    []Anomaly
+	// appended is what each transaction appended to each key, in the order
+	// it did: key -> position of the txn -> values.
+	appended map[string]map[int][]string
+	order    map[string][]string // key -> version order
+	adj      [][]edge
+	out      []Anomaly
 }
 
 // Check checks a history.
 func Check(txns []Txn, opts Options) []Anomaly {
-	c := &checker{txns: txns, index: map[int]int{}, opts: opts, writer: map[string]map[string]int{}, order: map[string][]string{}}
+	c := &checker{txns: txns, index: map[int]int{}, opts: opts, writer: map[string]map[string]int{}, appended: map[string]map[int][]string{}, order: map[string][]string{}}
 	for i, t := range txns {
 		c.index[t.ID] = i
 	}
@@ -158,7 +163,8 @@ func Check(txns []Txn, opts Options) []Anomaly {
 
 func (c *checker) report(a Anomaly) { c.out = append(c.out, a) }
 
-// appends records who appended each value.
+// appends records who appended each value, and what each transaction
+// appended.
 func (c *checker) appends() {
 	for i, t := range c.txns {
 		for _, m := range t.Mops {
@@ -167,7 +173,9 @@ func (c *checker) appends() {
 			}
 			if c.writer[m.Key] == nil {
 				c.writer[m.Key] = map[string]int{}
+				c.appended[m.Key] = map[int][]string{}
 			}
+			c.appended[m.Key][i] = append(c.appended[m.Key][i], m.Value)
 			if j, ok := c.writer[m.Key][m.Value]; ok && j != i {
 				c.report(Anomaly{Kind: "duplicate", Key: m.Key, Txns: []int{c.txns[j].ID, t.ID},
 					Detail: fmt.Sprintf("value %s appended to %s twice", m.Value, m.Key)})
@@ -275,8 +283,9 @@ func (c *checker) orders() {
 
 // reads checks what each read saw of what others appended, whether or not
 // its transaction had appended to the key by then: no aborted appends, no
-// intermediate states, no appends nobody made, and with Realtime nothing
-// committed before it began missing.
+// intermediate states, no appends nobody made, none out of the order
+// their transaction made them in or without those it made before, and
+// with Realtime nothing committed before it began missing.
 func (c *checker) reads() {
 	for i, t := range c.txns {
 		if t.Status != Committed {
@@ -287,6 +296,11 @@ func (c *checker) reads() {
 		// as much as one that came before it.
 		checked := map[[2]string]bool{}
 		first := map[string]bool{}
+		type appender struct {
+			key string
+			txn int
+		}
+		disordered := map[appender]bool{}
 		for _, m := range t.Mops {
 			if m.Append {
 				continue
@@ -307,6 +321,26 @@ func (c *checker) reads() {
 						Detail: fmt.Sprintf("txn %d read %s, appended to %s by aborted txn %d", t.ID, v, m.Key, c.txns[w].ID)})
 				}
 			}
+			// A list holds a transaction's appends in the order it made
+			// them, none there without those before it.
+			var theirs map[int][]string
+			for _, v := range m.Read {
+				if w, ok := c.writer[m.Key][v]; ok && w != i && len(c.appended[m.Key][w]) > 1 {
+					if theirs == nil {
+						theirs = map[int][]string{}
+					}
+					theirs[w] = append(theirs[w], v)
+				}
+			}
+			for _, w := range slices.Sorted(maps.Keys(theirs)) {
+				got, made := theirs[w], c.appended[m.Key][w]
+				n := min(len(got), len(made))
+				if !slices.Equal(got[:n], made[:n]) && !disordered[appender{m.Key, w}] {
+					disordered[appender{m.Key, w}] = true
+					c.report(Anomaly{Kind: "incompatible-order", Key: m.Key, Txns: []int{c.txns[w].ID, t.ID},
+						Detail: fmt.Sprintf("txn %d read %s as %v, with %v of what txn %d appended, in order, as %v", t.ID, m.Key, m.Read, got, c.txns[w].ID, made)})
+				}
+			}
 			// The rest is checked in the transaction's first read of the
 			// key: its later ones are held to that one by internal.
 			if first[m.Key] {
@@ -324,13 +358,7 @@ func (c *checker) reads() {
 			if len(others) > 0 {
 				last := others[len(others)-1]
 				if w, ok := c.writer[m.Key][last]; ok {
-					var mine []string
-					for _, x := range c.txns[w].Mops {
-						if x.Append && x.Key == m.Key {
-							mine = append(mine, x.Value)
-						}
-					}
-					if len(mine) > 0 && mine[len(mine)-1] != last {
+					if mine := c.appended[m.Key][w]; mine[len(mine)-1] != last {
 						c.report(Anomaly{Kind: "G1b", Key: m.Key, Txns: []int{c.txns[w].ID, t.ID},
 							Detail: fmt.Sprintf("txn %d read %s ending in %s, an intermediate append of txn %d, which went on to append %v", t.ID, m.Key, last, c.txns[w].ID, mine)})
 					}

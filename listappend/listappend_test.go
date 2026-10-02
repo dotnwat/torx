@@ -98,6 +98,19 @@ func TestAnomalies(t *testing.T) {
 			txn(1, a("x", "1"), a("x", "2")),
 			txn(2, r("x", "1")),
 		}, Options{}, []string{"G-single", "G1b"}},
+		{"an append without the one its transaction made before", []Txn{
+			txn(1, a("x", "1"), a("x", "2")),
+			txn(2, r("x", "2")),
+		}, Options{}, []string{"G-single", "incompatible-order"}},
+		{"a transaction's appends out of order", []Txn{
+			txn(1, a("x", "1"), a("x", "2")),
+			txn(2, r("x", "2", "1")),
+		}, Options{}, []string{"G1b", "incompatible-order"}},
+		{"a transaction's appends apart", []Txn{
+			txn(1, r("x"), a("x", "1"), a("x", "2")),
+			txn(2, r("x"), a("x", "3")),
+			txn(3, r("x", "1", "3", "2")),
+		}, Options{}, []string{"G-single", "G0"}},
 		{"incompatible order", []Txn{
 			txn(1, a("x", "1")),
 			txn(2, a("x", "2")),
