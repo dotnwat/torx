@@ -79,10 +79,14 @@ func (b *ServiceBase) StartCaptured(ctx context.Context, n *Node, cmd Cmd) (Proc
 // stdout.log, and the CapturePolicy applies to the launches under each name
 // apart: rotation moves <name>.log aside as <name>.<k>.log. StartCaptured
 // is StartCapturedAs with the name "stdout". name must be a single path
-// component.
+// component, and not end in a dot and a number: "writer.1" would log to
+// writer.1.log, where a rotation of "writer" puts its first log.
 func (b *ServiceBase) StartCapturedAs(ctx context.Context, n *Node, name string, cmd Cmd) (Process, error) {
 	if name == "" || strings.ContainsAny(name, "/\\") || name == "." || name == ".." {
 		return nil, fmt.Errorf("torx: capture name %q is not a single path component", name)
+	}
+	if i := strings.LastIndexByte(name, '.'); i >= 0 && i < len(name)-1 && strings.Trim(name[i+1:], "0123456789") == "" {
+		return nil, fmt.Errorf("torx: capture name %q ends in a dot and a number, as a rotated log's does", name)
 	}
 	dir := n.ServiceScratch(b.name).Root
 	if err := n.Mkdir(ctx, dir); err != nil {

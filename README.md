@@ -213,6 +213,7 @@ Guidelines that keep a service portable across the local and ssh backends:
   writer beside its compactor -- gives each a log of its own with
   `s.StartCapturedAs(ctx, n, name, cmd)`, which writes `<name>.log` and
   rotates each name's launches apart; `s.CapturePath(n, name)` says where.
+  A name may not end in a dot and a number, as a rotated log's does.
 - **Stop through the process handle.** `StartCaptured` (and `n.Stream`) return
   a `torx.Process`: `Signal` reaches the program itself, not a shell around
   it, `Wait` reports its exit status, and `Close` kills its whole process

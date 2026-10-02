@@ -221,10 +221,23 @@ func TestStartCapturedAs(t *testing.T) {
 	if got := artifactNames(t, svc, n); !slices.Equal(got, want) {
 		t.Errorf("artifacts = %v, want %v", got, want)
 	}
-	for _, bad := range []string{"", "a/b", "..", "."} {
+	// "writer.1" would log where the rotation above put writer's first log.
+	for _, bad := range []string{"", "a/b", "..", ".", "writer.1", "a.b.20"} {
 		if _, err := svc.StartCapturedAs(ctx, n, bad, Command("true")); err == nil {
 			t.Errorf("StartCapturedAs(%q) succeeded; want an error", bad)
 		}
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "writer.1.log")); err != nil || string(got) != "w-first" {
+		t.Errorf("writer.1.log = %q (%v) after a launch as writer.1 was refused", got, err)
+	}
+	// A dot or a number elsewhere in a name is no rotated log's.
+	for _, good := range []string{"v1.2-writer", "writer.a1", "writer1"} {
+		p, err := svc.StartCapturedAs(ctx, n, good, Command("true"))
+		if err != nil {
+			t.Errorf("StartCapturedAs(%q): %v", good, err)
+			continue
+		}
+		_ = p.Close()
 	}
 }
 
