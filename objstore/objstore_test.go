@@ -260,6 +260,62 @@ func TestMultipart(t *testing.T) {
 	c.must("POST", "/b/big?uploadId="+init.UploadId, []byte(complete), 404)
 }
 
+// TestStreamingUpload: a body in S3's aws-chunked encoding is stored as
+// its payload, whether its chunks are signed or its checksum trails it,
+// and one that is not whole is refused.
+func TestStreamingUpload(t *testing.T) {
+	s, c := newStore(t, Options{})
+	trailer := []string{"Content-Encoding", "aws-chunked", "X-Amz-Content-Sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+		"X-Amz-Trailer", "x-amz-checksum-crc32c"}
+	c.must("PUT", "/b/trailer", []byte("5\r\nhello\r\n0\r\nx-amz-checksum-crc32c:mnG7TA==\r\n\r\n"), 200,
+		append(trailer, "X-Amz-Decoded-Content-Length", "5")...)
+	signed := []string{"Content-Encoding", "aws-chunked", "X-Amz-Content-Sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"}
+	c.must("PUT", "/b/signed", []byte("6;chunk-signature=ab\r\nhello \r\n5;chunk-signature=cd\r\nworld\r\n0;chunk-signature=ef\r\n\r\n"), 200,
+		append(signed, "X-Amz-Decoded-Content-Length", "11")...)
+	c.must("PUT", "/b/empty", []byte("0\r\n\r\n"), 200, trailer...)
+	for k, want := range map[string]string{"trailer": "hello", "signed": "hello world", "empty": ""} {
+		if data, info, ok := s.Get("b", k); !ok || string(data) != want || info.Size != int64(len(want)) {
+			t.Fatalf("%s: stored %q (%d bytes, %v), want %q", k, data, info.Size, ok, want)
+		}
+	}
+	_, got := c.must("GET", "/b/signed", nil, 200)
+	if string(got) != "hello world" {
+		t.Fatalf("read back %q", got)
+	}
+
+	// A part of a multipart upload is a streaming upload too.
+	_, b := c.must("POST", "/b/big?uploads", nil, 200)
+	var init struct{ UploadId string }
+	if err := xml.Unmarshal(b, &init); err != nil {
+		t.Fatal(err)
+	}
+	r1, _ := c.must("PUT", "/b/big?partNumber=1&uploadId="+init.UploadId, []byte("4\r\npart\r\n0\r\n\r\n"), 200, trailer...)
+	complete := fmt.Sprintf(`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, r1.Header.Get("ETag"))
+	c.must("POST", "/b/big?uploadId="+init.UploadId, []byte(complete), 200)
+	if data, _, _ := s.Get("b", "big"); string(data) != "part" {
+		t.Fatalf("multipart: stored %q", data)
+	}
+
+	// A body cut short, one with no final chunk, and one that is not as
+	// long as it said are refused, and nothing is stored.
+	for name, body := range map[string]string{
+		"cut short":      "5\r\nhel",
+		"no final chunk": "5\r\nhello\r\n",
+		"bad size":       "five\r\nhello\r\n0\r\n\r\n",
+		"wrong length":   "4\r\nhell\r\n0\r\n\r\n",
+	} {
+		c.must("PUT", "/b/bad", []byte(body), 400, append(trailer, "X-Amz-Decoded-Content-Length", "5")...)
+		if _, _, ok := s.Get("b", "bad"); ok {
+			t.Fatalf("%s: stored", name)
+		}
+	}
+	// A body that only looks chunked is stored as it is.
+	c.must("PUT", "/b/plain", []byte("5\r\nhello\r\n0\r\n\r\n"), 200)
+	if data, _, _ := s.Get("b", "plain"); string(data) != "5\r\nhello\r\n0\r\n\r\n" {
+		t.Fatalf("plain: stored %q", data)
+	}
+}
+
 func TestFaults(t *testing.T) {
 	s, c := newStore(t, Options{})
 	other := *c

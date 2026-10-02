@@ -26,13 +26,17 @@
 // which the store reads but does not check: give each process of the
 // system an access key of its own, and a rule can single it out. The store
 // serves path-style requests (http://host/bucket/key); point a client at
-// it with path-style addressing, plain HTTP, and any secret.
+// it with path-style addressing, plain HTTP, and any secret. A streaming
+// upload (aws-chunked) is stored as its payload, its chunk signatures and
+// trailing checksum unchecked.
 package objstore
 
 import (
 	"archive/tar"
+	"bytes"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -309,6 +313,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ev.Status = -1
 		return
 	}
+	if awsChunked(r.Header) {
+		// What the request carries is its payload, not the framing a
+		// streaming upload sends it in.
+		if body, err = unchunk(body, r.Header.Get("X-Amz-Decoded-Content-Length")); err != nil {
+			ev.Status = http.StatusBadRequest
+			writeError(w, ev.Status, "IncompleteBody", err.Error())
+			return
+		}
+	}
 	switch req.op {
 	case OpList:
 		req.match = r.URL.Query().Get("prefix")
@@ -480,6 +493,55 @@ func (s *Server) parse(r *http.Request) request {
 		req.op = Op(strings.ToLower(r.Method))
 	}
 	return req
+}
+
+// awsChunked reports whether a request's body is in the encoding of S3's
+// streaming uploads, which SDKs use to sign a payload in pieces or to send
+// its checksum after it.
+func awsChunked(h http.Header) bool {
+	if strings.HasPrefix(h.Get("X-Amz-Content-Sha256"), "STREAMING-") {
+		return true
+	}
+	for _, v := range h.Values("Content-Encoding") {
+		for e := range strings.SplitSeq(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(e), "aws-chunked") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// unchunk returns the payload of an aws-chunked body: chunks of
+// "<size in hex>[;chunk-signature=...]\r\n<data>\r\n", the last of them of
+// size 0 and followed by trailers. Its length must be what the request's
+// X-Amz-Decoded-Content-Length said, if it said. Chunk signatures and
+// trailing checksums are read past, as the request's signature is.
+func unchunk(body []byte, decodedLength string) ([]byte, error) {
+	out := []byte{}
+	for {
+		line, rest, ok := bytes.Cut(body, []byte("\r\n"))
+		if !ok {
+			return nil, errors.New("aws-chunked body ends without a final chunk")
+		}
+		size, _, _ := strings.Cut(string(line), ";")
+		n, err := strconv.ParseUint(strings.TrimSpace(size), 16, 31)
+		if err != nil {
+			return nil, fmt.Errorf("aws-chunked chunk of size %q", size)
+		}
+		if n == 0 {
+			break
+		}
+		if uint64(len(rest)) < n+2 || string(rest[n:n+2]) != "\r\n" {
+			return nil, errors.New("aws-chunked chunk is cut short")
+		}
+		out = append(out, rest[:n]...)
+		body = rest[n+2:]
+	}
+	if decodedLength != "" && decodedLength != strconv.Itoa(len(out)) {
+		return nil, fmt.Errorf("aws-chunked body decodes to %d bytes, not the %s of X-Amz-Decoded-Content-Length", len(out), decodedLength)
+	}
+	return out, nil
 }
 
 // accessKey is the access key ID of a SigV4 Authorization header:
