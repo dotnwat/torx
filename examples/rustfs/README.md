@@ -137,36 +137,39 @@ S3's semantics in full.
 
 ## Findings
 
-Against RustFS 1.0.0, 1.0.1-preview.16, and main at 370b517b4.
+Against RustFS 1.0.0, 1.0.1-preview.16, and main at 370b517b4. Each is an
+issue here, with a standalone reproducer, its output, and a root-cause trail
+pinned to the release, tracked in #36.
 
-1. **A failed delete on full drives erases versions.** A delete backs up
-   an object's metadata before it changes it, with a write that a nearly
+1. **A failed delete on full drives erases versions** (#38). A delete backs
+   up an object's metadata before it changes it, with a write that a nearly
    full drive leaves truncated; when the delete fails below quorum, its
    rollback restores that truncated backup over the metadata, and the next
    write replaces metadata that does not parse with its own version alone.
-   Acknowledged versions are lost from every drive that was full. The
-   trash (below) fills drives by itself. Found by `lost-version`, and
-   pinned down with `audit=`, an auditor of what each drive holds.
-2. **A conditional write takes effect on a delete marker.** In a bucket with
-   versioning, `PUT` and `CompleteMultipartUpload` with `If-Match` succeed
-   when the object's current version is a delete marker, whatever ETag they
-   name; S3 answers 404 or 412, since the object does not exist. An
-   optimistic-concurrency client that read a version, and lost a race to a
-   delete, recreates the object. Allowed as `ifmatch-delete-marker`.
-3. **A conditional delete of no object succeeds, and writes.** In a bucket
-   with versioning, `DELETE` with `If-Match` (an ETag, or `*`) of a key that
-   holds no object answers 204 and writes a delete marker; S3 answers 404.
-   Allowed as `delete-ifmatch-missing`.
-4. **Listings read uncommitted state.** Under faults, `ListObjectsV2` lists
-   a write that then fails and is rolled back, and omits an object that a
-   delete, then failing, has removed from some drives: reads after it see
-   the object again. A listing takes no lock, and with drives unreachable
-   accepts what a read quorum of them holds.
-5. **Listings of a versioned bucket go stale.** With some drives
+   Acknowledged versions are lost from every drive that was full. The trash
+   (below) fills drives by itself. Found by `lost-version`, and pinned down
+   with `audit=`, an auditor of what each drive holds.
+2. **A conditional write takes effect on a delete marker** (#39). In a
+   bucket with versioning, `PUT` and `CompleteMultipartUpload` with
+   `If-Match` succeed when the object's current version is a delete marker,
+   whatever ETag they name; S3 answers 404 or 412, since the object does not
+   exist. An optimistic-concurrency client that read a version, and lost a
+   race to a delete, recreates the object. Allowed as
+   `ifmatch-delete-marker`.
+3. **A conditional delete of no object succeeds, and writes** (#40). In a
+   bucket with versioning, `DELETE` with `If-Match` (an ETag, or `*`) of a
+   key that holds no object answers 204 and writes a delete marker; S3
+   answers 404. Allowed as `delete-ifmatch-missing`.
+4. **Listings read uncommitted state** (#41). Under faults, `ListObjectsV2`
+   lists a write that then fails and is rolled back, and omits an object
+   that a delete, then failing, has removed from some drives: reads after it
+   see the object again. A listing takes no lock, and with drives
+   unreachable accepts what a read quorum of them holds.
+5. **Listings of a versioned bucket go stale** (#42). With some drives
    unreachable, a listing in a bucket with versioning drops each key's
-   newest version if too few of the drives it reaches hold it, and lists
-   the version before it as the latest; `GET` refuses in the same state.
-6. **The trash fills the drives.** What an overwrite or delete replaces is
-   kept in a trash emptied every five minutes, whatever the space left, so
-   a workload that overwrites fills its drives with trash while it holds
-   little: writes then fail with `500 InternalError`.
+   newest version if too few of the drives it reaches hold it, and lists the
+   version before it as the latest; `GET` refuses in the same state.
+6. **The trash fills the drives** (#43). What an overwrite or delete
+   replaces is kept in a trash emptied every five minutes, whatever the
+   space left, so a workload that overwrites fills its drives with trash
+   while it holds little: writes then fail with `500 InternalError`.
