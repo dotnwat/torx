@@ -120,6 +120,24 @@ func TestAnomalies(t *testing.T) {
 		{"internal", []Txn{
 			txn(1, a("x", "1"), r("x")),
 		}, Options{}, []string{"internal"}},
+		{"internal after a read", []Txn{
+			txn(1, a("x", "1")),
+			txn(2, r("x", "1"), a("x", "2"), r("x", "1")),
+		}, Options{}, []string{"internal"}},
+		{"its own appends, read again", []Txn{
+			txn(1, a("x", "1")),
+			txn(2, a("x", "2"), r("x", "1", "2"), a("x", "3"), r("x", "1", "2", "3")),
+		}, Options{}, nil},
+		{"nonrepeatable", []Txn{
+			txn(1, r("x"), r("x", "1")),
+			txn(2, a("x", "1")),
+		}, Options{}, []string{"nonrepeatable"}},
+		{"nonrepeatable around an append of its own", []Txn{
+			txn(1, a("x", "1")),
+			// And a lost update's cycle: T2 read x before T1's append and
+			// appended after it.
+			txn(2, r("x"), a("y", "2"), a("x", "2"), r("x", "1", "2")),
+		}, Options{}, []string{"G-single", "nonrepeatable"}},
 		{"lost with realtime", []Txn{
 			// T2 began after T1 committed and read what T1 overwrote.
 			txn(1, a("x", "1")),
@@ -149,5 +167,11 @@ func TestForbidden(t *testing.T) {
 	}
 	if ser := Forbidden("serializable"); !slices.Contains(ser, "G2") {
 		t.Fatalf("serializability forbids %v", ser)
+	}
+	// Read committed lets a transaction see what committed between its
+	// reads, and nothing lets it miss its own appends.
+	rc := Forbidden("read-committed")
+	if slices.Contains(rc, "nonrepeatable") || !slices.Contains(rc, "internal") || !slices.Contains(si, "nonrepeatable") {
+		t.Fatalf("read committed forbids %v, snapshot isolation %v", rc, si)
 	}
 }

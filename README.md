@@ -549,8 +549,9 @@ every dependency between transactions -- write-write, write-read, and
 read-write (anti-dependencies), and with `Options{Realtime: true}` real
 time. `listappend.Check` returns each kind of anomaly it finds, a cycle as
 its witness: G0, G1c, G-single, G-nonadjacent, G2; and what needs no cycle:
-aborted and intermediate reads, reads that disagree on a key's order, and
-committed appends a later read missed. `listappend.Forbidden(level)` says
+aborted and intermediate reads, reads that disagree on a key's order or
+with a transaction's own appends, and committed appends a later read
+missed. `listappend.Forbidden(level)` says
 which kinds an isolation level -- serializable, snapshot isolation, read
 committed -- forbids.
 

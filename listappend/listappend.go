@@ -28,9 +28,11 @@
 // Check also reports what needs no cycle: an aborted transaction's append
 // read (G1a), a read of an intermediate state (G1b), reads of one key that
 // disagree on its order or with the order a transaction appended to it
-// in, an element read twice in a list, a transaction whose reads disagree
-// with its own appends, and -- with Realtime -- a committed append missing
-// from a read that began after it committed.
+// in, an element read twice in a list, a transaction whose read lacks its
+// own appends (internal) or shows others' differently than its earlier
+// read did (nonrepeatable, which read committed allows), and -- with
+// Realtime -- a committed append missing from a read that began after it
+// committed.
 package listappend
 
 import (
@@ -101,7 +103,7 @@ const (
 type Anomaly struct {
 	// Kind is the anomaly: "G0", "G1a", "G1b", "G1c", "G-single",
 	// "G-nonadjacent", "G2", "incompatible-order", "duplicate",
-	// "internal", "lost".
+	// "internal", "nonrepeatable", "lost".
 	Kind string
 	// Txns are the transactions involved, by ID; for a cycle, in cycle
 	// order, with Edges[i] the kind of the edge from Txns[i] to the next.
@@ -120,9 +122,9 @@ func Forbidden(level string) []string {
 	case "read-committed":
 		return base
 	case "snapshot-isolation":
-		return append(base, "G-single", "G-nonadjacent")
+		return append(base, "nonrepeatable", "G-single", "G-nonadjacent")
 	case "serializable", "strict-serializable":
-		return append(base, "G-single", "G-nonadjacent", "G2", "lost")
+		return append(base, "nonrepeatable", "G-single", "G-nonadjacent", "G2", "lost")
 	}
 	return nil
 }
@@ -186,38 +188,38 @@ func (c *checker) appends() {
 }
 
 // internal checks each committed transaction's reads against its own
-// earlier reads and appends of the key.
+// appends and its earlier reads of the key. A read must end with what the
+// transaction has appended to the key so far, or it is "internal": no
+// level lets a transaction miss its own writes. What comes before that is
+// what others appended, and a later read that shows it differently than an
+// earlier one did is "nonrepeatable": read committed allows it, another
+// transaction having committed in between; the levels above do not.
 func (c *checker) internal() {
 	for _, t := range c.txns {
 		if t.Status != Committed {
 			continue
 		}
-		known := map[string][]string{} // what the txn must see of each key, once it has read it
+		own := map[string][]string{}    // what the txn has appended to each key so far
+		others := map[string][]string{} // what its last read of each key showed of others' appends
 		read := map[string]bool{}
-		pending := map[string][]string{} // appends before its first read of the key
 		for _, m := range t.Mops {
 			if m.Append {
-				if read[m.Key] {
-					known[m.Key] = append(slices.Clone(known[m.Key]), m.Value)
-				} else {
-					pending[m.Key] = append(pending[m.Key], m.Value)
-				}
+				own[m.Key] = append(own[m.Key], m.Value)
 				continue
 			}
-			if read[m.Key] {
-				if !slices.Equal(m.Read, known[m.Key]) {
-					c.report(Anomaly{Kind: "internal", Key: m.Key, Txns: []int{t.ID},
-						Detail: fmt.Sprintf("txn %d read %s as %v, but had seen or written %v", t.ID, m.Key, m.Read, known[m.Key])})
-				}
-			} else if p := pending[m.Key]; len(p) > 0 {
-				// Its first read must end with its own appends.
-				if len(m.Read) < len(p) || !slices.Equal(m.Read[len(m.Read)-len(p):], p) {
-					c.report(Anomaly{Kind: "internal", Key: m.Key, Txns: []int{t.ID},
-						Detail: fmt.Sprintf("txn %d appended %v to %s, then read %v", t.ID, p, m.Key, m.Read)})
-				}
+			mine := own[m.Key]
+			if len(m.Read) < len(mine) || !slices.Equal(m.Read[len(m.Read)-len(mine):], mine) {
+				c.report(Anomaly{Kind: "internal", Key: m.Key, Txns: []int{t.ID},
+					Detail: fmt.Sprintf("txn %d appended %v to %s, then read %v", t.ID, mine, m.Key, m.Read)})
+				continue
+			}
+			rest := m.Read[:len(m.Read)-len(mine)]
+			if read[m.Key] && !slices.Equal(rest, others[m.Key]) {
+				c.report(Anomaly{Kind: "nonrepeatable", Key: m.Key, Txns: []int{t.ID},
+					Detail: fmt.Sprintf("txn %d read %s as %v of others' appends, having read %v", t.ID, m.Key, rest, others[m.Key])})
 			}
 			read[m.Key] = true
-			known[m.Key] = slices.Clone(m.Read)
+			others[m.Key] = rest
 		}
 	}
 }
@@ -342,7 +344,7 @@ func (c *checker) reads() {
 				}
 			}
 			// The rest is checked in the transaction's first read of the
-			// key: its later ones are held to that one by internal.
+			// key.
 			if first[m.Key] {
 				continue
 			}
