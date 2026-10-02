@@ -21,4 +21,5 @@ const serviceName = "rustfs"
 
 func init() {
 	torx.Register("rustfs.smoke", func() torx.Job { return &smokeJob{} })
+	torx.Register("rustfs.chaos", func() torx.Job { return &chaosJob{} })
 }
