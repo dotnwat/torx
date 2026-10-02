@@ -93,14 +93,14 @@ var faultWeights = map[string]int{
 // that keeps finding one can find others. README.md describes each.
 var knownIssues = map[string]bool{
 	// A standalone compaction worker does not retry object-store errors as
-	// every other process does, and its loop ends on one.
+	// every other process does, and its loop ends on one (#49).
 	"worker-store-error": true,
 }
 
 // offByDefault are faults "all" leaves out; a run names them to inject
-// them. Clock skew between processes kills a compaction worker at 20ms,
-// and a clock that steps back kills a writer (README.md, findings 1-3);
-// left in, they would hide everything else.
+// them. Clock skew between processes kills a compaction worker at 20ms
+// (#48), and a writer whose clock is behind fails for good (#47); left in,
+// they would hide everything else.
 var offByDefault = map[string]bool{"clock-skew": true, "clock-jump": true}
 
 // chaosJob is slatedb.chaos: a randomized test of SlateDB's guarantees under
