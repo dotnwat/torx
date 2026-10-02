@@ -92,3 +92,14 @@ func TestNodeAddr(t *testing.T) {
 		t.Errorf("Addr = %q, want 127.0.0.1", plain.Addr())
 	}
 }
+
+func TestCallerAddrLoopback(t *testing.T) {
+	n := &Node{name: "n0"}
+	addr, err := n.CallerAddr()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr != "127.0.0.1" {
+		t.Fatalf("CallerAddr of a loopback node = %s, want 127.0.0.1", addr)
+	}
+}

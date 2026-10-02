@@ -45,9 +45,6 @@ const (
 	CaptureRotate
 )
 
-// captureLog is the name of the file StartCaptured redirects output to.
-const captureLog = "stdout.log"
-
 // SetCapturePolicy sets what StartCaptured does with a previous process's
 // output when it launches another process on the same node. Set it at
 // construction, before any launch; the default is CaptureTruncate.
@@ -72,28 +69,44 @@ func (b *ServiceBase) SetCapturePolicy(p CapturePolicy) {
 // later launch on the same node, the previous process's output is discarded or
 // kept as a separate artifact according to the service's CapturePolicy.
 func (b *ServiceBase) StartCaptured(ctx context.Context, n *Node, cmd Cmd) (Process, error) {
+	return b.StartCapturedAs(ctx, n, "stdout", cmd)
+}
+
+// StartCapturedAs is StartCaptured for a service that runs more than one
+// process on a node at once -- a server and its sidecar, or the writer and
+// the compactor of a database -- each of which needs a log of its own. The
+// output goes to <name>.log under the service's per-node scratch instead of
+// stdout.log, and the CapturePolicy applies to the launches under each name
+// apart: rotation moves <name>.log aside as <name>.<k>.log. StartCaptured
+// is StartCapturedAs with the name "stdout". name must be a single path
+// component, and not end in a dot and a number: "writer.1" would log to
+// writer.1.log, where a rotation of "writer" puts its first log.
+func (b *ServiceBase) StartCapturedAs(ctx context.Context, n *Node, name string, cmd Cmd) (Process, error) {
+	if name == "" || strings.ContainsAny(name, "/\\") || name == "." || name == ".." {
+		return nil, fmt.Errorf("torx: capture name %q is not a single path component", name)
+	}
+	if i := strings.LastIndexByte(name, '.'); i >= 0 && i < len(name)-1 && strings.Trim(name[i+1:], "0123456789") == "" {
+		return nil, fmt.Errorf("torx: capture name %q ends in a dot and a number, as a rotated log's does", name)
+	}
 	dir := n.ServiceScratch(b.name).Root
 	if err := n.Mkdir(ctx, dir); err != nil {
 		return nil, err
 	}
-	logPath := filepath.Join(dir, captureLog)
-
+	logPath := b.CapturePath(n, name)
+	key := n.Name() + "/" + name
 	b.mu.Lock()
-	launched := b.launches[n.Name()]
+	launched := b.launches[key]
 	policy := b.capture
 	b.mu.Unlock()
-
 	// Clearing the path must complete before the launch: callers may poll the
 	// log for readiness as soon as control returns, while the child performs its
 	// truncating redirect only once the scheduler runs it. A leftover file would
 	// satisfy such a poll in that window, letting the caller proceed (and tear
 	// the service down) before the new process has written anything.
-	if err := b.clearCaptureLog(ctx, n, dir, launched, policy); err != nil {
+	if err := b.clearCaptureLog(ctx, n, dir, name, launched, policy); err != nil {
 		return nil, err
 	}
-
 	Logf(ctx, "info", "exec %s on %s", strings.Join(append([]string{cmd.Path}, cmd.Args...), " "), n.Name())
-
 	// exec so the shell is replaced by the service: the handle's Signal reaches
 	// it directly and no extra shell process lingers in the group.
 	script := "exec " + shJoin(cmd.Path, cmd.Args) + " > " + shQuote(logPath) + " 2>&1"
@@ -107,29 +120,36 @@ func (b *ServiceBase) StartCaptured(ctx context.Context, n *Node, cmd Cmd) (Proc
 	if err != nil {
 		return nil, err
 	}
-
 	b.mu.Lock()
 	if b.launches == nil {
 		b.launches = make(map[string]int)
 	}
-	b.launches[n.Name()]++
+	b.launches[key]++
 	b.mu.Unlock()
 	if launched == 0 {
-		// Every launch on the node writes the same path, so one registration
-		// covers them all.
-		b.AddArtifact(n, Artifact{Name: captureLog, Path: logPath, CollectOnPass: true})
+		// Every launch under the name writes the same path, so one
+		// registration covers them all.
+		b.AddArtifact(n, Artifact{Name: name + ".log", Path: logPath, CollectOnPass: true})
 	}
 	return handle, nil
 }
 
-// clearCaptureLog makes way for the next launch on n, where launched counts
-// the processes launched there so far in this run. Before the first, any log
-// at the path is an earlier run's and is removed. Before a later one, the log
-// is the previous process's output, which the policy discards or moves aside
-// as stdout.<launched>.log and registers for collection. A rotation with no
-// log to move -- the previous launch never wrote one -- registers nothing.
-func (b *ServiceBase) clearCaptureLog(ctx context.Context, n *Node, dir string, launched int, policy CapturePolicy) error {
-	logPath := filepath.Join(dir, captureLog)
+// CapturePath is where StartCapturedAs sends the output of the process it
+// launched last on n under name: <name>.log in the service's per-node
+// scratch. A service reads it to say what a process that died had said.
+func (b *ServiceBase) CapturePath(n *Node, name string) string {
+	return filepath.Join(n.ServiceScratch(b.name).Root, name+".log")
+}
+
+// clearCaptureLog makes way for the next launch under name on n, where
+// launched counts the processes launched under it there so far in this
+// run. Before the first, any log at the path is an earlier run's and is
+// removed. Before a later one, the log is the previous process's output,
+// which the policy discards or moves aside as <name>.<launched>.log and
+// registers for collection. A rotation with no log to move -- the previous
+// launch never wrote one -- registers nothing.
+func (b *ServiceBase) clearCaptureLog(ctx context.Context, n *Node, dir, name string, launched int, policy CapturePolicy) error {
+	logPath := filepath.Join(dir, name+".log")
 	if launched == 0 || policy != CaptureRotate {
 		return n.Rm(ctx, logPath)
 	}
@@ -137,8 +157,8 @@ func (b *ServiceBase) clearCaptureLog(ctx context.Context, n *Node, dir string, 
 	if err != nil || !exists {
 		return err
 	}
-	name := fmt.Sprintf("stdout.%d.log", launched)
-	rotated := filepath.Join(dir, name)
+	rotatedName := fmt.Sprintf("%s.%d.log", name, launched)
+	rotated := filepath.Join(dir, rotatedName)
 	// A backend has no rename operation, so the move runs as a command on the
 	// node, which has mv wherever it has the sh the launch itself needs.
 	res, err := n.Exec(ctx, Command("mv", logPath, rotated))
@@ -149,8 +169,8 @@ func (b *ServiceBase) clearCaptureLog(ctx context.Context, n *Node, dir string, 
 		return Wrap(ErrBackend, "capture: rotate "+logPath,
 			fmt.Errorf("mv exited %d: %s", res.ExitCode, strings.TrimSpace(string(res.Stderr))))
 	}
-	Logf(ctx, "info", "rotated %s to %s on %s", captureLog, name, n.Name())
-	b.AddArtifact(n, Artifact{Name: name, Path: rotated, CollectOnPass: true})
+	Logf(ctx, "info", "rotated %s.log to %s on %s", name, rotatedName, n.Name())
+	b.AddArtifact(n, Artifact{Name: rotatedName, Path: rotated, CollectOnPass: true})
 	return nil
 }
 
