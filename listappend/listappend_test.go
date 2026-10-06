@@ -105,12 +105,24 @@ func TestAnomalies(t *testing.T) {
 			inDoubt(1, a("x", "1"), a("y", "1")),
 			txn(2, r("x", "1"), r("y")),
 		}, Options{}, []string{"G-single"}},
-		{"in doubt, read, and lost", []Txn{
-			// T1 took effect before it returned, and T2 began after.
+		{"in doubt, and read late", []Txn{
+			// T1's client gave up before T2 began, and T3 read T1's
+			// append after: it may have landed between the two.
 			inDoubt(1, a("x", "1")),
 			txn(2, r("x")),
 			txn(3, r("x", "1")),
-		}, Options{Realtime: true}, []string{"G-single", "lost"}},
+		}, Options{Realtime: true}, nil},
+		{"in doubt, and read late after an append", []Txn{
+			inDoubt(1, a("x", "1")),
+			txn(2, r("x"), a("x", "2")),
+			txn(3, r("x", "2", "1")),
+		}, Options{Realtime: true}, nil},
+		{"in doubt, read, and then missed", []Txn{
+			// T2 read T1's append, so it had landed before T3 began.
+			inDoubt(1, a("x", "1")),
+			txn(2, r("x", "1")),
+			txn(3, r("x")),
+		}, Options{Realtime: true}, []string{"G-single"}},
 		{"in doubt and unread", []Txn{
 			inDoubt(1, a("x", "1"), a("y", "1")),
 			txn(2, r("x"), r("y")),

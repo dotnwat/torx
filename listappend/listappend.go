@@ -55,7 +55,8 @@ const (
 	// took effect.
 	Aborted
 	// Unknown: the outcome is in doubt; its appends may have taken effect,
-	// and did if a read saw one of them. Its reads are not used.
+	// and did if a read saw one of them -- when, is unknown, perhaps after
+	// its client gave up. Its reads are not used.
 	Unknown
 )
 
@@ -84,9 +85,11 @@ type Txn struct {
 // Options configure Check.
 type Options struct {
 	// Realtime adds an edge from each committed transaction to every
-	// transaction that began after it returned -- the order strict
-	// serializability adds -- and reports a committed append missing from
-	// a read that began after it committed.
+	// committed transaction that began after it returned -- the order
+	// strict serializability adds -- and reports a committed append
+	// missing from a read that began after it committed. A transaction in
+	// doubt is in no such order, even one whose appends some read saw:
+	// when they took effect is unknown.
 	Realtime bool
 	// Process adds an edge from each transaction to its process's next.
 	Process bool
@@ -297,8 +300,10 @@ func (c *checker) orders() {
 }
 
 // effects works out which transactions took effect. One in doubt did if a
-// read saw one of its appends: all of its appends then took effect, and
-// before it returned.
+// read saw one of its appends: all of its appends then took effect. When
+// is unknown -- its client gave up on it, and the commit may have landed
+// after -- so its Return bounds nothing: it is in no realtime order, and
+// a read that began after it returned need not show its appends.
 func (c *checker) effects() {
 	c.took = make([]bool, len(c.txns))
 	for i, t := range c.txns {
@@ -403,7 +408,7 @@ func (c *checker) reads() {
 				for _, v := range slices.Sorted(maps.Keys(c.writer[m.Key])) {
 					w := c.writer[m.Key][v]
 					wt := c.txns[w]
-					if c.took[w] && wt.Return < t.Call && !have[v] && w != i && !missed[[2]string{m.Key, v}] {
+					if wt.Status == Committed && wt.Return < t.Call && !have[v] && w != i && !missed[[2]string{m.Key, v}] {
 						missed[[2]string{m.Key, v}] = true
 						c.report(Anomaly{Kind: "lost", Key: m.Key, Txns: []int{wt.ID, t.ID},
 							Detail: fmt.Sprintf("txn %d committed %s to %s before txn %d began, which read %v", wt.ID, v, m.Key, t.ID, m.Read)})
@@ -524,7 +529,7 @@ func (c *checker) edges() {
 		// the first of them, those that began before any of them returned,
 		// since the rest follow from those -- so the edges stay few.
 		for i, t := range c.txns {
-			if !c.took[i] {
+			if t.Status != Committed {
 				continue
 			}
 			// Link t to the transactions that began after it returned and
@@ -532,7 +537,7 @@ func (c *checker) edges() {
 			var next []int
 			first := int64(-1)
 			for j, u := range c.txns {
-				if u.Call > t.Return && c.took[j] {
+				if u.Call > t.Return && u.Status == Committed {
 					if first < 0 || u.Return < first {
 						first = u.Return
 					}
