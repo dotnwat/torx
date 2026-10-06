@@ -12,6 +12,12 @@ func txn(id int, mops ...Mop) Txn {
 	return Txn{ID: id, Process: id, Call: int64(id), Return: int64(id), Mops: mops}
 }
 
+func inDoubt(id int, mops ...Mop) Txn {
+	t := txn(id, mops...)
+	t.Status = Unknown
+	return t
+}
+
 func kinds(as []Anomaly) []string {
 	var out []string
 	for _, x := range as {
@@ -80,6 +86,22 @@ func TestAnomalies(t *testing.T) {
 			txn(5, r("x", "2"), r("z", "4")),
 		}, Options{}, []string{"G-nonadjacent"}},
 		{"G1a", []Txn{aborted, txn(2, r("x", "1"))}, Options{}, []string{"G1a"}},
+		{"in doubt, but read", []Txn{
+			// T2 read T1's append to x, so T1 took effect, its append to
+			// y included; T2 read y without it.
+			inDoubt(1, a("x", "1"), a("y", "1")),
+			txn(2, r("x", "1"), r("y")),
+		}, Options{}, []string{"G-single"}},
+		{"in doubt, read, and lost", []Txn{
+			// T1 took effect before it returned, and T2 began after.
+			inDoubt(1, a("x", "1")),
+			txn(2, r("x")),
+			txn(3, r("x", "1")),
+		}, Options{Realtime: true}, []string{"G-single", "lost"}},
+		{"in doubt and unread", []Txn{
+			inDoubt(1, a("x", "1"), a("y", "1")),
+			txn(2, r("x"), r("y")),
+		}, Options{Realtime: true}, nil},
 		{"G1a after an append of its own", []Txn{aborted, txn(2, a("x", "2"), r("x", "1", "2"))}, Options{}, []string{"G1a"}},
 		{"G1a of an append nobody made", []Txn{txn(1, a("x", "1"), r("x", "0", "1"))}, Options{}, []string{"G1a"}},
 		{"G1b after an append of its own", []Txn{

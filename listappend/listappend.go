@@ -52,8 +52,8 @@ const (
 	// Aborted: the transaction did not commit, and none of its appends
 	// took effect.
 	Aborted
-	// Unknown: the outcome is in doubt; its appends may have taken effect.
-	// Its reads are not used.
+	// Unknown: the outcome is in doubt; its appends may have taken effect,
+	// and did if a read saw one of them. Its reads are not used.
 	Unknown
 )
 
@@ -143,8 +143,11 @@ type checker struct {
 	// it did: key -> position of the txn -> values.
 	appended map[string]map[int][]string
 	order    map[string][]string // key -> version order
-	adj      [][]edge
-	out      []Anomaly
+	// took says which transactions took effect: the committed ones, and
+	// those in doubt an append of which some read saw.
+	took []bool
+	adj  [][]edge
+	out  []Anomaly
 }
 
 // Check checks a history.
@@ -156,6 +159,7 @@ func Check(txns []Txn, opts Options) []Anomaly {
 	c.appends()
 	c.internal()
 	c.orders()
+	c.effects()
 	c.reads()
 	c.adj = make([][]edge, len(txns))
 	c.edges()
@@ -282,6 +286,23 @@ func (c *checker) orders() {
 	}
 }
 
+// effects works out which transactions took effect. One in doubt did if a
+// read saw one of its appends: all of its appends then took effect, and
+// before it returned.
+func (c *checker) effects() {
+	c.took = make([]bool, len(c.txns))
+	for i, t := range c.txns {
+		c.took[i] = t.Status == Committed
+	}
+	for k, order := range c.order {
+		for _, v := range order {
+			if w, ok := c.writer[k][v]; ok && c.txns[w].Status == Unknown {
+				c.took[w] = true
+			}
+		}
+	}
+}
+
 // reads checks what each read saw of what others appended, whether or not
 // its transaction had appended to the key by then and whatever its earlier
 // reads showed: no aborted appends, no intermediate states, no appends
@@ -372,7 +393,7 @@ func (c *checker) reads() {
 				for _, v := range slices.Sorted(maps.Keys(c.writer[m.Key])) {
 					w := c.writer[m.Key][v]
 					wt := c.txns[w]
-					if wt.Status == Committed && wt.Return < t.Call && !have[v] && wt.ID != t.ID && !missed[[2]string{m.Key, v}] {
+					if c.took[w] && wt.Return < t.Call && !have[v] && w != i && !missed[[2]string{m.Key, v}] {
 						missed[[2]string{m.Key, v}] = true
 						c.report(Anomaly{Kind: "lost", Key: m.Key, Txns: []int{wt.ID, t.ID},
 							Detail: fmt.Sprintf("txn %d committed %s to %s before txn %d began, which read %v", wt.ID, v, m.Key, t.ID, m.Read)})
@@ -383,8 +404,8 @@ func (c *checker) reads() {
 	}
 }
 
-// edges builds the dependency graph over committed transactions, and
-// transactions in doubt whose appends some read saw.
+// edges builds the dependency graph over the transactions that took
+// effect.
 func (c *checker) edges() {
 	add := func(from, to int, kind string) {
 		if from == to {
@@ -428,11 +449,12 @@ func (c *checker) edges() {
 			}
 		}
 	}
-	// A committed append no read saw came after every version one did, so
-	// its writer follows the writer of the last of those (ww) and whoever
-	// read it (rw); a read of an earlier version gets there through them.
-	// Without these a history nobody read the end of -- write skew with no
-	// later reader -- would have no anti-dependencies at all.
+	// An append that took effect and no read saw came after every version
+	// one did, so its writer follows the writer of the last of those (ww)
+	// and whoever read it (rw); a read of an earlier version gets there
+	// through them. Without these a history nobody read the end of --
+	// write skew with no later reader -- would have no anti-dependencies
+	// at all.
 	observed := map[string]map[string]bool{}
 	for k, order := range c.order {
 		observed[k] = map[string]bool{}
@@ -441,7 +463,7 @@ func (c *checker) edges() {
 		}
 	}
 	for i, t := range c.txns {
-		if t.Status != Committed {
+		if !c.took[i] {
 			continue
 		}
 		for _, m := range t.Mops {
@@ -463,7 +485,7 @@ func (c *checker) edges() {
 		// the first of them, those that began before any of them returned,
 		// since the rest follow from those -- so the edges stay few.
 		for i, t := range c.txns {
-			if t.Status != Committed {
+			if !c.took[i] {
 				continue
 			}
 			// Link t to the transactions that began after it returned and
@@ -471,7 +493,7 @@ func (c *checker) edges() {
 			var next []int
 			first := int64(-1)
 			for j, u := range c.txns {
-				if u.Call > t.Return && u.Status == Committed {
+				if u.Call > t.Return && c.took[j] {
 					if first < 0 || u.Return < first {
 						first = u.Return
 					}
