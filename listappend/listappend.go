@@ -85,11 +85,11 @@ type Txn struct {
 // Options configure Check.
 type Options struct {
 	// Realtime adds an edge from each committed transaction to every
-	// committed transaction that began after it returned -- the order
-	// strict serializability adds -- and reports a committed append
-	// missing from a read that began after it committed. A transaction in
-	// doubt is in no such order, even one whose appends some read saw:
-	// when they took effect is unknown.
+	// transaction that began after it returned -- the order strict
+	// serializability adds -- and reports a committed append missing from
+	// a read that began after it committed. A transaction in doubt whose
+	// appends some read saw is after those that returned before it began,
+	// but before nothing: when it took effect is unknown.
 	Realtime bool
 	// Process adds an edge from each transaction to its process's next.
 	Process bool
@@ -300,10 +300,11 @@ func (c *checker) orders() {
 }
 
 // effects works out which transactions took effect. One in doubt did if a
-// read saw one of its appends: all of its appends then took effect. When
-// is unknown -- its client gave up on it, and the commit may have landed
-// after -- so its Return bounds nothing: it is in no realtime order, and
-// a read that began after it returned need not show its appends.
+// read saw one of its appends: all of its appends then took effect, after
+// it began. When is unknown -- its client gave up on it, and the commit
+// may have landed after -- so its Return bounds nothing: nothing is after
+// it in realtime order, and a read that began after it returned need not
+// show its appends.
 func (c *checker) effects() {
 	c.took = make([]bool, len(c.txns))
 	for i, t := range c.txns {
@@ -532,20 +533,24 @@ func (c *checker) edges() {
 			if t.Status != Committed {
 				continue
 			}
-			// Link t to the transactions that began after it returned and
-			// before any other that also began after it returned had.
+			// Link t to the transactions that began after it returned --
+			// those in doubt that took effect included, since none took
+			// effect before it began -- up to the first return among the
+			// committed ones: the rest began after that one returned and
+			// follow from its edges. One in doubt has no edges of its own,
+			// its return bounding nothing, so it cuts nothing off.
 			var next []int
 			first := int64(-1)
 			for j, u := range c.txns {
-				if u.Call > t.Return && u.Status == Committed {
-					if first < 0 || u.Return < first {
+				if u.Call > t.Return && c.took[j] {
+					if u.Status == Committed && (first < 0 || u.Return < first) {
 						first = u.Return
 					}
 					next = append(next, j)
 				}
 			}
 			for _, j := range next {
-				if c.txns[j].Call <= first {
+				if first < 0 || c.txns[j].Call <= first {
 					add(i, j, Realtime)
 				}
 			}

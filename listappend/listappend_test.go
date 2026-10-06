@@ -18,6 +18,12 @@ func inDoubt(id int, mops ...Mop) Txn {
 	return t
 }
 
+// during sets when a transaction began and returned.
+func during(t Txn, call, ret int64) Txn {
+	t.Call, t.Return = call, ret
+	return t
+}
+
 func kinds(as []Anomaly) []string {
 	var out []string
 	for _, x := range as {
@@ -117,6 +123,34 @@ func TestAnomalies(t *testing.T) {
 			txn(2, r("x"), a("x", "2")),
 			txn(3, r("x", "2", "1")),
 		}, Options{Realtime: true}, nil},
+		{"in doubt, and began after", []Txn{
+			// T1 returned before T2 began, so T2's append, which T3 read,
+			// cannot be before T1's.
+			during(txn(1, a("x", "1")), 1, 2),
+			during(inDoubt(2, a("x", "2")), 3, 4),
+			during(txn(3, r("x", "2", "1")), 5, 6),
+		}, Options{Realtime: true}, []string{"G1c"}},
+		{"in doubt, and read before it began", []Txn{
+			during(txn(1, r("x", "2")), 1, 2),
+			during(inDoubt(2, a("x", "2")), 5, 6),
+		}, Options{Realtime: true}, []string{"G1c"}},
+		{"in doubt, began after, and nothing committed after", []Txn{
+			// T3 overlaps T1, so no committed transaction began after T1
+			// returned to carry its order on: T2 gets T1's edge itself.
+			during(txn(1, a("x", "1")), 1, 2),
+			during(inDoubt(2, a("x", "2")), 3, 4),
+			during(txn(3, r("x", "2", "1")), 1, 6),
+		}, Options{Realtime: true}, []string{"G1c"}},
+		{"in doubt, and began while another ran", []Txn{
+			during(txn(1, a("x", "1")), 1, 4),
+			during(inDoubt(2, a("x", "2")), 3, 5),
+			during(txn(3, r("x", "2", "1")), 6, 7),
+		}, Options{Realtime: true}, nil},
+		{"in doubt, and began after, without realtime", []Txn{
+			during(txn(1, a("x", "1")), 1, 2),
+			during(inDoubt(2, a("x", "2")), 3, 4),
+			during(txn(3, r("x", "2", "1")), 5, 6),
+		}, Options{}, nil},
 		{"in doubt, read, and then missed", []Txn{
 			// T2 read T1's append, so it had landed before T3 began.
 			inDoubt(1, a("x", "1")),
