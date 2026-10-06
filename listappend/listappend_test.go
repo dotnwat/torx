@@ -92,6 +92,15 @@ func TestAnomalies(t *testing.T) {
 			txn(1, a("x", "1")),
 			txn(2, a("x", "2"), r("x", "2")),
 		}, Options{Realtime: true}, []string{"G1c", "lost"}},
+		{"G1b in a later read", []Txn{
+			txn(1, a("x", "1"), a("x", "2")),
+			txn(2, r("x"), r("x", "1"), r("x", "1")),
+		}, Options{}, []string{"G-single", "G1b", "nonrepeatable"}},
+		{"lost in a later read", []Txn{
+			txn(1, a("x", "1")),
+			txn(2, a("x", "2")),
+			txn(3, r("x", "1", "2"), r("x", "1"), r("x", "1")),
+		}, Options{Realtime: true}, []string{"G-single", "lost", "nonrepeatable"}},
 		{"G1b", []Txn{
 			// What T2 read is after T1's first append and before its
 			// second, a cycle too.
@@ -164,6 +173,22 @@ func TestAnomalies(t *testing.T) {
 				t.Fatalf("anomalies %v, want %v", k, tc.want)
 			}
 		})
+	}
+}
+
+// TestReportedOnce: what several reads of a transaction show alike is
+// reported once.
+func TestReportedOnce(t *testing.T) {
+	got := Check([]Txn{
+		txn(1, a("x", "1"), a("x", "2")),
+		txn(2, r("x", "1"), r("x", "1"), r("x", "1")),
+	}, Options{Realtime: true})
+	n := map[string]int{}
+	for _, x := range got {
+		n[x.Kind]++
+	}
+	if n["G1b"] != 1 || n["lost"] != 1 {
+		t.Fatalf("reported %v", n)
 	}
 }
 

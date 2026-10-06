@@ -283,10 +283,11 @@ func (c *checker) orders() {
 }
 
 // reads checks what each read saw of what others appended, whether or not
-// its transaction had appended to the key by then: no aborted appends, no
-// intermediate states, no appends nobody made, none out of the order
-// their transaction made them in or without those it made before, and
-// with Realtime nothing committed before it began missing.
+// its transaction had appended to the key by then and whatever its earlier
+// reads showed: no aborted appends, no intermediate states, no appends
+// nobody made, none out of the order their transaction made them in or
+// without those it made before, and with Realtime nothing committed before
+// it began missing. Each is reported once a transaction.
 func (c *checker) reads() {
 	for i, t := range c.txns {
 		if t.Status != Committed {
@@ -296,12 +297,13 @@ func (c *checker) reads() {
 		// transaction's own append of the key shows what others appended
 		// as much as one that came before it.
 		checked := map[[2]string]bool{}
-		first := map[string]bool{}
 		type appender struct {
 			key string
 			txn int
 		}
 		disordered := map[appender]bool{}
+		intermediate := map[appender]bool{}
+		missed := map[[2]string]bool{}
 		for _, m := range t.Mops {
 			if m.Append {
 				continue
@@ -342,13 +344,9 @@ func (c *checker) reads() {
 						Detail: fmt.Sprintf("txn %d read %s as %v, with %v of what txn %d appended, in order, as %v", t.ID, m.Key, m.Read, got, c.txns[w].ID, made)})
 				}
 			}
-			// The rest is checked in the transaction's first read of the
-			// key.
-			if first[m.Key] {
-				continue
-			}
-			first[m.Key] = true
-			// What others wrote ends before the transaction's own appends.
+			// What others wrote ends before the transaction's own appends;
+			// a read of an intermediate state of theirs is reported once
+			// per writer, however many reads show it.
 			others := m.Read
 			for len(others) > 0 {
 				if w, ok := c.writer[m.Key][others[len(others)-1]]; !ok || w != i {
@@ -358,8 +356,9 @@ func (c *checker) reads() {
 			}
 			if len(others) > 0 {
 				last := others[len(others)-1]
-				if w, ok := c.writer[m.Key][last]; ok {
+				if w, ok := c.writer[m.Key][last]; ok && !intermediate[appender{m.Key, w}] {
 					if mine := c.appended[m.Key][w]; mine[len(mine)-1] != last {
+						intermediate[appender{m.Key, w}] = true
 						c.report(Anomaly{Kind: "G1b", Key: m.Key, Txns: []int{c.txns[w].ID, t.ID},
 							Detail: fmt.Sprintf("txn %d read %s ending in %s, an intermediate append of txn %d, which went on to append %v", t.ID, m.Key, last, c.txns[w].ID, mine)})
 					}
@@ -370,9 +369,11 @@ func (c *checker) reads() {
 				for _, v := range m.Read {
 					have[v] = true
 				}
-				for v, w := range c.writer[m.Key] {
+				for _, v := range slices.Sorted(maps.Keys(c.writer[m.Key])) {
+					w := c.writer[m.Key][v]
 					wt := c.txns[w]
-					if wt.Status == Committed && wt.Return < t.Call && !have[v] && wt.ID != t.ID {
+					if wt.Status == Committed && wt.Return < t.Call && !have[v] && wt.ID != t.ID && !missed[[2]string{m.Key, v}] {
+						missed[[2]string{m.Key, v}] = true
 						c.report(Anomaly{Kind: "lost", Key: m.Key, Txns: []int{wt.ID, t.ID},
 							Detail: fmt.Sprintf("txn %d committed %s to %s before txn %d began, which read %v", wt.ID, v, m.Key, t.ID, m.Read)})
 					}
