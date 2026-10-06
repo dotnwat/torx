@@ -128,10 +128,17 @@ func TestAnomalies(t *testing.T) {
 			txn(1, a("x", "1")),
 			txn(2, a("x", "2"), r("x", "1", "2"), a("x", "3"), r("x", "1", "2", "3")),
 		}, Options{}, nil},
+		{"G1c through a later read", []Txn{
+			// T1's second read of x is after T2's append; its read of y is
+			// not, so T1 read T2's write and T2 read T1's.
+			txn(1, a("y", "1"), r("x"), r("x", "2")),
+			txn(2, a("x", "2"), r("y", "1")),
+		}, Options{}, []string{"G-single", "G1c", "nonrepeatable"}},
 		{"nonrepeatable", []Txn{
+			// T1 read before T2's append, then after it: a cycle too.
 			txn(1, r("x"), r("x", "1")),
 			txn(2, a("x", "1")),
-		}, Options{}, []string{"nonrepeatable"}},
+		}, Options{}, []string{"G-single", "nonrepeatable"}},
 		{"nonrepeatable around an append of its own", []Txn{
 			txn(1, a("x", "1")),
 			// And a lost update's cycle: T2 read x before T1's append and

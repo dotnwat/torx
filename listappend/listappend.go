@@ -224,17 +224,16 @@ func (c *checker) internal() {
 	}
 }
 
-// external returns a committed transaction's external reads: each key's
-// first read, if it came before any append of the key.
+// external returns a committed transaction's external reads: its reads of
+// each key before any append of its own to the key. There may be several
+// of one key, showing different versions, which read committed allows.
 func external(t Txn) []Mop {
 	var out []Mop
-	seen := map[string]bool{}
+	appended := map[string]bool{}
 	for _, m := range t.Mops {
-		if seen[m.Key] {
-			continue
-		}
-		seen[m.Key] = true
-		if !m.Append {
+		if m.Append {
+			appended[m.Key] = true
+		} else if !appended[m.Key] {
 			out = append(out, m)
 		}
 	}
@@ -403,7 +402,7 @@ func (c *checker) edges() {
 			}
 		}
 	}
-	latest := map[string][]int{} // key -> the transactions that read its whole version order
+	latest := map[string]map[int]bool{} // key -> the transactions that read its whole version order
 	for i, t := range c.txns {
 		if t.Status != Committed {
 			continue
@@ -421,7 +420,10 @@ func (c *checker) edges() {
 				}
 			}
 			if slices.Equal(order, m.Read) {
-				latest[m.Key] = append(latest[m.Key], i)
+				if latest[m.Key] == nil {
+					latest[m.Key] = map[int]bool{}
+				}
+				latest[m.Key][i] = true
 			}
 		}
 	}
@@ -450,7 +452,7 @@ func (c *checker) edges() {
 					add(w, i, WW)
 				}
 			}
-			for _, reader := range latest[m.Key] {
+			for _, reader := range slices.Sorted(maps.Keys(latest[m.Key])) {
 				add(reader, i, RW)
 			}
 		}
