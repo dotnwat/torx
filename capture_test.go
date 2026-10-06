@@ -184,6 +184,63 @@ func TestStartCapturedRelaunch(t *testing.T) {
 	})
 }
 
+// TestStartCapturedAs runs two processes at once on one node under names of
+// their own: each logs to its own file, and each name rotates apart from
+// the other.
+func TestStartCapturedAs(t *testing.T) {
+	n := captureTestNode(t)
+	svc := NewServiceBase("svc", Homogeneous(1, NodeSpec{}), nil)
+	svc.SetCapturePolicy(CaptureRotate)
+	svc.Bind([]*Node{n})
+	ctx := context.Background()
+	start := func(name, msg string) Process {
+		t.Helper()
+		// Each process prints its message and stays up, so the two overlap.
+		p, err := svc.StartCapturedAs(ctx, n, name, Command("sh", "-c", "printf "+msg+"; exec sleep 30"))
+		if err != nil {
+			t.Fatalf("StartCapturedAs(%s): %v", name, err)
+		}
+		waitForLog(t, svc.CapturePath(n, name), msg)
+		return p
+	}
+	w1 := start("writer", "w-first")
+	c1 := start("compactor", "c-first")
+	_ = w1.Close()
+	w2 := start("writer", "w-second")
+	defer w2.Close()
+	defer c1.Close()
+
+	dir := n.ServiceScratch("svc").Root
+	for name, want := range map[string]string{"writer.1.log": "w-first", "writer.log": "w-second", "compactor.log": "c-first"} {
+		got, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil || string(got) != want {
+			t.Errorf("%s = %q (%v), want %q", name, got, err, want)
+		}
+	}
+	want := []string{"compactor.log", "writer.1.log", "writer.log"}
+	if got := artifactNames(t, svc, n); !slices.Equal(got, want) {
+		t.Errorf("artifacts = %v, want %v", got, want)
+	}
+	// "writer.1" would log where the rotation above put writer's first log.
+	for _, bad := range []string{"", "a/b", "..", ".", "writer.1", "a.b.20"} {
+		if _, err := svc.StartCapturedAs(ctx, n, bad, Command("true")); err == nil {
+			t.Errorf("StartCapturedAs(%q) succeeded; want an error", bad)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "writer.1.log")); err != nil || string(got) != "w-first" {
+		t.Errorf("writer.1.log = %q (%v) after a launch as writer.1 was refused", got, err)
+	}
+	// A dot or a number elsewhere in a name is no rotated log's.
+	for _, good := range []string{"v1.2-writer", "writer.a1", "writer1"} {
+		p, err := svc.StartCapturedAs(ctx, n, good, Command("true"))
+		if err != nil {
+			t.Errorf("StartCapturedAs(%q): %v", good, err)
+			continue
+		}
+		_ = p.Close()
+	}
+}
+
 // staleProbeBackend is a Backend whose Stream, instead of launching anything,
 // records whether path still existed at the moment of launch. Checking at the
 // Stream boundary pins StartCaptured's remove-before-launch ordering exactly:

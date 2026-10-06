@@ -12,6 +12,11 @@
 
 package torx
 
+import (
+	"fmt"
+	"net"
+)
+
 // Node is a logical execution target: a Backend plus per-node coordination. Its
 // identity and resources are fixed at construction, so a Node is safe for the
 // concurrent use that fanning out across nodes implies.
@@ -82,6 +87,22 @@ func (n *Node) Addr() string {
 	default:
 		return defaultNodeAddr
 	}
+}
+
+// CallerAddr is the address of the calling process on its route to the
+// node: where the node reaches a server the job runs itself, in the worker
+// -- an object store the system under test keeps its data in, or a stand-in
+// for a service it calls out to. On the loopback that is the loopback; in
+// the -netns lab it is the lab's bridge; for a remote node it is the
+// address of whichever of this host's interfaces faces the node. The
+// address is the kernel's choice of route, and nothing is sent to find it.
+func (n *Node) CallerAddr() (string, error) {
+	conn, err := net.Dial("udp", net.JoinHostPort(n.Addr(), "9"))
+	if err != nil {
+		return "", fmt.Errorf("torx: no route to %s at %s: %w", n.name, n.Addr(), err)
+	}
+	defer func() { _ = conn.Close() }()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String(), nil
 }
 
 // Resources is the node's capacity.
