@@ -65,13 +65,26 @@ func TestAnomalies(t *testing.T) {
 			txn(2, r("x"), a("y", "2")),
 		}, Options{}, []string{"G2"}},
 		{"lost update nobody read the end of", []Txn{
-			// Which of the unread appends came first is unknown, so the
-			// ww edge between them is: G2, where a read of both would
-			// have shown G-single.
+			// Which of the unread appends came first is unknown, but
+			// whichever did, the other read before it and appended after.
 			txn(1, r("x"), a("x", "1")),
 			txn(2, r("x", "1"), a("x", "2")),
 			txn(3, r("x", "1"), a("x", "3")),
-		}, Options{}, []string{"G2"}},
+		}, Options{}, []string{"G-single"}},
+		{"lost update from an empty key nobody read", []Txn{
+			txn(1, r("x"), a("x", "1")),
+			txn(2, r("x"), a("x", "2")),
+		}, Options{}, []string{"G-single"}},
+		{"lost update from different versions nobody read the end of", []Txn{
+			txn(1, a("x", "0")),
+			txn(2, r("x"), a("x", "2")),
+			txn(3, r("x", "0"), a("x", "3")),
+			txn(4, r("x", "0")),
+		}, Options{}, []string{"G-single"}},
+		{"blind appends nobody read are no lost update", []Txn{
+			txn(1, a("x", "1")),
+			txn(2, r("x"), a("x", "2")),
+		}, Options{}, nil},
 		{"serial, its last appends unread", []Txn{
 			txn(1, r("x"), a("x", "1")),
 			txn(2, r("x", "1"), a("x", "2"), a("y", "2")),

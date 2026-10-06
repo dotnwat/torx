@@ -16,7 +16,9 @@
 //     what T1 read (T1 -> T2), an anti-dependency.
 //
 // A committed append that no read saw came after every version one did,
-// so it follows the last of them the same ways. And, optionally, realtime: T1 committed before T2 began (T1 -> T2).
+// so it follows the last of them the same ways; two transactions that
+// each read a key and appended to it unread are a lost update whichever
+// appended first, reported as G-single. And, optionally, realtime: T1 committed before T2 began (T1 -> T2).
 // A cycle of dependencies is an anomaly; which cycles a level forbids is
 // the level's definition. Serializability forbids every cycle;
 // snapshot isolation allows only those with two rw edges in a row, so it
@@ -147,7 +149,15 @@ type checker struct {
 	// those in doubt an append of which some read saw.
 	took []bool
 	adj  [][]edge
-	out  []Anomaly
+	// pairs are the lost updates among unread appends: two transactions
+	// that each read a key and appended to it, with neither's append read.
+	pairs []pair
+	out   []Anomaly
+}
+
+type pair struct {
+	a, b int
+	key  string
 }
 
 // Check checks a history.
@@ -424,7 +434,8 @@ func (c *checker) edges() {
 			}
 		}
 	}
-	latest := map[string]map[int]bool{} // key -> the transactions that read its whole version order
+	latest := map[string]map[int]bool{}  // key -> the transactions that read its whole version order
+	readers := map[string]map[int]bool{} // key -> the transactions that read a version of it
 	for i, t := range c.txns {
 		if t.Status != Committed {
 			continue
@@ -436,6 +447,12 @@ func (c *checker) edges() {
 				}
 			}
 			order := c.order[m.Key]
+			if len(m.Read) <= len(order) && slices.Equal(order[:len(m.Read)], m.Read) {
+				if readers[m.Key] == nil {
+					readers[m.Key] = map[int]bool{}
+				}
+				readers[m.Key][i] = true
+			}
 			if len(m.Read) < len(order) && slices.Equal(order[:len(m.Read)], m.Read) {
 				if w, ok := c.writer[m.Key][order[len(m.Read)]]; ok {
 					add(i, w, RW)
@@ -462,6 +479,7 @@ func (c *checker) edges() {
 			observed[k][v] = true
 		}
 	}
+	unread := map[string][]int{} // key -> the transactions whose appends to it no read saw
 	for i, t := range c.txns {
 		if !c.took[i] {
 			continue
@@ -477,6 +495,27 @@ func (c *checker) edges() {
 			}
 			for _, reader := range slices.Sorted(maps.Keys(latest[m.Key])) {
 				add(reader, i, RW)
+			}
+			if u := unread[m.Key]; len(u) == 0 || u[len(u)-1] != i {
+				unread[m.Key] = append(u, i)
+			}
+		}
+	}
+	// The order among a key's unread appends is unknown, so no ww edge
+	// joins them. But two transactions that each read the key and then
+	// appended to it unread are a lost update whichever came first: the
+	// second read before the first's append and appended after it, a
+	// G-single cycle that snapshot isolation forbids.
+	for _, k := range slices.Sorted(maps.Keys(unread)) {
+		var both []int
+		for _, i := range unread[k] {
+			if readers[k][i] {
+				both = append(both, i)
+			}
+		}
+		for x := 0; x < len(both); x++ {
+			for y := x + 1; y < len(both); y++ {
+				c.pairs = append(c.pairs, pair{both[x], both[y], k})
 			}
 		}
 	}
@@ -524,10 +563,12 @@ func (c *checker) cycles() {
 	all := func(string) bool { return true }
 	noRW := func(k string) bool { return k != RW }
 	wwOnly := func(k string) bool { return k == WW }
-	for _, comp := range c.sccs(all) {
+	component := make([]int, len(c.txns)) // each transaction's component, or 0 for none
+	for n, comp := range c.sccs(all) {
 		in := map[int]bool{}
 		for _, v := range comp {
 			in[v] = true
+			component[v] = n + 1
 		}
 		found := false
 		if cyc, kinds := c.cycleWithin(comp, in, wwOnly); cyc != nil {
@@ -540,6 +581,9 @@ func (c *checker) cycles() {
 		if cyc, kinds := c.gSingle(comp, in); cyc != nil {
 			c.reportCycle("G-single", cyc, kinds)
 			found = true
+		} else if p := c.pairWithin(in); p != nil {
+			c.reportPair(*p)
+			found = true
 		} else if cyc, kinds := c.nonadjacent(comp, in); cyc != nil {
 			c.reportCycle("G-nonadjacent", cyc, kinds)
 			found = true
@@ -550,6 +594,30 @@ func (c *checker) cycles() {
 			}
 		}
 	}
+	// A lost update whose transactions no component holds together -- a
+	// writer of a version between their reads' is unknown -- is one still.
+	for _, p := range c.pairs {
+		if component[p.a] == 0 || component[p.a] != component[p.b] {
+			c.reportPair(p)
+		}
+	}
+}
+
+// pairWithin returns a lost update among the unread appends whose
+// transactions are both in the component, if any.
+func (c *checker) pairWithin(in map[int]bool) *pair {
+	for _, p := range c.pairs {
+		if in[p.a] && in[p.b] {
+			return &p
+		}
+	}
+	return nil
+}
+
+func (c *checker) reportPair(p pair) {
+	a, b := c.txns[p.a].ID, c.txns[p.b].ID
+	c.report(Anomaly{Kind: "G-single", Key: p.key, Txns: []int{a, b}, Edges: []string{WW, RW},
+		Detail: fmt.Sprintf("txns %d and %d each read %s and appended to it, and no read saw either append: whichever appended first, the other read %s before that append and appended after it (%d -ww-> %d -rw-> %d, or the reverse)", a, b, p.key, p.key, a, b, a)})
 }
 
 func (c *checker) reportCycle(kind string, cyc []int, kinds []string) {
