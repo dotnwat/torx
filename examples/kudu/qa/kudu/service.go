@@ -77,11 +77,13 @@ type Config struct {
 
 // Exit is a server that exited without the service stopping it.
 type Exit struct {
-	Proc string    `json:"proc"`
-	Node string    `json:"node"`
-	Code int       `json:"code"`
-	Err  string    `json:"error,omitempty"`
-	Time time.Time `json:"time"`
+	Proc string `json:"proc"`
+	Node string `json:"node"`
+	Code int    `json:"code"`
+	Err  string `json:"error,omitempty"`
+	// Signal is the signal that killed it, if one did.
+	Signal string    `json:"signal,omitempty"`
+	Time   time.Time `json:"time"`
 	// Said is the end of what the server logged: a FATAL's check, for one.
 	Said string `json:"said,omitempty"`
 }
@@ -486,6 +488,9 @@ func (c *Cluster) watch(p *proc, tp torx.Process) {
 	e := Exit{Proc: p.name, Node: p.node.Name(), Code: code, Time: time.Now()}
 	if err != nil {
 		e.Err = err.Error()
+	}
+	if sig, ok := torx.ExitSignal(tp); ok {
+		e.Signal = sig.String()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

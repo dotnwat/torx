@@ -797,7 +797,11 @@ func (j *chaosJob) exitAnomalies() []anomaly {
 		if kind == "exit-under-disk-full-wal" {
 			continue
 		}
-		bad = append(bad, anomaly{Kind: kind, Detail: fmt.Sprintf("%s exited with status %d at %s:\n%s", e.Proc, e.Code, e.Time.Format(time.RFC3339Nano), e.Said)})
+		how := fmt.Sprintf("with status %d", e.Code)
+		if e.Signal != "" {
+			how = "by " + e.Signal
+		}
+		bad = append(bad, anomaly{Kind: kind, Detail: fmt.Sprintf("%s exited %s at %s:\n%s", e.Proc, how, e.Time.Format(time.RFC3339Nano), e.Said)})
 	}
 	return bad
 }
