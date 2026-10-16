@@ -1,5 +1,10 @@
 package linearize
 
+import (
+	"fmt"
+	"math"
+)
+
 // Timeline places operations on the line Check orders them by, when a
 // system orders them by timestamps of its own -- the commit timestamp it
 // gives each write, the snapshot timestamp it reads each read at -- rather
@@ -20,8 +25,15 @@ package linearize
 // such timestamp -- past the timestamp its client had seen, say, as systems
 // that propagate timestamps promise -- and it returns at Pending.
 //
+// The reads at one snapshot see one state: a write of unknown outcome
+// landed before all of them or before none. Placed on their own they are
+// merely concurrent, and the search could land the write between two of
+// them, so give the reads at each snapshot one [Op.Group] -- ts-Base+1,
+// say, which is never zero.
+//
 // Timestamps are any int64s the system orders operations by, at least
-// Base and at most (math.MaxInt64-1)/2 past it.
+// Base and at most MaxOffset past it. Placing one outside that range
+// panics, so that a mis-set Base is loud rather than a wrong verdict.
 type Timeline struct {
 	// Base is at or before every timestamp placed.
 	Base int64
@@ -30,15 +42,19 @@ type Timeline struct {
 	Inclusive bool
 }
 
+// MaxOffset is the furthest past Base a timestamp may lie: beyond it, the
+// places run into Pending and past the end of int64.
+const MaxOffset int64 = (math.MaxInt64 - 3) / 2
+
 // Write places a write the system committed at timestamp ts.
 func (l Timeline) Write(ts int64) (call, ret int64) {
-	at := 2*(ts-l.Base) + 1
+	at := 2*l.offset(ts) + 1
 	return at, at
 }
 
 // Read places a read at snapshot timestamp ts.
 func (l Timeline) Read(ts int64) (call, ret int64) {
-	at := 2 * (ts - l.Base)
+	at := 2 * l.offset(ts)
 	if l.Inclusive {
 		at += 2
 	}
@@ -50,4 +66,16 @@ func (l Timeline) Read(ts int64) (call, ret int64) {
 func (l Timeline) Unknown(ts int64) (call, ret int64) {
 	call, _ = l.Write(ts)
 	return call, Pending
+}
+
+// offset is how far past Base ts lies, within MaxOffset.
+func (l Timeline) offset(ts int64) int64 {
+	if ts < l.Base {
+		panic(fmt.Sprintf("linearize: timestamp %d is before the timeline's base %d", ts, l.Base))
+	}
+	d := ts - l.Base
+	if d < 0 || d > MaxOffset {
+		panic(fmt.Sprintf("linearize: timestamp %d is more than MaxOffset past the timeline's base %d", ts, l.Base))
+	}
+	return d
 }
