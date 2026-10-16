@@ -64,7 +64,8 @@ func TestCheckHistory(t *testing.T) {
 // TestKeyHistories checks the per-key model on small histories: a
 // snapshot at t holds the writes before t and not the one at t; a write
 // whose outcome is unknown may take effect at any later timestamp, but
-// once; a refused write says what the row held at its timestamp.
+// once, and the reads at one snapshot agree on whether it has; a refused
+// write says what the row held at its timestamp.
 func TestKeyHistories(t *testing.T) {
 	w := func(i int, kind, v, code string, ts int64) op {
 		return op{Index: i, Kind: "write", Ops: []kudu.Op{{Op: kind, K: 1, V: v}},
@@ -96,6 +97,9 @@ func TestKeyHistories(t *testing.T) {
 		{"unknown write seen", []op{unknown(0, "upsert", "a", 5<<12), r(1, 20<<12, "a")}, true},
 		{"unknown write seen then unseen", []op{unknown(0, "upsert", "a", 5<<12), r(1, 20<<12, "a"), r(2, 30<<12, "")}, false},
 		{"unknown write before its lower bound", []op{unknown(0, "upsert", "a", 25<<12), r(1, 20<<12, "a")}, false},
+		{"unknown write seen at a snapshot twice", []op{unknown(0, "upsert", "a", 5<<12), r(1, 20<<12, "a"), r(2, 20<<12, "a")}, true},
+		{"unknown write seen at a snapshot once", []op{unknown(0, "upsert", "a", 5<<12), r(1, 20<<12, "a"), r(2, 20<<12, "")}, false},
+		{"unknown write seen at a later snapshot only", []op{unknown(0, "upsert", "a", 5<<12), r(1, 20<<12, ""), r(2, 30<<12, "a")}, true},
 		{"phantom", []op{r(0, 20<<12, "z")}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,6 +113,33 @@ func TestKeyHistories(t *testing.T) {
 			}
 			if got := len(kv) == 0; got != tc.ok {
 				t.Fatalf("legal = %v, want %v: %v", got, tc.ok, kv)
+			}
+		})
+	}
+}
+
+// TestAICheckSnapshot checks that the rows of the non-unique table are
+// held to the same rule: the scans at one snapshot agree on whether an
+// insert whose outcome is unknown took effect.
+func TestAICheckSnapshot(t *testing.T) {
+	insert := op{Index: 0, Kind: "write", Table: aiTable, Ops: []kudu.Op{{Op: "insert", V: "a"}}, Code: "TimedOut", PropBefore: 5 << 12, PropAfter: -1}
+	scan := func(i int, ts int64, rows ...row) op {
+		return op{Index: i, Kind: "read", Table: aiTable, Read: &kudu.ReadReq{Table: aiTable, Mode: "snapshot"}, SnapshotTS: ts, Rows: rows, PropBefore: -1}
+	}
+	saw := row{K: 0, V: "a", ID: 1}
+	for _, tc := range []struct {
+		name string
+		hist []op
+		ok   bool
+	}{
+		{"seen twice", []op{insert, scan(1, 20<<12, saw), scan(2, 20<<12, saw)}, true},
+		{"seen once", []op{insert, scan(1, 20<<12, saw), scan(2, 20<<12)}, false},
+		{"seen later only", []op{insert, scan(1, 20<<12), scan(2, 30<<12, saw)}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := aiCheck(context.Background(), tc.hist, []string{"t"}, 10*time.Second)
+			if got := len(bad) == 0; got != tc.ok {
+				t.Fatalf("legal = %v, want %v: %v", got, tc.ok, bad)
 			}
 		})
 	}

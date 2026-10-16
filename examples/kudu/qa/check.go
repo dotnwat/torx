@@ -266,7 +266,10 @@ func keyHistories(hist []op) (map[int64][]kvOp, []anomaly) {
 	for _, x := range out {
 		switch {
 		case x.read:
+			// The reads at one snapshot hold the same writes, so a write of
+			// unknown outcome reached all of them or none.
 			x.op.Call, x.op.Return = line.Read(x.ts)
+			x.op.Group = x.ts - line.Base + 1
 		case x.op.Output.Unknown:
 			x.op.Call, x.op.Return = line.Unknown(x.ts)
 		default:

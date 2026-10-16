@@ -146,8 +146,11 @@ compares every replica of every tablet. Then:
   read at its snapshot, and a write whose outcome is unknown anywhere past
   the timestamp its client had seen -- so the history must be a legal
   sequence of row operations, and every read, now or an hour in the past,
-  must hold exactly the writes before it. A conditional write Kudu refused
-  (`AlreadyPresent`, `NotFound`) says what the row held at its timestamp.
+  must hold exactly the writes before it. The reads at one snapshot -- the
+  final reads through every JVM -- share an `Op.Group`, so a write whose
+  outcome is unknown reached all of them or none. A conditional write Kudu
+  refused (`AlreadyPresent`, `NotFound`) says what the row held at its
+  timestamp.
 - **Causality**: a write's timestamp, and a snapshot the server picks, are
   past the timestamp the client propagated.
 - **Diff scans** return every key whose state changed between their two
