@@ -544,7 +544,13 @@ after its call, or never. `linearize.Partition` splits a history by key,
 `CheckWithin` bounds a search's memory, and `linearize.Minimize` shrinks an
 illegal history to its core: the few operations that, with every other one
 weakened, still admit no order -- usually a write, a read that saw it, and
-a read that did not.
+a read that did not. A system that orders operations by timestamps of its
+own -- a multi-version database that gives each write a commit timestamp
+and reads at snapshots -- is checked in that order instead:
+`linearize.Timeline` places each write at its timestamp and each read at its
+snapshot, so a history is legal exactly when every read holds the writes
+before its snapshot and no others, a read an hour in the past as much as one
+at the present.
 
 The [`listappend`](listappend/) package checks a record of transactions,
 after Elle: transactions read lists and append unique elements to them, so
