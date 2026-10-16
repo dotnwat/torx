@@ -13,9 +13,12 @@ package torx
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 )
 
@@ -24,6 +27,12 @@ type Artifact struct {
 	Name          string // logical name and local filename
 	Path          string // path on the node
 	CollectOnPass bool   // gather even when the job passed; a failure gathers all
+	// Dir says Path is a directory, collected as a gzipped tar of it named
+	// Name: the data directory of a server, say, registered so that a
+	// failed run keeps the state the server left on disk to examine with
+	// the system's own tools. The archive holds the directory under its
+	// own name. Archiving runs tar on the node, in its scratch directory.
+	Dir bool
 }
 
 // Archiver is implemented by a service that exposes artifacts to collect after a
@@ -60,9 +69,34 @@ func Collect(ctx context.Context, n *Node, artifacts []Artifact, passed bool, de
 
 	var errs MultiError
 	for _, a := range wanted {
+		if a.Dir {
+			errs.Append(collectDir(ctx, n, a, filepath.Join(destDir, a.Name)))
+			continue
+		}
 		errs.Append(n.Get(ctx, a.Path, filepath.Join(destDir, a.Name)))
 	}
 	return errs.Err()
+}
+
+// collectDir archives the directory a names on n into the node's scratch
+// directory, copies the archive to dest, and removes it from the node.
+func collectDir(ctx context.Context, n *Node, a Artifact, dest string) error {
+	root := n.Scratch().Root
+	if err := n.Mkdir(ctx, root); err != nil {
+		return err
+	}
+	archive := path.Join(root, ".artifact-"+a.Name)
+	dir := path.Clean(a.Path)
+	res, err := n.Exec(ctx, Command("tar", "-C", path.Dir(dir), "-czf", archive, path.Base(dir)))
+	defer func() { _ = n.Rm(context.WithoutCancel(ctx), archive) }()
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return Wrap(ErrService, "collect: archive "+a.Path,
+			fmt.Errorf("tar exited %d: %s", res.ExitCode, strings.TrimSpace(string(res.Stderr))))
+	}
+	return n.Get(ctx, archive, dest)
 }
 
 // Finalizers is a LIFO stack of cleanup callbacks run on teardown. The zero

@@ -204,7 +204,10 @@ Guidelines that keep a service portable across the local and ssh backends:
 - **Capture output with `StartCaptured`.** It redirects the process's stdout and
   stderr to a node-local file and collects it into the results tree. For any
   other output (a `--log-file`, a data dump) call `s.AddArtifact(n,
-  torx.Artifact{Name: ..., Path: ..., CollectOnPass: true})`. A service that
+  torx.Artifact{Name: ..., Path: ..., CollectOnPass: true})`. An artifact
+  with `Dir: true` names a directory, collected as a gzipped tar of it:
+  register a server's data directory, and a failed run keeps the state the
+  server left on disk, to examine with the system's own tools. A service that
   launches more than one process on a node over a job, as a crash-and-restart
   test does, calls `s.SetCapturePolicy(torx.CaptureRotate)` at construction so
   each launch moves the previous process's log aside as `stdout.<k>.log` and

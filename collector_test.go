@@ -66,6 +66,55 @@ func TestCollect(t *testing.T) {
 	}
 }
 
+// TestCollectDir collects a directory as a gzipped tar of it, on failure
+// only by default, and leaves nothing of the archive behind on the node.
+func TestCollectDir(t *testing.T) {
+	ctx := context.Background()
+	data := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(filepath.Join(data, "wal"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"meta": "m", "wal/seg-1": "w"} {
+		if err := os.WriteFile(filepath.Join(data, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n := testNode(t, "n0")
+	arts := []Artifact{{Name: "data.tar.gz", Path: data + "/", Dir: true}}
+
+	passDir := filepath.Join(t.TempDir(), "pass")
+	if err := Collect(ctx, n, arts, true, passDir); err != nil {
+		t.Fatalf("Collect(pass): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(passDir, "data.tar.gz")); err == nil {
+		t.Errorf("directory collected on pass, want skipped")
+	}
+
+	failDir := filepath.Join(t.TempDir(), "fail")
+	if err := Collect(ctx, n, arts, false, failDir); err != nil {
+		t.Fatalf("Collect(fail): %v", err)
+	}
+	out := t.TempDir()
+	if res, err := n.Exec(ctx, Command("tar", "-C", out, "-xzf", filepath.Join(failDir, "data.tar.gz"))); err != nil || res.ExitCode != 0 {
+		t.Fatalf("extract: %v %s", err, res.Stderr)
+	}
+	for name, want := range map[string]string{"data/meta": "m", "data/wal/seg-1": "w"} {
+		got, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil || string(got) != want {
+			t.Errorf("%s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	left, err := filepath.Glob(filepath.Join(n.Scratch().Root, ".artifact-*"))
+	if err != nil || len(left) > 0 {
+		t.Errorf("archive left on the node: %v %v", left, err)
+	}
+
+	missing := []Artifact{{Name: "gone.tar.gz", Path: filepath.Join(t.TempDir(), "gone"), Dir: true}}
+	if err := Collect(ctx, n, missing, false, filepath.Join(t.TempDir(), "x")); err == nil {
+		t.Errorf("Collect of a missing directory succeeded")
+	}
+}
+
 func TestFinalizers(t *testing.T) {
 	var log []string
 	var f Finalizers
