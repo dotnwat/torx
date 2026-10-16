@@ -550,7 +550,8 @@ and reads at snapshots -- is checked in that order instead:
 `linearize.Timeline` places each write at its timestamp and each read at its
 snapshot, so a history is legal exactly when every read holds the writes
 before its snapshot and no others, a read an hour in the past as much as one
-at the present.
+at the present; the reads at one snapshot share an `Op.Group`, so a write
+whose answer was lost reaches all of them or none.
 
 The [`listappend`](listappend/) package checks a record of transactions,
 after Elle: transactions read lists and append unique elements to them, so

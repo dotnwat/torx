@@ -536,3 +536,61 @@ func TestMinimizeKeep(t *testing.T) {
 		t.Fatalf("core %v, err %v", core, err)
 	}
 }
+
+// TestGroup checks that the operations of a group are linearized side by
+// side: an operation whose answer was lost may land before or after two
+// reads a system served together, but not between them, as it could were
+// they merely concurrent; nor may an operation that returned between their
+// calls. The group's own order stays free, and an operation with no answer
+// is in no group, so it cannot hold one open.
+func TestGroup(t *testing.T) {
+	lost := w(0, 11, Pending, 1)
+	lost.Output.unknown = true
+	reads := func(group int64, vs ...int) []Op[regIn, regOut] {
+		var ops []Op[regIn, regOut]
+		for i, v := range vs {
+			op := r(1+i, 20, 20, v)
+			op.Group = group
+			ops = append(ops, op)
+		}
+		return ops
+	}
+	writes := func(group int64, vs ...int) []Op[regIn, regOut] {
+		var ops []Op[regIn, regOut]
+		for i, v := range vs {
+			op := w(1+i, 20, 20, v)
+			op.Group = group
+			ops = append(ops, op)
+		}
+		return ops
+	}
+	lostRead := r(9, 20, Pending, 0)
+	lostRead.Output.unknown = true
+	lostRead.Group = 7
+	// early and late overlap, and between returned between their calls.
+	early, late, between := r(1, 1, 10, 0), r(2, 5, 20, 1), w(0, 2, 3, 1)
+	early.Group, late.Group = 7, 7
+	for _, tc := range []struct {
+		name string
+		ops  []Op[regIn, regOut]
+		want Outcome
+	}{
+		{"concurrent reads may straddle a lost write", append([]Op[regIn, regOut]{lost}, reads(0, 0, 1)...), Ok},
+		{"grouped reads may not", append([]Op[regIn, regOut]{lost}, reads(7, 0, 1)...), Illegal},
+		{"grouped reads both before it", append([]Op[regIn, regOut]{lost}, reads(7, 0, 0)...), Ok},
+		{"grouped reads both after it", append([]Op[regIn, regOut]{lost}, reads(7, 1, 1)...), Ok},
+		{"a group's own order is free, one way", append(writes(7, 1, 2), r(5, 30, 30, 1)), Ok},
+		{"a group's own order is free, the other", append(writes(7, 1, 2), r(5, 30, 30, 2)), Ok},
+		{"a lost operation holds no group open", append(reads(7, 0, 0), lostRead), Ok},
+		{"a write that returned between the calls of a group cannot split it",
+			[]Op[regIn, regOut]{between, early, late}, Illegal},
+		{"but splits the same reads ungrouped",
+			[]Op[regIn, regOut]{between, r(1, 1, 10, 0), r(2, 5, 20, 1)}, Ok},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := check(t, tc.ops).Outcome; got != tc.want {
+				t.Fatalf("outcome = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
