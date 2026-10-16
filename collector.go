@@ -13,6 +13,7 @@ package torx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -107,7 +108,14 @@ func collectDir(ctx context.Context, n *Node, a Artifact, dest string) error {
 	// GNU, BSD and busybox tar all take that, and name the members
 	// name/./...; GNU's --transform, which would strip the dot, is GNU's
 	// alone. The -- keeps a name beginning with a dash from being read as an
-	// option.
+	// option. BSD and busybox tar exit 1 for a directory that is not there,
+	// as for any error, and write an empty archive, which an exit of 1 below
+	// would keep: so the directory is made sure of first.
+	if res, err := n.Exec(ctx, Command("test", "-d", dir)); err != nil {
+		return Wrap(ErrService, "collect: archive "+a.Path, err)
+	} else if res.ExitCode != 0 {
+		return Wrap(ErrService, "collect: archive "+a.Path, errors.New("not a directory"))
+	}
 	res, err := n.Exec(ctx, Command("tar", "-C", path.Dir(dir), "-czf", archive, "--", path.Base(dir)+"/."))
 	defer func() {
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
@@ -125,7 +133,8 @@ func collectDir(ctx context.Context, n *Node, a Artifact, dest string) error {
 		// directory, where the archive itself grows. GNU tar exits 1 for
 		// that and writes the archive all the same, which is what a failed
 		// run needs kept: note it, and keep it. BSD tar exits 1 for any
-		// error, so should the archive not be there, tar's word is the error.
+		// error, and so writes what it could, which is kept the same; should
+		// the archive not be there at all, tar's word is the error.
 		warned = res.ExitError("tar")
 		Logf(ctx, "warn", "archiving %s on %s: %s", a.Path, n.Name(), strings.TrimSpace(string(res.Stderr)))
 	case res.ExitCode != 0:
