@@ -255,24 +255,22 @@ func keyHistories(hist []op) (map[int64][]kvOp, []anomaly) {
 				Client: o.Client, Input: kvIn{Kind: "read", Op: o.Index, Chosen: chosen}, Output: kvOut{V: seen[k]}}})
 		}
 	}
-	// Place everything on one line: a write at ts sits at 2(ts-base)+1, a
-	// read at t at 2(t-base), between the writes before t and the one at t.
-	base := int64(-1)
-	for _, x := range out {
-		if base < 0 || x.ts < base {
-			base = x.ts
+	// Place everything on Kudu's timeline, whose snapshots are exclusive.
+	var line linearize.Timeline
+	for i, x := range out {
+		if i == 0 || x.ts < line.Base {
+			line.Base = x.ts
 		}
 	}
-	base--
 	byKey := map[int64][]kvOp{}
 	for _, x := range out {
-		at := 2 * (x.ts - base)
-		if !x.read {
-			at++
-		}
-		x.op.Call, x.op.Return = at, at
-		if x.op.Output.Unknown {
-			x.op.Return = linearize.Pending
+		switch {
+		case x.read:
+			x.op.Call, x.op.Return = line.Read(x.ts)
+		case x.op.Output.Unknown:
+			x.op.Call, x.op.Return = line.Unknown(x.ts)
+		default:
+			x.op.Call, x.op.Return = line.Write(x.ts)
 		}
 		byKey[x.key] = append(byKey[x.key], x)
 	}
