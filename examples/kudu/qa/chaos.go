@@ -785,14 +785,17 @@ func (j *chaosJob) exitAnomalies() []anomaly {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	for _, e := range j.cluster.Exits() {
-		kind := "server-exit"
+		kind, walFull := "server-exit", false
 		for _, w := range j.diskFaults[e.Proc] {
 			if e.Time.Before(w.start) || (!w.end.IsZero() && e.Time.After(w.end.Add(30*time.Second))) {
 				continue
 			}
 			kind = "exit-under-" + w.fault
+			walFull = walFull || w.fault == "disk-full-wal"
 		}
-		if kind == "exit-under-disk-full-wal" {
+		// Under a full WAL disk, whatever else was faulted, the crash is
+		// the one Kudu documents.
+		if walFull {
 			continue
 		}
 		how := fmt.Sprintf("with status %d", e.Code)
