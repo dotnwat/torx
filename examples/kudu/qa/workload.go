@@ -73,7 +73,8 @@ type row struct {
 	K      int64  `json:"k"`
 	V      string `json:"v"`
 	BadPay bool   `json:"bad_payload,omitempty"`
-	Server int    `json:"s"` // the server that served it, in the op's Servers
+	Server int    `json:"s"`             // the server that served it, in the op's Servers
+	Del    bool   `json:"del,omitempty"` // a diff scan's deleted row
 }
 
 // payload is the payload of value v: bytes derived from it, of a length
@@ -131,6 +132,7 @@ var opWeights = map[string]int{
 	"close-client":  1,  // close the client's Kudu client, as a restart would
 	"read-fresh":    1,  // a snapshot scan of the fresh keys
 	"read-past-all": 1,  // a snapshot scan of every key, in the past
+	"read-diff":     2,  // a diff scan of the contended keys between two timestamps in the past
 }
 
 func (w *workload) record(o op) int {
@@ -267,6 +269,12 @@ func (w *workload) issue(ctx context.Context, c int, rng *rand.Rand, kind string
 			return
 		}
 		w.read(ctx, c, kudu.ReadReq{Mode: "snapshot", TS: ts}, rng)
+	case "read-diff":
+		a, b := w.pastTS(rng), w.pastTS(rng)
+		if a == 0 || a == b {
+			return
+		}
+		w.read(ctx, c, kudu.ReadReq{Mode: "diff", StartTS: min(a, b), TS: max(a, b), Lo: ptr(int64(0)), Hi: ptr(int64(w.keys))}, rng)
 	case "read-fresh":
 		w.read(ctx, c, kudu.ReadReq{Mode: "snapshot", Lo: ptr(freshBase), Hi: ptr(txnBase)}, rng)
 	case "read-txn":
@@ -315,6 +323,9 @@ func (w *workload) read(ctx context.Context, c int, r kudu.ReadReq, rng *rand.Ra
 		if r.Mode == "snapshot" && rng.IntN(3) == 0 {
 			r.FaultTolerant = true
 		}
+		if r.Mode == "diff" {
+			r.Replica = ""
+		}
 	}
 	o := op{Client: c, Kind: "read", Read: &r, Call: time.Now().UnixNano(), PropBefore: -1, PropAfter: -1}
 	cctx, cancel := context.WithTimeout(ctx, w.timeout+15*time.Second)
@@ -327,11 +338,11 @@ func (w *workload) read(ctx context.Context, c int, r kudu.ReadReq, rng *rand.Ra
 		o.Code, o.Error, o.SnapshotTS, o.Servers = resp.Code, resp.Error, resp.SnapshotTS, resp.Servers
 		o.PropBefore, o.PropAfter = resp.PropagatedBefore, resp.PropagatedAfter
 		for _, x := range resp.Rows {
-			rw := row{K: x.K, Server: x.Server}
+			rw := row{K: x.K, Server: x.Server, Del: x.Deleted}
 			if x.V != nil {
 				rw.V = *x.V
 			}
-			if rw.V != "" && (x.P == nil || *x.P != payload(rw.V, w.valueSize)) {
+			if rw.V != "" && !rw.Del && (x.P == nil || *x.P != payload(rw.V, w.valueSize)) {
 				rw.BadPay = true
 			}
 			rw.BadPay = rw.BadPay || (rw.V == "" && x.P != nil)

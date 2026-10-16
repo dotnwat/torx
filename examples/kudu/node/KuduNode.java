@@ -420,18 +420,24 @@ public final class KuduNode {
     try {
       KuduTable t = table(c, req);
       KuduScanner.KuduScannerBuilder b = c.newScannerBuilder(t)
-          .setProjectedColumnNames(List.of("k", "v", "p"))
           .scanRequestTimeout(num(req, "timeout_ms", 10_000));
       String mode = str(req, "mode", "snapshot");
+      long ts = num(req, "ts", 0);
       switch (mode) {
         case "snapshot" -> b.readMode(AsyncKuduScanner.ReadMode.READ_AT_SNAPSHOT);
         case "ryw" -> b.readMode(AsyncKuduScanner.ReadMode.READ_YOUR_WRITES);
         case "latest" -> b.readMode(AsyncKuduScanner.ReadMode.READ_LATEST);
+        // A diff scan, as an incremental backup takes: the rows that
+        // changed between start_ts and ts, as of ts, those deleted marked.
+        case "diff" -> b.diffScan(num(req, "start_ts", 0), ts);
         default -> throw new BadRequest("unknown read mode " + mode);
       }
-      long ts = num(req, "ts", 0);
-      if (ts > 0) {
-        b.snapshotTimestampRaw(ts);
+      if (!mode.equals("diff")) {
+        // A diff scan projects every column and IS_DELETED itself.
+        b.setProjectedColumnNames(List.of("k", "v", "p"));
+        if (ts > 0) {
+          b.snapshotTimestampRaw(ts);
+        }
       }
       if ("closest".equals(str(req, "replica", "leader"))) {
         b.replicaSelection(ReplicaSelection.CLOSEST_REPLICA);
@@ -470,11 +476,12 @@ public final class KuduNode {
         }
         while (it.hasNext()) {
           RowResult r = it.next();
-          List<Object> row = new ArrayList<>(4);
-          row.add(r.getLong(0));
-          row.add(r.isNull(1) ? null : r.getString(1));
-          row.add(r.isNull(2) ? null : r.getString(2));
+          List<Object> row = new ArrayList<>(5);
+          row.add(r.getLong("k"));
+          row.add(r.isNull("v") ? null : r.getString("v"));
+          row.add(r.isNull("p") ? null : r.getString("p"));
           row.add(si);
+          row.add(r.hasIsDeleted() && r.isDeleted());
           rows.add(row);
         }
       }

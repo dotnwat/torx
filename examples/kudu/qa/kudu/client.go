@@ -217,11 +217,13 @@ func (c *Client) Write(ctx context.Context, table, txn string, timeout time.Dura
 // ReadReq is a scan.
 type ReadReq struct {
 	Table string `json:"table"`
-	// Mode is snapshot (READ_AT_SNAPSHOT), ryw (READ_YOUR_WRITES), or
-	// latest (READ_LATEST).
+	// Mode is snapshot (READ_AT_SNAPSHOT), ryw (READ_YOUR_WRITES), latest
+	// (READ_LATEST), or diff (a diff scan from StartTS to TS).
 	Mode string `json:"mode"`
-	// TS is a snapshot scan's timestamp; 0 has the server pick one.
+	// TS is a snapshot scan's timestamp, 0 to have the server pick one; or
+	// a diff scan's end.
 	TS            int64   `json:"ts,omitempty"`
+	StartTS       int64   `json:"start_ts,omitempty"`
 	Keys          []int64 `json:"keys,omitempty"`
 	Lo            *int64  `json:"lo,omitempty"`
 	Hi            *int64  `json:"hi,omitempty"`
@@ -237,6 +239,8 @@ type Row struct {
 	V      *string
 	P      *string
 	Server int
+	// Deleted marks a row a diff scan returns as deleted.
+	Deleted bool
 }
 
 // UnmarshalJSON reads a row from kudu-node's [k, v, p].
@@ -245,10 +249,13 @@ func (r *Row) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &a); err != nil {
 		return err
 	}
-	if len(a) != 4 {
+	if len(a) != 5 {
 		return fmt.Errorf("kudu: row of %d columns", len(a))
 	}
 	if err := json.Unmarshal(a[3], &r.Server); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(a[4], &r.Deleted); err != nil {
 		return err
 	}
 	if err := json.Unmarshal(a[0], &r.K); err != nil {

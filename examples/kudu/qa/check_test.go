@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -53,6 +54,7 @@ func TestCheckHistory(t *testing.T) {
 	bad = append(bad, kv...)
 	bad = append(bad, opChecks(hist, possiblyWritten(hist))...)
 	bad = append(bad, txnCheck(hist, -1)...)
+	bad = append(bad, diffCheck(hist)...)
 	t.Logf("checked %d keys in %v; %d undecided: %v", len(byKey), time.Since(start), len(unknown), unknown)
 	for _, a := range bad {
 		t.Log(a)
@@ -107,6 +109,44 @@ func TestKeyHistories(t *testing.T) {
 			}
 			if got := len(kv) == 0; got != tc.ok {
 				t.Fatalf("legal = %v, want %v: %v", got, tc.ok, kv)
+			}
+		})
+	}
+}
+
+// TestDiffCheck checks the diff-scan check on a key written twice: a diff
+// scan returns the key, as at its end, exactly when its state changed.
+func TestDiffCheck(t *testing.T) {
+	writes := []op{
+		{Index: 0, Kind: "write", Ops: []kudu.Op{{Op: "upsert", K: 1, V: "a"}}, Results: []kudu.OpResult{{Code: "OK", TS: 10}}},
+		{Index: 1, Kind: "write", Ops: []kudu.Op{{Op: "upsert", K: 1, V: "b"}}, Results: []kudu.OpResult{{Code: "OK", TS: 20}}},
+		{Index: 2, Kind: "write", Ops: []kudu.Op{{Op: "delete", K: 1}}, Results: []kudu.OpResult{{Code: "OK", TS: 30}}},
+	}
+	diff := func(s, e int64, rows ...row) op {
+		return op{Index: 9, Kind: "read", Read: &kudu.ReadReq{Mode: "diff", StartTS: s, TS: e, Lo: ptr(int64(0)), Hi: ptr(int64(2))}, Rows: rows}
+	}
+	for _, tc := range []struct {
+		name string
+		scan op
+		want string
+	}{
+		{"changed and returned", diff(15, 25, row{K: 1, V: "b"}), ""},
+		{"changed and left out", diff(15, 25), "diff-missing"},
+		{"unchanged and left out", diff(21, 29), ""},
+		{"unchanged and returned", diff(21, 29, row{K: 1, V: "b"}), "diff-extra"},
+		{"returned with a stale value", diff(5, 25, row{K: 1, V: "a"}), "diff-wrong"},
+		{"deleted and returned so", diff(25, 35, row{K: 1, Del: true}), ""},
+		{"deleted and returned alive", diff(25, 35, row{K: 1, V: "b"}), "diff-wrong"},
+		{"absent at both ends, returned deleted", diff(5, 8, row{K: 1, Del: true}), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := diffCheck(append(slices.Clone(writes), tc.scan))
+			got := ""
+			if len(bad) > 0 {
+				got = bad[0].Kind
+			}
+			if got != tc.want {
+				t.Fatalf("got %q, want %q: %v", got, tc.want, bad)
 			}
 		})
 	}

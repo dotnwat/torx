@@ -541,6 +541,7 @@ func (j *chaosJob) check(ctx context.Context, jc *torx.JobContext, hist []op, fi
 	bad = append(bad, kv...)
 	bad = append(bad, opChecks(hist, possiblyWritten(hist))...)
 	bad = append(bad, txnCheck(hist, final)...)
+	bad = append(bad, diffCheck(hist)...)
 	j.mu.Lock()
 	bad = append(bad, j.notes...)
 	events := slices.Clone(j.events)

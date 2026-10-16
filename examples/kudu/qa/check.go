@@ -217,7 +217,7 @@ func keyHistories(hist []op) (map[int64][]kvOp, []anomaly) {
 		}
 	}
 	for _, o := range hist {
-		if o.Kind != "read" || o.Read == nil || o.Read.Mode == "latest" || o.NodeErr != "" || o.Code != "" || o.SnapshotTS <= 0 {
+		if o.Kind != "read" || o.Read == nil || o.Read.Mode == "latest" || o.Read.Mode == "diff" || o.NodeErr != "" || o.Code != "" || o.SnapshotTS <= 0 {
 			continue
 		}
 		seen := map[int64]string{}
