@@ -330,6 +330,24 @@ func (s *procStream) Wait(ctx context.Context) (int, error) {
 	return s.cmd.ProcessState.ExitCode(), nil
 }
 
+// exitSignal is the signal that terminated the command, once it has been
+// reaped, if a signal did.
+func (s *procStream) exitSignal() (os.Signal, bool) {
+	select {
+	case <-s.done:
+	default:
+		return nil, false
+	}
+	if s.cmd.ProcessState == nil {
+		return nil, false
+	}
+	ws, ok := s.cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() {
+		return nil, false
+	}
+	return ws.Signal(), true
+}
+
 // reap starts reaping the command, once; done is closed when it has been.
 func (s *procStream) reap() {
 	s.reapOnce.Do(func() {

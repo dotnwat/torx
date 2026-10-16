@@ -44,6 +44,17 @@ type Process interface {
 	Wait(ctx context.Context) (int, error)
 }
 
+// ExitSignal reports the signal that terminated p's command, once Wait has
+// seen it exit, when a signal did and p's backend can tell -- a local
+// node's can. Wait reports any such death as -1; this says whether a
+// crash was a SIGSEGV or a SIGABRT, or a kill from outside the program.
+func ExitSignal(p Process) (os.Signal, bool) {
+	if s, ok := p.(interface{ exitSignal() (os.Signal, bool) }); ok {
+		return s.exitSignal()
+	}
+	return nil, false
+}
+
 // Shutdown stops p gracefully: it sends sig, waits up to grace for the command
 // to exit, and then closes p, which kills whatever is left and reaps it. It
 // returns the command's exit status when the command exited within the grace
