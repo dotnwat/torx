@@ -157,8 +157,8 @@ func TestCollectDirThroughSymlink(t *testing.T) {
 }
 
 // TestCollectDirOddNames collects a directory whose name begins with a dash,
-// which tar would read as an option, and one named with the characters that
-// mean something to the renaming of its members.
+// which tar would read as an option, and one named with characters a shell
+// or a pattern gives meaning, which tar must take as they are.
 func TestCollectDirOddNames(t *testing.T) {
 	ctx := context.Background()
 	n := testNode(t, "n0")

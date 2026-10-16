@@ -13,6 +13,7 @@ package torx
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -100,13 +101,14 @@ const cleanupTimeout = 30 * time.Second
 func collectDir(ctx context.Context, n *Node, a Artifact, dest string) error {
 	archive := path.Join(n.Scratch().Root, ".artifact-"+a.Name)
 	dir := path.Clean(a.Path)
-	// tar runs inside the directory and names the members after it, rather
-	// than archiving it from its parent by name, so that a path whose last
-	// element is a symlink archives the directory it points to, not the
-	// link. The S flag keeps the renaming off symlink targets; the -- keeps
-	// a name beginning with a dash from being read as an option.
-	rename := "s,^\\.," + sedLiteral(path.Base(dir)) + ",S"
-	res, err := n.Exec(ctx, Command("tar", "-C", dir, "-czf", archive, "--transform", rename, "--", "."))
+	// tar is given the directory as name/. from its parent, so that a path
+	// whose last element is a symlink archives the directory it points to,
+	// under the link's name, not the link, and the links inside stay links.
+	// GNU, BSD and busybox tar all take that, and name the members
+	// name/./...; GNU's --transform, which would strip the dot, is GNU's
+	// alone. The -- keeps a name beginning with a dash from being read as an
+	// option.
+	res, err := n.Exec(ctx, Command("tar", "-C", path.Dir(dir), "-czf", archive, "--", path.Base(dir)+"/."))
 	defer func() {
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		defer cancel()
@@ -115,24 +117,27 @@ func collectDir(ctx context.Context, n *Node, a Artifact, dest string) error {
 	if err != nil {
 		return Wrap(ErrService, "collect: archive "+a.Path, err)
 	}
+	var warned error
 	switch {
 	case res.ExitCode == 1:
 		// A file changed as tar read it: a process that outlived its stop
 		// still writes to the directory, or the directory is the scratch
 		// directory, where the archive itself grows. GNU tar exits 1 for
 		// that and writes the archive all the same, which is what a failed
-		// run needs kept: note it, and keep it.
+		// run needs kept: note it, and keep it. BSD tar exits 1 for any
+		// error, so should the archive not be there, tar's word is the error.
+		warned = res.ExitError("tar")
 		Logf(ctx, "warn", "archiving %s on %s: %s", a.Path, n.Name(), strings.TrimSpace(string(res.Stderr)))
 	case res.ExitCode != 0:
 		return Wrap(ErrService, "collect: archive "+a.Path, res.ExitError("tar"))
 	}
-	return n.Get(ctx, archive, dest)
-}
-
-// sedLiteral quotes s to stand for itself in a sed s command delimited by
-// commas.
-func sedLiteral(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `,`, `\,`, `&`, `\&`).Replace(s)
+	if err := n.Get(ctx, archive, dest); err != nil {
+		if warned != nil {
+			return Wrap(ErrService, "collect: archive "+a.Path, fmt.Errorf("%w, and then %w", warned, err))
+		}
+		return err
+	}
+	return nil
 }
 
 // Finalizers is a LIFO stack of cleanup callbacks run on teardown. The zero
