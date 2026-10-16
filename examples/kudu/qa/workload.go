@@ -42,6 +42,12 @@ type op struct {
 	Call   int64  `json:"call"`
 	Return int64  `json:"ret"`
 
+	// Table is the table the operation is on, if not the contended one:
+	// aiTable. Target is the value of the row a delete of it means to
+	// delete, as a scan saw it.
+	Table  string `json:"table,omitempty"`
+	Target string `json:"target,omitempty"`
+
 	// A write's operations, and their results, one each; and the
 	// transaction a write, commit, or rollback is in.
 	Txn     string          `json:"txn,omitempty"`
@@ -75,7 +81,18 @@ type row struct {
 	BadPay bool   `json:"bad_payload,omitempty"`
 	Server int    `json:"s"`             // the server that served it, in the op's Servers
 	Del    bool   `json:"del,omitempty"` // a diff scan's deleted row
+	ID     int64  `json:"id,omitempty"`  // its auto-incrementing id, in aiTable
 }
+
+// aiTable has a non-unique primary key, k, so Kudu adds an
+// auto-incrementing id to it, which the tablet server assigns each row it
+// inserts. Every row's value is unique, and names it.
+const (
+	aiTable = "ai"
+	aiKeys  = 4
+)
+
+func (o op) ai() bool { return o.Table == aiTable }
 
 // payload is the payload of value v: bytes derived from it, of a length
 // derived from it below max, so a read can be checked byte for byte.
@@ -116,6 +133,10 @@ type workload struct {
 	acked  int
 	// seq numbers each client's values, fresh keys, and transactions.
 	seq []int64
+	// ai has clients work aiTable too; aiSeen is the rows each client's
+	// last scan of it saw, for its deletes to pick from.
+	ai     bool
+	aiSeen [][]row
 }
 
 // opWeights are how often a client issues each kind of operation.
@@ -133,6 +154,9 @@ var opWeights = map[string]int{
 	"read-fresh":    1,  // a snapshot scan of the fresh keys
 	"read-past-all": 1,  // a snapshot scan of every key, in the past
 	"read-diff":     2,  // a diff scan of the contended keys between two timestamps in the past
+	"ai-insert":     3,  // an insert into the table of a non-unique key
+	"ai-scan":       2,  // a snapshot scan of it, now or in the past
+	"ai-delete":     1,  // a delete of a row a scan of it saw, by its key and id
 }
 
 func (w *workload) record(o op) int {
@@ -199,7 +223,7 @@ func (w *workload) pastTS(rng *rand.Rand) int64 {
 func (w *workload) run(ctx context.Context, c int, rng *rand.Rand) {
 	kinds, total := []string{}, 0
 	for _, k := range slicesSorted(w.weights) {
-		if w.weights[k] > 0 && (w.txns || (k != "txn" && k != "read-txn")) {
+		if w.weights[k] > 0 && (w.txns || (k != "txn" && k != "read-txn")) && (w.ai || !strings.HasPrefix(k, "ai-")) {
 			kinds = append(kinds, k)
 			total += w.weights[k]
 		}
@@ -287,6 +311,35 @@ func (w *workload) issue(ctx context.Context, c int, rng *rand.Rand, kind string
 		w.txn(ctx, c, rng)
 	case "close-client":
 		_ = cl.Close(ctx)
+	case "ai-insert":
+		v := fmt.Sprintf("a%d-%d", c, w.next(c))
+		w.writeTable(ctx, c, aiTable, "", "", []kudu.Op{{Op: "insert", K: rng.Int64N(aiKeys), V: v}})
+	case "ai-scan":
+		r := kudu.ReadReq{Table: aiTable, Mode: "snapshot"}
+		if rng.IntN(3) == 0 {
+			r.TS = w.pastTS(rng)
+		}
+		o := w.read(ctx, c, r, rng)
+		if o.NodeErr == "" && o.Code == "" {
+			w.mu.Lock()
+			w.aiSeen[c] = o.Rows
+			w.mu.Unlock()
+		}
+	case "ai-delete":
+		w.mu.Lock()
+		seen := slices.Clone(w.aiSeen[c])
+		w.mu.Unlock()
+		if len(seen) == 0 {
+			return
+		}
+		// Mostly the newest rows: deleting the row of the highest id is
+		// what a restarted tablet's counter must survive.
+		slices.SortFunc(seen, func(a, b row) int { return compare(b.ID, a.ID) })
+		x := seen[rng.IntN(len(seen))]
+		if rng.IntN(2) == 0 {
+			x = seen[rng.IntN(min(3, len(seen)))]
+		}
+		w.writeTable(ctx, c, aiTable, "", x.V, []kudu.Op{{Op: "delete", K: x.K, ID: ptr(x.ID)}})
 	}
 }
 
@@ -294,10 +347,19 @@ func ptr[T any](v T) *T { return &v }
 
 // write applies ops, in transaction txn if it is not "", and records it.
 func (w *workload) write(ctx context.Context, c int, txn string, ops []kudu.Op) op {
+	return w.writeTable(ctx, c, "", txn, "", ops)
+}
+
+// writeTable applies ops to table, the contended one if "", and records
+// it; a delete of aiTable records the value of the row it targets.
+func (w *workload) writeTable(ctx context.Context, c int, table, txn, target string, ops []kudu.Op) op {
 	cl := w.clients[c]
-	o := op{Client: c, Kind: "write", Txn: txn, Ops: ops, Call: time.Now().UnixNano(), PropBefore: -1, PropAfter: -1}
+	o := op{Client: c, Kind: "write", Table: table, Target: target, Txn: txn, Ops: ops, Call: time.Now().UnixNano(), PropBefore: -1, PropAfter: -1}
+	if table == "" {
+		table = w.table
+	}
 	cctx, cancel := context.WithTimeout(ctx, w.timeout+15*time.Second)
-	resp, err := cl.Write(cctx, w.table, txn, w.timeout, ops)
+	resp, err := cl.Write(cctx, table, txn, w.timeout, ops)
 	cancel()
 	o.Return = time.Now().UnixNano()
 	if err != nil {
@@ -314,7 +376,12 @@ func (w *workload) write(ctx context.Context, c int, txn string, ops []kudu.Op) 
 // drawn, and records it.
 func (w *workload) read(ctx context.Context, c int, r kudu.ReadReq, rng *rand.Rand) op {
 	cl := w.clients[c]
-	r.Table = w.table
+	table := ""
+	if r.Table == aiTable {
+		table = aiTable
+	} else {
+		r.Table = w.table
+	}
 	r.TimeoutMS = w.timeout.Milliseconds()
 	if rng != nil {
 		if rng.IntN(2) == 0 {
@@ -327,7 +394,7 @@ func (w *workload) read(ctx context.Context, c int, r kudu.ReadReq, rng *rand.Ra
 			r.Replica = ""
 		}
 	}
-	o := op{Client: c, Kind: "read", Read: &r, Call: time.Now().UnixNano(), PropBefore: -1, PropAfter: -1}
+	o := op{Client: c, Kind: "read", Table: table, Read: &r, Call: time.Now().UnixNano(), PropBefore: -1, PropAfter: -1}
 	cctx, cancel := context.WithTimeout(ctx, w.timeout+15*time.Second)
 	resp, err := cl.Read(cctx, r)
 	cancel()
@@ -339,13 +406,16 @@ func (w *workload) read(ctx context.Context, c int, r kudu.ReadReq, rng *rand.Ra
 		o.PropBefore, o.PropAfter = resp.PropagatedBefore, resp.PropagatedAfter
 		for _, x := range resp.Rows {
 			rw := row{K: x.K, Server: x.Server, Del: x.Deleted}
+			if table == aiTable {
+				rw.ID = x.ID
+			}
 			if x.V != nil {
 				rw.V = *x.V
 			}
-			if rw.V != "" && !rw.Del && (x.P == nil || *x.P != payload(rw.V, w.valueSize)) {
+			if table == "" && rw.V != "" && !rw.Del && (x.P == nil || *x.P != payload(rw.V, w.valueSize)) {
 				rw.BadPay = true
 			}
-			rw.BadPay = rw.BadPay || (rw.V == "" && x.P != nil)
+			rw.BadPay = rw.BadPay || (table == "" && rw.V == "" && x.P != nil)
 			o.Rows = append(o.Rows, rw)
 		}
 	}

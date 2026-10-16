@@ -179,6 +179,9 @@ type Op struct {
 	K  int64  `json:"k"`
 	V  string `json:"v,omitempty"`
 	P  string `json:"p,omitempty"`
+	// ID is the auto-incrementing id of the row an update or delete of a
+	// table with a non-unique primary key names.
+	ID *int64 `json:"id,omitempty"`
 }
 
 // OpResult is Kudu's answer to one operation of a write.
@@ -241,6 +244,9 @@ type Row struct {
 	Server int
 	// Deleted marks a row a diff scan returns as deleted.
 	Deleted bool
+	// ID is the row's auto-incrementing id, in a table with a non-unique
+	// primary key; -1 in any other.
+	ID int64
 }
 
 // UnmarshalJSON reads a row from kudu-node's [k, v, p].
@@ -249,8 +255,11 @@ func (r *Row) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &a); err != nil {
 		return err
 	}
-	if len(a) != 5 {
+	if len(a) != 6 {
 		return fmt.Errorf("kudu: row of %d columns", len(a))
+	}
+	if err := json.Unmarshal(a[5], &r.ID); err != nil {
+		return err
 	}
 	if err := json.Unmarshal(a[3], &r.Server); err != nil {
 		return err
@@ -320,6 +329,9 @@ type Table struct {
 	PayloadEncoding string            `json:"payload_encoding,omitempty"`
 	Compression     string            `json:"compression,omitempty"`
 	ExtraConfigs    map[string]string `json:"extra_configs,omitempty"`
+	// NonUnique makes a table of a non-unique key, k, and a value, v:
+	// Kudu adds an auto-incrementing id to its primary key.
+	NonUnique bool `json:"non_unique,omitempty"`
 }
 
 // CreateTable creates table t.

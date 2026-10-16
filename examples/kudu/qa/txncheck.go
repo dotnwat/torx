@@ -82,7 +82,7 @@ func txnCheck(hist []op, final int) []anomaly {
 	seen := map[string][]sighting{}
 	var bad []anomaly
 	for _, o := range hist {
-		if o.Kind != "read" || o.Read == nil || o.Read.Mode != "snapshot" || o.NodeErr != "" || o.Code != "" || o.SnapshotTS <= 0 {
+		if o.Kind != "read" || o.ai() || o.Read == nil || o.Read.Mode != "snapshot" || o.NodeErr != "" || o.Code != "" || o.SnapshotTS <= 0 {
 			continue
 		}
 		lo, hi := int64(0), keyLimit

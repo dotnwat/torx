@@ -194,6 +194,14 @@ public final class KuduNode {
         new ColumnSchema.ColumnSchemaBuilder("p", Type.STRING).nullable(true).encoding(penc).compressionAlgorithm(comp).build()));
   }
 
+  // A table with a non-unique primary key: k, and the auto-incrementing id
+  // Kudu adds, which the tablet server assigns each row it inserts.
+  private static Schema nonUniqueSchema() {
+    return new Schema(List.of(
+        new ColumnSchema.ColumnSchemaBuilder("k", Type.INT64).nonUniqueKey(true).build(),
+        new ColumnSchema.ColumnSchemaBuilder("v", Type.STRING).nullable(true).build()));
+  }
+
   private static Object createTable(Map<String, Object> req) throws Exception {
     KuduClient c = client(req);
     String table = str(req, "table", null);
@@ -202,7 +210,7 @@ public final class KuduNode {
     if (buckets > 1) {
       o.addHashPartitions(List.of("k"), buckets);
     }
-    Schema s = schema(req);
+    Schema s = Boolean.TRUE.equals(req.get("non_unique")) ? nonUniqueSchema() : schema(req);
     o.setRangePartitionColumns(List.of("k"));
     List<Object> splits = list(req, "range_splits");
     for (Object split : splits) {
@@ -311,10 +319,16 @@ public final class KuduNode {
       default -> throw new BadRequest("unknown op " + kind);
     };
     PartialRow r = op.getRow();
+    Schema s = t.getSchema();
     r.addLong("k", num(o, "k", 0));
+    if (o.containsKey("id")) {
+      r.addLong(Schema.getAutoIncrementingColumnName(), num(o, "id", 0));
+    }
     if (!kind.startsWith("delete")) {
       r.addString("v", str(o, "v", ""));
-      r.addString("p", str(o, "p", ""));
+      if (s.hasColumn("p")) {
+        r.addString("p", str(o, "p", ""));
+      }
     }
     return op;
   }
@@ -432,9 +446,12 @@ public final class KuduNode {
         case "diff" -> b.diffScan(num(req, "start_ts", 0), ts);
         default -> throw new BadRequest("unknown read mode " + mode);
       }
+      boolean auto = t.getSchema().hasAutoIncrementingColumn();
       if (!mode.equals("diff")) {
         // A diff scan projects every column and IS_DELETED itself.
-        b.setProjectedColumnNames(List.of("k", "v", "p"));
+        b.setProjectedColumnNames(auto
+            ? List.of("k", "v", Schema.getAutoIncrementingColumnName())
+            : List.of("k", "v", "p"));
         if (ts > 0) {
           b.snapshotTimestampRaw(ts);
         }
@@ -476,12 +493,13 @@ public final class KuduNode {
         }
         while (it.hasNext()) {
           RowResult r = it.next();
-          List<Object> row = new ArrayList<>(5);
+          List<Object> row = new ArrayList<>(6);
           row.add(r.getLong("k"));
           row.add(r.isNull("v") ? null : r.getString("v"));
-          row.add(r.isNull("p") ? null : r.getString("p"));
+          row.add(auto || r.isNull("p") ? null : r.getString("p"));
           row.add(si);
           row.add(r.hasIsDeleted() && r.isDeleted());
+          row.add(auto ? r.getLong(Schema.getAutoIncrementingColumnName()) : -1L);
           rows.add(row);
         }
       }

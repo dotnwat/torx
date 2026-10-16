@@ -188,7 +188,7 @@ func keyHistories(hist []op) (map[int64][]kvOp, []anomaly) {
 	written := map[int64]bool{}
 	var out []kvOp
 	for _, o := range hist {
-		if o.Kind != "write" || o.Txn != "" {
+		if o.Kind != "write" || o.Txn != "" || o.ai() {
 			continue
 		}
 		for i, w := range o.Ops {
@@ -217,7 +217,7 @@ func keyHistories(hist []op) (map[int64][]kvOp, []anomaly) {
 		}
 	}
 	for _, o := range hist {
-		if o.Kind != "read" || o.Read == nil || o.Read.Mode == "latest" || o.Read.Mode == "diff" || o.NodeErr != "" || o.Code != "" || o.SnapshotTS <= 0 {
+		if o.Kind != "read" || o.ai() || o.Read == nil || o.Read.Mode == "latest" || o.Read.Mode == "diff" || o.NodeErr != "" || o.Code != "" || o.SnapshotTS <= 0 {
 			continue
 		}
 		seen := map[int64]string{}
@@ -414,12 +414,12 @@ func opChecks(hist []op, valuesWritten map[string]bool) []anomaly {
 				bad = append(bad, anomaly{Kind: "snapshot-moved", Ops: []int{o.Index},
 					Detail: fmt.Sprintf("a read asked for snapshot %d and read at %d", r.TS, o.SnapshotTS)})
 			}
-			seen := map[int64]bool{}
+			seen := map[[2]int64]bool{}
 			for _, x := range o.Rows {
-				if seen[x.K] {
-					bad = append(bad, anomaly{Kind: "duplicate-row", Key: ptr(x.K), Ops: []int{o.Index}, Detail: "a scan returned the key twice"})
+				if seen[[2]int64{x.K, x.ID}] {
+					bad = append(bad, anomaly{Kind: "duplicate-row", Key: ptr(x.K), Ops: []int{o.Index}, Detail: fmt.Sprintf("a scan returned the key (id %d) twice", x.ID)})
 				}
-				seen[x.K] = true
+				seen[[2]int64{x.K, x.ID}] = true
 				if !inRead(r, x.K) {
 					bad = append(bad, anomaly{Kind: "row-out-of-range", Key: ptr(x.K), Ops: []int{o.Index}, Detail: "a scan returned a key it did not ask for"})
 				}

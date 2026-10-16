@@ -36,6 +36,7 @@ const (
 	paramFaults    = "faults"        // comma-separated fault names, or "all" and exclusions ("all,-pause")
 	paramConfig    = "config"        // "random": flags drawn from the seed; "default": Kudu's
 	paramTxns      = "txns"          // enable transactions, and have clients run them
+	paramAI        = "ai"            // have clients work a table of a non-unique key too, whose ids Kudu assigns
 	paramJVMs      = "jvms"          // kudu-nodes the clients spread over
 	paramValueSize = "value-size"    // the largest payload written, in bytes
 	paramTimeout   = "timeout"       // each client operation's timeout, in milliseconds
@@ -134,6 +135,7 @@ type chaosJob struct {
 	faults    []string
 	random    bool
 	txns      bool
+	ai        bool
 	jvms      int
 	valueSize int
 	timeout   time.Duration
@@ -174,7 +176,7 @@ func (*chaosJob) ResolveParams(p torx.Params) (torx.Params, error) {
 	out := torx.Params{
 		paramDuration: defaultDuration, paramClients: 8, paramKeys: 24, paramNodes: 5, paramMasters: 3,
 		paramReplicas: 3, paramBuckets: 3, paramDataDirs: 2, paramFaults: "all", paramConfig: "random",
-		paramTxns: true, paramJVMs: 2, paramValueSize: 512, paramTimeout: 10_000, paramDiskSize: 1024,
+		paramTxns: true, paramAI: true, paramJVMs: 2, paramValueSize: 512, paramTimeout: 10_000, paramDiskSize: 1024,
 		paramNemeses: 1, paramAllow: "deleted-rowset-gc,stale-read,exit-under-disk-full-data", paramTSFlags: "", paramMFlags: "", paramColumns: "",
 	}
 	for k, v := range p {
@@ -234,7 +236,7 @@ func (*chaosJob) ResolveParams(p torx.Params) (torx.Params, error) {
 				return nil, fmt.Errorf("%s must be random or default, got %v", k, v)
 			}
 			out[k] = v
-		case paramTxns:
+		case paramTxns, paramAI:
 			b, ok := v.(bool)
 			if !ok {
 				return nil, fmt.Errorf("%s must be a boolean, got %v", k, v)
@@ -300,6 +302,7 @@ func (j *chaosJob) Declare(jc *torx.JobContext) {
 	j.faults = parseFaults(p.String(paramFaults, "all"))
 	j.random = p.String(paramConfig, "random") == "random"
 	j.txns = p.Bool(paramTxns, true)
+	j.ai = p.Bool(paramAI, true)
 	j.jvms = p.Int(paramJVMs, 2)
 	j.valueSize = p.Int(paramValueSize, 512)
 	j.timeout = time.Duration(p.Int(paramTimeout, 10_000)) * time.Millisecond
@@ -445,12 +448,22 @@ func (j *chaosJob) Run(ctx context.Context, jc *torx.JobContext) error {
 	if err := res.Err(); err != nil {
 		return fmt.Errorf("create table: %w", err)
 	}
+	if j.ai {
+		res, err := admin.CreateTable(ctx, kudu.Table{Name: aiTable, NonUnique: true, HashBuckets: 2, Replicas: j.replicas}, 2*time.Minute)
+		if err != nil {
+			return err
+		}
+		if err := res.Err(); err != nil {
+			return fmt.Errorf("create table %s: %w", aiTable, err)
+		}
+	}
 	torx.Logf(ctx, "info", "config: common %v; tserver %v; master %v; table %+v; faults %v", j.flags["common"], j.flags[kudu.TServer], j.flags[kudu.Master], j.table, j.faults)
 
 	urls := j.client.URLs()
 	w := &workload{
 		keys: j.keys, valueSize: j.valueSize, table: tableName, timeout: j.timeout, txns: j.txns,
 		weights: opWeights, seq: make([]int64, j.clients), rng: jc.Rand("workload"),
+		ai: j.ai, aiSeen: make([][]row, j.clients),
 	}
 	for c := range j.clients {
 		w.clients = append(w.clients, kudu.NewClient(urls[c%len(urls)], fmt.Sprintf("c%d", c)))
@@ -500,6 +513,9 @@ func (j *chaosJob) Run(ctx context.Context, jc *torx.JobContext) error {
 	if finalTS > 0 {
 		for c := range finalClients {
 			fw.read(ctx, c, kudu.ReadReq{Mode: "snapshot", TS: finalTS + 1, Replica: "closest"}, nil)
+			if j.ai {
+				fw.read(ctx, c, kudu.ReadReq{Table: aiTable, Mode: "snapshot", TS: finalTS + 1, Replica: "closest"}, nil)
+			}
 		}
 	} else {
 		j.note(anomaly{Kind: "no-final-read", Detail: "the cluster could not be read after every fault healed"})
@@ -542,6 +558,17 @@ func (j *chaosJob) check(ctx context.Context, jc *torx.JobContext, hist []op, fi
 	bad = append(bad, opChecks(hist, possiblyWritten(hist))...)
 	bad = append(bad, txnCheck(hist, final)...)
 	bad = append(bad, diffCheck(hist)...)
+	if j.ai {
+		keys := make([]int64, aiKeys)
+		for i := range keys {
+			keys[i] = int64(i)
+		}
+		tablets, err := kudu.NewClient(j.client.URL(), "layout").Partition(ctx, aiTable, keys)
+		if err != nil {
+			j.note(anomaly{Kind: "no-layout", Detail: fmt.Sprintf("locating %s's tablets: %v", aiTable, err)})
+		}
+		bad = append(bad, aiCheck(ctx, hist, tablets, checkBudget)...)
+	}
 	j.mu.Lock()
 	bad = append(bad, j.notes...)
 	events := slices.Clone(j.events)

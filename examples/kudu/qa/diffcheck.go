@@ -36,7 +36,7 @@ func replays(hist []op) map[int64]replay {
 	writes := map[int64][]w{}
 	unknown := map[int64]bool{}
 	for _, o := range hist {
-		if o.Kind != "write" || o.Txn != "" {
+		if o.Kind != "write" || o.Txn != "" || o.ai() {
 			continue
 		}
 		for i, x := range o.Ops {
