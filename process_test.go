@@ -401,20 +401,22 @@ func TestExitSignal(t *testing.T) {
 		want   os.Signal
 	}{
 		{"kill -KILL $$", syscall.SIGKILL},
-		{"kill -SEGV $$", syscall.SIGSEGV},
+		{"kill -TERM $$", syscall.SIGTERM},
 		{"exit 3", nil},
 	} {
-		p, err := n.Stream(ctx, Command("sh", "-c", tc.script))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := p.Wait(ctx); err != nil {
-			t.Fatal(err)
-		}
-		sig, ok := ExitSignal(p)
-		if ok != (tc.want != nil) || sig != tc.want {
-			t.Errorf("%s: ExitSignal = %v, %v; want %v", tc.script, sig, ok, tc.want)
-		}
-		_ = p.Close()
+		t.Run(tc.script, func(t *testing.T) {
+			p, err := n.Stream(ctx, Command("sh", "-c", tc.script))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			if _, err := p.Wait(ctx); err != nil {
+				t.Fatal(err)
+			}
+			sig, ok := ExitSignal(p)
+			if ok != (tc.want != nil) || sig != tc.want {
+				t.Errorf("ExitSignal = %v, %v; want %v", sig, ok, tc.want)
+			}
+		})
 	}
 }

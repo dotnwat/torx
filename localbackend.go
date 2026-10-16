@@ -330,9 +330,9 @@ func (s *procStream) Wait(ctx context.Context) (int, error) {
 	return s.cmd.ProcessState.ExitCode(), nil
 }
 
-// exitSignal is the signal that terminated the command, once it has been
-// reaped, if a signal did.
-func (s *procStream) exitSignal() (os.Signal, bool) {
+// ExitSignal implements ExitSignaler: the signal that terminated the
+// command, once it has been reaped, if a signal did.
+func (s *procStream) ExitSignal() (os.Signal, bool) {
 	select {
 	case <-s.done:
 	default:

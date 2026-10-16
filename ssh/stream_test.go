@@ -669,3 +669,34 @@ func eventuallyDead(pid int, timeout time.Duration) bool {
 	}
 	return !processAlive(pid)
 }
+
+// TestStreamExitSignal reports which signal killed a command, from the name
+// the node's exit-signal report carries, and none for a command that exited.
+func TestStreamExitSignal(t *testing.T) {
+	b := dialBackend(t)
+	for _, tc := range []struct {
+		script string
+		want   os.Signal
+	}{
+		{"kill -KILL $$", syscall.SIGKILL},
+		{"kill -TERM $$", syscall.SIGTERM},
+		{"exit 3", nil},
+	} {
+		t.Run(tc.script, func(t *testing.T) {
+			stream, err := b.Stream(context.Background(), torx.Command("sh", "-c", tc.script))
+			if err != nil {
+				t.Fatalf("stream: %v", err)
+			}
+			defer stream.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := stream.Wait(ctx); err != nil {
+				t.Fatalf("Wait: %v", err)
+			}
+			sig, ok := torx.ExitSignal(stream)
+			if ok != (tc.want != nil) || sig != tc.want {
+				t.Errorf("ExitSignal = %v, %v; want %v", sig, ok, tc.want)
+			}
+		})
+	}
+}
