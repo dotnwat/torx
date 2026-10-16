@@ -155,7 +155,6 @@ type chaosJob struct {
 	nemeses   int
 	allow     map[string]bool
 
-	jc    *torx.JobContext
 	flags map[string]map[string]string // role -> flags drawn
 	table kudu.Table
 
@@ -451,7 +450,6 @@ func (j *chaosJob) Setup(ctx context.Context, jc *torx.JobContext) error {
 }
 
 func (j *chaosJob) Run(ctx context.Context, jc *torx.JobContext) error {
-	j.jc = jc
 	admin := kudu.NewClient(j.client.URL(), "admin")
 	if err := waitTServers(ctx, j.cluster, j.client.Node(), j.nodes); err != nil {
 		return err

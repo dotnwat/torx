@@ -6,8 +6,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -222,7 +222,7 @@ func (w *workload) pastTS(rng *rand.Rand) int64 {
 // run issues client c's operations until ctx ends.
 func (w *workload) run(ctx context.Context, c int, rng *rand.Rand) {
 	kinds, total := []string{}, 0
-	for _, k := range slicesSorted(w.weights) {
+	for _, k := range slices.Sorted(maps.Keys(w.weights)) {
 		if w.weights[k] > 0 && (w.txns || (k != "txn" && k != "read-txn")) && (w.ai || !strings.HasPrefix(k, "ai-")) {
 			kinds = append(kinds, k)
 			total += w.weights[k]
@@ -240,15 +240,6 @@ func (w *workload) run(ctx context.Context, c int, rng *rand.Rand) {
 		}
 		w.issue(ctx, c, rng, kind)
 	}
-}
-
-func slicesSorted(m map[string]int) []string {
-	var out []string
-	for k := range m {
-		out = append(out, k)
-	}
-	slices.Sort(out)
-	return out
 }
 
 var writeOps = []string{"insert", "upsert", "update", "delete", "insert_ignore", "update_ignore", "delete_ignore", "upsert_ignore"}
@@ -489,5 +480,3 @@ func (w *workload) txn(ctx context.Context, c int, rng *rand.Rand) {
 	}
 	w.record(e)
 }
-
-var errFailed = errors.New("failed")

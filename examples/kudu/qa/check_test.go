@@ -26,7 +26,7 @@ func TestCheckHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var hist []op
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64<<20), 64<<20)
