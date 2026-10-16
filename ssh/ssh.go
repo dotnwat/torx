@@ -625,16 +625,18 @@ func runToCompletion(ctx context.Context, sess *cryptossh.Session, line string) 
 	if err := sess.Start(line); err != nil {
 		return err
 	}
-	done := make(chan error, 1)
-	go func() { done <- sess.Wait() }()
+	var waitErr error
+	done := make(chan struct{})
+	go func() { waitErr = sess.Wait(); close(done) }()
 	select {
 	case <-ctx.Done():
+		// The session is killed: ctx says why, not its wait.
 		_ = sess.Signal(cryptossh.SIGKILL)
 		_ = sess.Close()
 		<-done
 		return ctx.Err()
-	case err := <-done:
-		return err
+	case <-done:
+		return waitErr
 	}
 }
 
