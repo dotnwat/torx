@@ -455,12 +455,12 @@ func (c *Client) call(ctx context.Context, path string, req, out any) error {
 	}
 	resp, err := c.HTTP.Do(hreq)
 	if err != nil {
-		return fmt.Errorf("%w: %s: %v", ErrNode, path, err)
+		return fmt.Errorf("%w: %s: %w", ErrNode, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("%w: %s: %v", ErrNode, path, err)
+		return fmt.Errorf("%w: %s: %w", ErrNode, path, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		var e struct {

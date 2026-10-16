@@ -200,7 +200,7 @@ func keyHistories(hist []op) (map[int64][]kvOp, []anomaly) {
 			in := kvIn{Kind: w.Op, V: w.V, Op: o.Index}
 			if res.code == "OK" || definite(res.code) {
 				if res.ts <= 0 {
-					bad = append(bad, anomaly{Kind: "no-timestamp", Key: ptr(w.K), Ops: []int{o.Index},
+					bad = append(bad, anomaly{Kind: "no-timestamp", Key: new(w.K), Ops: []int{o.Index},
 						Detail: fmt.Sprintf("%s answered %s with no timestamp", w.Op, res.code)})
 					continue
 				}
@@ -354,7 +354,7 @@ func checkKeys(ctx context.Context, byKey map[int64][]kvOp, budget time.Duration
 		if kind == "stale-read" {
 			detail = "only reads at snapshots the server chose break the key's order by Kudu's timestamps: "
 		}
-		bad = append(bad, anomaly{Kind: kind, Key: ptr(k), Ops: idx, Detail: detail + strings.Join(lines, "; ")})
+		bad = append(bad, anomaly{Kind: kind, Key: new(k), Ops: idx, Detail: detail + strings.Join(lines, "; ")})
 	}
 	return bad, unknown
 }
@@ -397,7 +397,7 @@ func opChecks(hist []op, valuesWritten map[string]bool) []anomaly {
 			}
 			for i, r := range o.Results {
 				if r.Code == "OK" && o.PropBefore >= 0 && r.TS <= o.PropBefore {
-					bad = append(bad, anomaly{Kind: "write-before-propagated", Key: ptr(o.Ops[i].K), Ops: []int{o.Index},
+					bad = append(bad, anomaly{Kind: "write-before-propagated", Key: new(o.Ops[i].K), Ops: []int{o.Index},
 						Detail: fmt.Sprintf("a write got timestamp %d, not past the client's propagated %d", r.TS, o.PropBefore)})
 				}
 			}
@@ -417,17 +417,17 @@ func opChecks(hist []op, valuesWritten map[string]bool) []anomaly {
 			seen := map[[2]int64]bool{}
 			for _, x := range o.Rows {
 				if seen[[2]int64{x.K, x.ID}] {
-					bad = append(bad, anomaly{Kind: "duplicate-row", Key: ptr(x.K), Ops: []int{o.Index}, Detail: fmt.Sprintf("a scan returned the key (id %d) twice", x.ID)})
+					bad = append(bad, anomaly{Kind: "duplicate-row", Key: new(x.K), Ops: []int{o.Index}, Detail: fmt.Sprintf("a scan returned the key (id %d) twice", x.ID)})
 				}
 				seen[[2]int64{x.K, x.ID}] = true
 				if !inRead(r, x.K) {
-					bad = append(bad, anomaly{Kind: "row-out-of-range", Key: ptr(x.K), Ops: []int{o.Index}, Detail: "a scan returned a key it did not ask for"})
+					bad = append(bad, anomaly{Kind: "row-out-of-range", Key: new(x.K), Ops: []int{o.Index}, Detail: "a scan returned a key it did not ask for"})
 				}
 				if x.BadPay {
-					bad = append(bad, anomaly{Kind: "corrupt-payload", Key: ptr(x.K), Ops: []int{o.Index}, Detail: fmt.Sprintf("value %s came with a payload it did not write", x.V)})
+					bad = append(bad, anomaly{Kind: "corrupt-payload", Key: new(x.K), Ops: []int{o.Index}, Detail: fmt.Sprintf("value %s came with a payload it did not write", x.V)})
 				}
 				if r.Mode == "latest" && x.V != "" && !valuesWritten[x.V] {
-					bad = append(bad, anomaly{Kind: "latest-read-unwritten", Key: ptr(x.K), Ops: []int{o.Index},
+					bad = append(bad, anomaly{Kind: "latest-read-unwritten", Key: new(x.K), Ops: []int{o.Index},
 						Detail: fmt.Sprintf("a READ_LATEST read saw %s, which no write that could have taken effect wrote", x.V)})
 				}
 			}

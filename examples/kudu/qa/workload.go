@@ -271,13 +271,13 @@ func (w *workload) issue(ctx context.Context, c int, rng *rand.Rand, kind string
 		v := fmt.Sprintf("c%d-%d", c, w.next(c))
 		w.write(ctx, c, "", []kudu.Op{{Op: "insert", K: k, V: v, P: payload(v, w.valueSize)}})
 	case "read-now":
-		w.read(ctx, c, kudu.ReadReq{Mode: "snapshot", Lo: ptr(int64(0)), Hi: ptr(int64(w.keys))}, rng)
+		w.read(ctx, c, kudu.ReadReq{Mode: "snapshot", Lo: new(int64(0)), Hi: new(int64(w.keys))}, rng)
 	case "read-past":
 		ts := w.pastTS(rng)
 		if ts == 0 {
 			return
 		}
-		w.read(ctx, c, kudu.ReadReq{Mode: "snapshot", TS: ts, Lo: ptr(int64(0)), Hi: ptr(int64(w.keys))}, rng)
+		w.read(ctx, c, kudu.ReadReq{Mode: "snapshot", TS: ts, Lo: new(int64(0)), Hi: new(int64(w.keys))}, rng)
 	case "read-past-all":
 		ts := w.pastTS(rng)
 		if ts == 0 {
@@ -289,11 +289,11 @@ func (w *workload) issue(ctx context.Context, c int, rng *rand.Rand, kind string
 		if a == 0 || a == b {
 			return
 		}
-		w.read(ctx, c, kudu.ReadReq{Mode: "diff", StartTS: min(a, b), TS: max(a, b), Lo: ptr(int64(0)), Hi: ptr(int64(w.keys))}, rng)
+		w.read(ctx, c, kudu.ReadReq{Mode: "diff", StartTS: min(a, b), TS: max(a, b), Lo: new(int64(0)), Hi: new(int64(w.keys))}, rng)
 	case "read-fresh":
-		w.read(ctx, c, kudu.ReadReq{Mode: "snapshot", Lo: ptr(freshBase), Hi: ptr(txnBase)}, rng)
+		w.read(ctx, c, kudu.ReadReq{Mode: "snapshot", Lo: new(freshBase), Hi: new(txnBase)}, rng)
 	case "read-txn":
-		w.read(ctx, c, kudu.ReadReq{Mode: "snapshot", Lo: ptr(txnBase), Hi: ptr(keyLimit)}, rng)
+		w.read(ctx, c, kudu.ReadReq{Mode: "snapshot", Lo: new(txnBase), Hi: new(keyLimit)}, rng)
 	case "read-ryw":
 		w.read(ctx, c, kudu.ReadReq{Mode: "ryw", Keys: []int64{rng.Int64N(int64(w.keys))}}, rng)
 	case "read-latest":
@@ -330,11 +330,9 @@ func (w *workload) issue(ctx context.Context, c int, rng *rand.Rand, kind string
 		if rng.IntN(2) == 0 {
 			x = seen[rng.IntN(min(3, len(seen)))]
 		}
-		w.writeTable(ctx, c, aiTable, "", x.V, []kudu.Op{{Op: "delete", K: x.K, ID: ptr(x.ID)}})
+		w.writeTable(ctx, c, aiTable, "", x.V, []kudu.Op{{Op: "delete", K: x.K, ID: new(x.ID)}})
 	}
 }
-
-func ptr[T any](v T) *T { return &v }
 
 // write applies ops, in transaction txn if it is not "", and records it.
 func (w *workload) write(ctx context.Context, c int, txn string, ops []kudu.Op) op {

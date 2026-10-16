@@ -41,7 +41,7 @@ func aiCheck(ctx context.Context, hist []op, keyTablets []string, budget time.Du
 			case !ok:
 				first[x.V] = s
 			case f.k != s.k || f.id != s.id:
-				bad = append(bad, anomaly{Kind: "auto-id-changed", Key: ptr(x.K), Ops: []int{f.op, o.Index},
+				bad = append(bad, anomaly{Kind: "auto-id-changed", Key: new(x.K), Ops: []int{f.op, o.Index},
 					Detail: fmt.Sprintf("row %s was key %d id %d, and later key %d id %d", x.V, f.k, f.id, s.k, s.id)})
 				first[x.V] = s
 			}

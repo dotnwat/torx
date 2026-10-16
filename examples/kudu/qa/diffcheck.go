@@ -92,16 +92,16 @@ func diffCheck(hist []op) []anomaly {
 			x, returned := got[k]
 			switch {
 			case !returned && before != after:
-				bad = append(bad, anomaly{Kind: "diff-missing", Key: ptr(k), Ops: []int{o.Index},
+				bad = append(bad, anomaly{Kind: "diff-missing", Key: new(k), Ops: []int{o.Index},
 					Detail: fmt.Sprintf("a diff scan from %d to %d left out a key that went from %s to %s", s, e, show(before), show(after))})
 			case returned && before == after && before != "":
-				bad = append(bad, anomaly{Kind: "diff-extra", Key: ptr(k), Ops: []int{o.Index},
+				bad = append(bad, anomaly{Kind: "diff-extra", Key: new(k), Ops: []int{o.Index},
 					Detail: fmt.Sprintf("a diff scan from %d to %d returned a key that held %s throughout", s, e, before)})
 			case returned && x.Del && after != "":
-				bad = append(bad, anomaly{Kind: "diff-wrong", Key: ptr(k), Ops: []int{o.Index},
+				bad = append(bad, anomaly{Kind: "diff-wrong", Key: new(k), Ops: []int{o.Index},
 					Detail: fmt.Sprintf("a diff scan from %d to %d returned as deleted a key that held %s at its end", s, e, after)})
 			case returned && !x.Del && x.V != after:
-				bad = append(bad, anomaly{Kind: "diff-wrong", Key: ptr(k), Ops: []int{o.Index},
+				bad = append(bad, anomaly{Kind: "diff-wrong", Key: new(k), Ops: []int{o.Index},
 					Detail: fmt.Sprintf("a diff scan from %d to %d returned %s for a key that held %s at its end", s, e, show(x.V), show(after))})
 			}
 		}

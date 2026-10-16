@@ -622,7 +622,9 @@ func (j *chaosJob) check(ctx context.Context, jc *torx.JobContext, hist []op, fi
 		}
 		failing = append(failing, a.String())
 	}
-	jc.Record(map[string]any{"ops": counts, "anomalies": len(bad), "unknown_keys": len(unknown), "faults": len(events)})
+	if err := jc.Record(map[string]any{"ops": counts, "anomalies": len(bad), "unknown_keys": len(unknown), "faults": len(events)}); err != nil {
+		torx.Logf(ctx, "warn", "recording the run's counts: %v", err)
+	}
 	summary := fmt.Sprintf("%d ops (%d writes, %d reads), %d fault events, %d keys checked (%d undecided)",
 		len(hist), counts["write"], counts["read"], len(events), len(byKey), len(unknown))
 	if len(failing) > 0 {

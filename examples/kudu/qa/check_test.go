@@ -123,7 +123,7 @@ func TestDiffCheck(t *testing.T) {
 		{Index: 2, Kind: "write", Ops: []kudu.Op{{Op: "delete", K: 1}}, Results: []kudu.OpResult{{Code: "OK", TS: 30}}},
 	}
 	diff := func(s, e int64, rows ...row) op {
-		return op{Index: 9, Kind: "read", Read: &kudu.ReadReq{Mode: "diff", StartTS: s, TS: e, Lo: ptr(int64(0)), Hi: ptr(int64(2))}, Rows: rows}
+		return op{Index: 9, Kind: "read", Read: &kudu.ReadReq{Mode: "diff", StartTS: s, TS: e, Lo: new(int64(0)), Hi: new(int64(2))}, Rows: rows}
 	}
 	for _, tc := range []struct {
 		name string

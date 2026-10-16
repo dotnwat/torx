@@ -102,7 +102,7 @@ func txnCheck(hist []op, final int) []anomaly {
 			}
 			t := owner[r.K]
 			if t == nil {
-				bad = append(bad, anomaly{Kind: "txn-phantom", Key: ptr(r.K), Ops: []int{o.Index},
+				bad = append(bad, anomaly{Kind: "txn-phantom", Key: new(r.K), Ops: []int{o.Index},
 					Detail: fmt.Sprintf("a snapshot held %s, which no transaction inserted", r.V)})
 				continue
 			}
@@ -115,7 +115,7 @@ func txnCheck(hist []op, final int) []anomaly {
 			rows := got[t]
 			for k, v := range rows {
 				if v != t.rows[k] {
-					bad = append(bad, anomaly{Kind: "txn-wrong-value", Key: ptr(k), Txn: t.id, Ops: append(slices.Clone(t.ops), o.Index),
+					bad = append(bad, anomaly{Kind: "txn-wrong-value", Key: new(k), Txn: t.id, Ops: append(slices.Clone(t.ops), o.Index),
 						Detail: fmt.Sprintf("a snapshot held %s where the transaction inserted %s", v, t.rows[k])})
 				}
 			}
