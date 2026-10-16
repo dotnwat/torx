@@ -102,6 +102,18 @@ var knownIssues = map[string]bool{
 	// tablet's directories has room: the flush that hits ENOSPC is not
 	// retried elsewhere, and its failure is fatal (KUDU-2404).
 	"exit-under-disk-full-data": true,
+	// A tablet server's bootstrap replays committed inserts into a table of
+	// a non-unique key from a counter it takes from the rows on disk, not
+	// the one the leader logged with each write, so after the row of the
+	// highest id was deleted a restart renumbers rows, and replicas
+	// disagree. Allowed, the anomalies of aiTable it explains are warnings.
+	"auto-id-restart": true,
+}
+
+// issueKinds are the kinds of anomaly an allowed issue covers, for an issue
+// that is not a kind of its own.
+var issueKinds = map[string][]string{
+	"auto-id-restart": {"auto-id-changed", "auto-id-reused", "auto-id-order", "ai-timestamp-order", "replica-divergence-ai"},
 }
 
 // offByDefault are faults "all" leaves out; a run names them to inject
@@ -177,7 +189,7 @@ func (*chaosJob) ResolveParams(p torx.Params) (torx.Params, error) {
 		paramDuration: defaultDuration, paramClients: 8, paramKeys: 24, paramNodes: 5, paramMasters: 3,
 		paramReplicas: 3, paramBuckets: 3, paramDataDirs: 2, paramFaults: "all", paramConfig: "random",
 		paramTxns: true, paramAI: true, paramJVMs: 2, paramValueSize: 512, paramTimeout: 10_000, paramDiskSize: 1024,
-		paramNemeses: 1, paramAllow: "deleted-rowset-gc,stale-read,exit-under-disk-full-data", paramTSFlags: "", paramMFlags: "", paramColumns: "",
+		paramNemeses: 1, paramAllow: "deleted-rowset-gc,stale-read,exit-under-disk-full-data,auto-id-restart", paramTSFlags: "", paramMFlags: "", paramColumns: "",
 	}
 	for k, v := range p {
 		switch k {
@@ -309,9 +321,12 @@ func (j *chaosJob) Declare(jc *torx.JobContext) {
 	j.diskSize = int64(p.Int(paramDiskSize, 1024)) << 20
 	j.nemeses = p.Int(paramNemeses, 1)
 	j.allow = map[string]bool{}
-	for a := range strings.SplitSeq(p.String(paramAllow, "deleted-rowset-gc,stale-read,exit-under-disk-full-data"), ",") {
+	for a := range strings.SplitSeq(p.String(paramAllow, "deleted-rowset-gc,stale-read,exit-under-disk-full-data,auto-id-restart"), ",") {
 		if a != "" {
 			j.allow[a] = true
+			for _, k := range issueKinds[a] {
+				j.allow[k] = true
+			}
 		}
 	}
 	j.drawConfig(jc.Rand("config"))
@@ -526,8 +541,11 @@ func (j *chaosJob) Run(ctx context.Context, jc *torx.JobContext) error {
 		out, err := kudu.Tool(ctx, j.client.Node(), "cluster", "ksck", j.cluster.MasterAddrs(), "-checksum_scan", "-checksum_timeout_sec=300")
 		if err != nil {
 			kind := "ksck-failed"
-			if strings.Contains(out, "Checksum mismatch") || strings.Contains(out, "checksum mismatch") || strings.Contains(err.Error(), "mismatch") {
+			if bad := mismatched(out); len(bad) > 0 {
 				kind = "replica-divergence"
+				if j.ai && j.onlyTable(ctx, admin, aiTable, bad) {
+					kind = "replica-divergence-ai"
+				}
 			}
 			j.note(anomaly{Kind: kind, Detail: fmt.Sprintf("%v\n%s", err, lastLines(out, 60))})
 		}
@@ -617,6 +635,48 @@ func (j *chaosJob) check(ctx context.Context, jc *torx.JobContext, hist []op, fi
 	}
 	jc.SetSummary(summary)
 	return nil
+}
+
+// mismatched are the tablets whose replicas ksck's checksum scan found to
+// disagree: those with more than one checksum among their replicas' lines,
+// "T <tablet> P <replica> (<addr>): Checksum: <sum>".
+func mismatched(ksck string) []string {
+	sums := map[string]map[string]bool{}
+	for line := range strings.SplitSeq(ksck, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 7 && f[0] == "T" && f[2] == "P" && f[len(f)-2] == "Checksum:" {
+			if sums[f[1]] == nil {
+				sums[f[1]] = map[string]bool{}
+			}
+			sums[f[1]][f[len(f)-1]] = true
+		}
+	}
+	var out []string
+	for t, s := range sums {
+		if len(s) > 1 {
+			out = append(out, t)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// onlyTable reports whether every tablet of tablets is one of table's.
+func (j *chaosJob) onlyTable(ctx context.Context, admin *kudu.Client, table string, tablets []string) bool {
+	ts, err := admin.Tablets(ctx, table)
+	if err != nil {
+		return false
+	}
+	ids := map[string]bool{}
+	for _, t := range ts {
+		ids[t.ID] = true
+	}
+	for _, t := range tablets {
+		if !ids[t] {
+			return false
+		}
+	}
+	return true
 }
 
 func errString(err error) string {

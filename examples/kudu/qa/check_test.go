@@ -151,3 +151,16 @@ func TestDiffCheck(t *testing.T) {
 		})
 	}
 }
+
+func TestMismatched(t *testing.T) {
+	ksck := `Checksum Summary
+T aaa P p1 (10.77.0.15:20000): Checksum: 1
+T aaa P p2 (10.77.0.18:20002): Checksum: 1
+T bbb P p1 (10.77.0.15:20000): Checksum: 2
+T bbb P p3 (10.77.0.19:20002): Checksum: 3
+T ccc P p2 (10.77.0.18:20002): Checksum: 4
+`
+	if got := mismatched(ksck); !slices.Equal(got, []string{"bbb"}) {
+		t.Fatalf("mismatched = %v, want [bbb]", got)
+	}
+}
