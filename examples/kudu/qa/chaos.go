@@ -592,6 +592,7 @@ func (j *chaosJob) check(ctx context.Context, jc *torx.JobContext, hist []op, fi
 	events := slices.Clone(j.events)
 	j.mu.Unlock()
 	bad = append(bad, j.exitAnomalies()...)
+	bad = j.staleReads(ctx, hist, events, bad)
 
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
@@ -635,6 +636,76 @@ func (j *chaosJob) check(ctx context.Context, jc *torx.JobContext, hist []op, fi
 	}
 	jc.SetSummary(summary)
 	return nil
+}
+
+// silencing are the faults that can leave a server a deposed leader that
+// does not know it: it stops hearing from its peers, or they from it.
+var silencing = map[string]bool{
+	"pause-tserver": true, "freeze": true, "partition-one": true, "partition-halves": true, "partition-client": true,
+}
+
+// staleReads reclassifies an anomaly of a transaction's snapshot as the
+// known issue of stale reads (KUDU-430, KUDU-1188) when its read was at a
+// snapshot the server chose and a server that served it was cut off or
+// stopped while the read was in flight: a deposed leader serving what it
+// has.
+func (j *chaosJob) staleReads(ctx context.Context, hist []op, events []nemesis.Event, bad []anomaly) []anomaly {
+	type window struct {
+		target     string
+		start, end time.Time
+	}
+	var windows []window
+	open := map[string]int{}
+	for _, e := range events {
+		if !silencing[e.Fault] {
+			continue
+		}
+		k := e.Fault + "|" + e.Target
+		if !e.Heal {
+			open[k] = len(windows)
+			windows = append(windows, window{e.Target, e.Start, time.Time{}})
+		} else if i, ok := open[k]; ok {
+			windows[i].end = e.End
+			delete(open, k)
+		}
+	}
+	names := map[string]string{}
+	if uuids, err := j.tabletServers(ctx); err == nil {
+		for addr, uuid := range uuids {
+			names[uuid] = j.cluster.ByAddr(addr)
+		}
+	}
+	silenced := func(server string, from, to time.Time) bool {
+		n := j.cluster.Node(server)
+		for _, w := range windows {
+			end := w.end
+			if end.IsZero() {
+				end = to
+			}
+			if (strings.Contains(w.target, server) || (n != nil && strings.Contains(w.target, n.Name()))) &&
+				!w.start.After(to) && !end.Before(from) {
+				return true
+			}
+		}
+		return false
+	}
+	for i, a := range bad {
+		if !strings.HasPrefix(a.Kind, "txn-") || len(a.Ops) == 0 {
+			continue
+		}
+		o := hist[a.Ops[len(a.Ops)-1]]
+		if o.Kind != "read" || o.Read == nil || o.Read.TS != 0 {
+			continue
+		}
+		for _, uuid := range o.Servers {
+			if silenced(names[uuid], time.Unix(0, o.Call), time.Unix(0, o.Return)) {
+				bad[i].Kind = "stale-read"
+				bad[i].Detail = fmt.Sprintf("(%s, at a snapshot %s chose while cut off or stopped) %s", a.Kind, names[uuid], a.Detail)
+				break
+			}
+		}
+	}
+	return bad
 }
 
 // mismatched are the tablets whose replicas ksck's checksum scan found to
