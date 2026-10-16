@@ -185,9 +185,14 @@ hitting one can find others; by default all of these:
 
 Against Kudu 1.18.1 (both also on `master`):
 
-1. **Deleted-rowset GC drops recent history** (`deleted-rowset-gc` above):
-   snapshot scans in the history window lose rows deleted after their
-   snapshot, and diff scans -- incremental backups -- lose the deletes.
-2. **Bootstrap renumbers auto-incrementing ids** (`auto-id-restart`): after
-   a restart, committed rows have new ids; a delete by an id read before it
-   deletes another row; replicas diverge for good.
+1. **Deleted-rowset GC drops recent history** (#55; `deleted-rowset-gc`
+   above): snapshot scans in the history window lose rows deleted after
+   their snapshot, and diff scans -- incremental backups -- lose the
+   deletes.
+2. **Bootstrap renumbers auto-incrementing ids** (#56; `auto-id-restart`):
+   after a restart, committed rows have new ids; a delete by an id read
+   before it deletes another row; replicas diverge for good.
+3. **A tablet server SIGSEGV in the transaction coordinator** during aborts
+   (#57), seen once.
+
+#58 tracks them, with what held up.
