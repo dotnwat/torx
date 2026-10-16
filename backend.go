@@ -15,7 +15,9 @@ package torx
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 )
 
 // Cmd describes a command to run on a node. Path plus Args is an argv -- no
@@ -41,6 +43,16 @@ type ExecResult struct {
 	ExitCode int
 	Stdout   []byte
 	Stderr   []byte
+}
+
+// ExitError describes a non-zero exit, as an error naming prog, the program
+// that ran, with what it wrote to stderr; it is nil for an exit of zero. A
+// caller wraps it with its own kind and context.
+func (r ExecResult) ExitError(prog string) error {
+	if r.ExitCode == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s exited %d: %s", prog, r.ExitCode, strings.TrimSpace(string(r.Stderr)))
 }
 
 // Backend acts on a single node. Every method takes a context for cancellation

@@ -611,9 +611,8 @@ func (b *backend) Signal(ctx context.Context, pid int, sig os.Signal) error {
 	if err != nil {
 		return err
 	}
-	if res.ExitCode != 0 {
-		return torx.Wrap(torx.ErrBackend, "ssh: signal",
-			fmt.Errorf("kill exited %d: %s", res.ExitCode, strings.TrimSpace(string(res.Stderr))))
+	if err := res.ExitError("kill"); err != nil {
+		return torx.Wrap(torx.ErrBackend, "ssh: signal", err)
 	}
 	return nil
 }

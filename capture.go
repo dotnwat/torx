@@ -165,9 +165,8 @@ func (b *ServiceBase) clearCaptureLog(ctx context.Context, n *Node, dir, name st
 	if err != nil {
 		return err
 	}
-	if res.ExitCode != 0 {
-		return Wrap(ErrBackend, "capture: rotate "+logPath,
-			fmt.Errorf("mv exited %d: %s", res.ExitCode, strings.TrimSpace(string(res.Stderr))))
+	if err := res.ExitError("mv"); err != nil {
+		return Wrap(ErrBackend, "capture: rotate "+logPath, err)
 	}
 	Logf(ctx, "info", "rotated %s.log to %s on %s", name, rotatedName, n.Name())
 	b.AddArtifact(n, Artifact{Name: rotatedName, Path: rotated, CollectOnPass: true})
