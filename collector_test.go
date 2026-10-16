@@ -94,10 +94,7 @@ func TestCollectDir(t *testing.T) {
 	if err := Collect(ctx, n, arts, false, failDir); err != nil {
 		t.Fatalf("Collect(fail): %v", err)
 	}
-	out := t.TempDir()
-	if res, err := n.Exec(ctx, Command("tar", "-C", out, "-xzf", filepath.Join(failDir, "data.tar.gz"))); err != nil || res.ExitCode != 0 {
-		t.Fatalf("extract: %v %s", err, res.Stderr)
-	}
+	out := extract(t, n, filepath.Join(failDir, "data.tar.gz"))
 	for name, want := range map[string]string{"data/meta": "m", "data/wal/seg-1": "w"} {
 		got, err := os.ReadFile(filepath.Join(out, name))
 		if err != nil || string(got) != want {
@@ -112,6 +109,98 @@ func TestCollectDir(t *testing.T) {
 	missing := []Artifact{{Name: "gone.tar.gz", Path: filepath.Join(t.TempDir(), "gone"), Dir: true}}
 	if err := Collect(ctx, n, missing, false, filepath.Join(t.TempDir(), "x")); err == nil {
 		t.Errorf("Collect of a missing directory succeeded")
+	}
+}
+
+// extract unpacks a collected archive into a fresh directory and returns it.
+func extract(t *testing.T, n *Node, archive string) string {
+	t.Helper()
+	out := t.TempDir()
+	if res, err := n.Exec(context.Background(), Command("tar", "-C", out, "-xzf", archive)); err != nil || res.ExitCode != 0 {
+		t.Fatalf("extract %s: %v %s", archive, err, res.Stderr)
+	}
+	return out
+}
+
+// TestCollectDirThroughSymlink collects the directory a path names through
+// a symlink, under the link's own name, and keeps the links inside it as
+// links.
+func TestCollectDirThroughSymlink(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	real := filepath.Join(base, "v3")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "meta"), []byte("m"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("meta", filepath.Join(real, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "current")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	n := testNode(t, "n0")
+	dest := t.TempDir()
+	if err := Collect(ctx, n, []Artifact{{Name: "current.tar.gz", Path: link, Dir: true}}, false, dest); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	out := extract(t, n, filepath.Join(dest, "current.tar.gz"))
+	if got, err := os.ReadFile(filepath.Join(out, "current", "meta")); err != nil || string(got) != "m" {
+		t.Errorf("current/meta = %q, %v; want the directory behind the link", got, err)
+	}
+	if target, err := os.Readlink(filepath.Join(out, "current", "alias")); err != nil || target != "meta" {
+		t.Errorf("current/alias -> %q, %v; want the link kept, to meta", target, err)
+	}
+}
+
+// TestCollectDirOddNames collects a directory whose name begins with a dash,
+// which tar would read as an option, and one named with the characters that
+// mean something to the renaming of its members.
+func TestCollectDirOddNames(t *testing.T) {
+	ctx := context.Background()
+	n := testNode(t, "n0")
+	for _, name := range []string{"-wal", "a,b&c"} {
+		dir := filepath.Join(t.TempDir(), name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dest := t.TempDir()
+		if err := Collect(ctx, n, []Artifact{{Name: "d.tar.gz", Path: dir, Dir: true}}, false, dest); err != nil {
+			t.Fatalf("Collect %q: %v", name, err)
+		}
+		out := extract(t, n, filepath.Join(dest, "d.tar.gz"))
+		if got, err := os.ReadFile(filepath.Join(out, name, "f")); err != nil || string(got) != "x" {
+			t.Errorf("%s/f = %q, %v; want x", name, got, err)
+		}
+	}
+}
+
+// TestCollectDirChanging collects a directory that changes as tar reads it,
+// which tar reports with exit status 1 after writing the archive all the
+// same: the node's scratch directory, where the archive itself grows.
+func TestCollectDirChanging(t *testing.T) {
+	ctx := context.Background()
+	n := testNode(t, "n0")
+	root := n.Scratch().Root
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "marker"), []byte("k"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+	if err := Collect(ctx, n, []Artifact{{Name: "scratch.tar.gz", Path: root, Dir: true}}, false, dest); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	out := extract(t, n, filepath.Join(dest, "scratch.tar.gz"))
+	if got, err := os.ReadFile(filepath.Join(out, filepath.Base(root), "marker")); err != nil || string(got) != "k" {
+		t.Errorf("marker = %q, %v; want the archive kept despite the change", got, err)
 	}
 }
 

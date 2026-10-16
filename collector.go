@@ -13,13 +13,13 @@ package torx
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Artifact names a file on a node to collect after a job runs.
@@ -68,35 +68,71 @@ func Collect(ctx context.Context, n *Node, artifacts []Artifact, passed bool, de
 	}
 
 	var errs MultiError
-	for _, a := range wanted {
-		if a.Dir {
-			errs.Append(collectDir(ctx, n, a, filepath.Join(destDir, a.Name)))
-			continue
+	// Directories are archived in the node's scratch directory, made once
+	// for all of them; without it, none of them can be collected.
+	dirs := slices.ContainsFunc(wanted, func(a Artifact) bool { return a.Dir })
+	if dirs {
+		if err := n.Mkdir(ctx, n.Scratch().Root); err != nil {
+			errs.Append(Wrap(ErrService, "collect: mkdir "+n.Scratch().Root+" for directory archives", err))
+			dirs = false
 		}
-		errs.Append(n.Get(ctx, a.Path, filepath.Join(destDir, a.Name)))
+	}
+	for _, a := range wanted {
+		switch {
+		case !a.Dir:
+			errs.Append(n.Get(ctx, a.Path, filepath.Join(destDir, a.Name)))
+		case dirs:
+			errs.Append(collectDir(ctx, n, a, filepath.Join(destDir, a.Name)))
+		}
 	}
 	return errs.Err()
 }
 
+// cleanupTimeout bounds the removal of a directory artifact's archive from
+// the node, which runs however the collection ended: a node that has
+// stalled must not hold the teardown for good.
+const cleanupTimeout = 30 * time.Second
+
 // collectDir archives the directory a names on n into the node's scratch
 // directory, copies the archive to dest, and removes it from the node.
+// Streaming the archive straight off the node, with no copy in scratch, is
+// issue #59.
 func collectDir(ctx context.Context, n *Node, a Artifact, dest string) error {
-	root := n.Scratch().Root
-	if err := n.Mkdir(ctx, root); err != nil {
-		return err
-	}
-	archive := path.Join(root, ".artifact-"+a.Name)
+	archive := path.Join(n.Scratch().Root, ".artifact-"+a.Name)
 	dir := path.Clean(a.Path)
-	res, err := n.Exec(ctx, Command("tar", "-C", path.Dir(dir), "-czf", archive, path.Base(dir)))
-	defer func() { _ = n.Rm(context.WithoutCancel(ctx), archive) }()
+	// tar runs inside the directory and names the members after it, rather
+	// than archiving it from its parent by name, so that a path whose last
+	// element is a symlink archives the directory it points to, not the
+	// link. The S flag keeps the renaming off symlink targets; the -- keeps
+	// a name beginning with a dash from being read as an option.
+	rename := "s,^\\.," + sedLiteral(path.Base(dir)) + ",S"
+	res, err := n.Exec(ctx, Command("tar", "-C", dir, "-czf", archive, "--transform", rename, "--", "."))
+	defer func() {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		defer cancel()
+		_ = n.Rm(rctx, archive)
+	}()
 	if err != nil {
-		return err
+		return Wrap(ErrService, "collect: archive "+a.Path, err)
 	}
-	if res.ExitCode != 0 {
-		return Wrap(ErrService, "collect: archive "+a.Path,
-			fmt.Errorf("tar exited %d: %s", res.ExitCode, strings.TrimSpace(string(res.Stderr))))
+	switch {
+	case res.ExitCode == 1:
+		// A file changed as tar read it: a process that outlived its stop
+		// still writes to the directory, or the directory is the scratch
+		// directory, where the archive itself grows. GNU tar exits 1 for
+		// that and writes the archive all the same, which is what a failed
+		// run needs kept: note it, and keep it.
+		Logf(ctx, "warn", "archiving %s on %s: %s", a.Path, n.Name(), strings.TrimSpace(string(res.Stderr)))
+	case res.ExitCode != 0:
+		return Wrap(ErrService, "collect: archive "+a.Path, res.ExitError("tar"))
 	}
 	return n.Get(ctx, archive, dest)
+}
+
+// sedLiteral quotes s to stand for itself in a sed s command delimited by
+// commas.
+func sedLiteral(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `,`, `\,`, `&`, `\&`).Replace(s)
 }
 
 // Finalizers is a LIFO stack of cleanup callbacks run on teardown. The zero
