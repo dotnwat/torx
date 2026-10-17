@@ -18,6 +18,8 @@
 // everything else, where it explains nothing. The search relies on the
 // model accepting such an operation in every state, and tries it only where
 // it changes the state: anywhere else, it might as well come last.
+// Operations a system carried out together -- its reads at one snapshot --
+// are given one [Op.Group], and nothing is linearized between them.
 //
 // Check implements the algorithm of Wing and Gong, with Lowe's memoization
 // of the configurations already explored (G. Lowe, "Testing for
@@ -55,6 +57,13 @@ type Op[I, O any] struct {
 	Client int
 	Call   int64
 	Return int64
+	// Group, if nonzero, names a set of operations that took effect
+	// together, so that nothing is linearized between them: the reads a
+	// system served at one snapshot, say, which a write of unknown outcome
+	// reached all of or none. The operations of a group must be concurrent
+	// with one another; they take effect in any order among themselves. An
+	// operation with no answer is in no group.
+	Group  int64
 	Input  I
 	Output O
 }
@@ -190,6 +199,23 @@ func CheckWithin[S comparable, I, O any](ctx context.Context, m Model[S, I, O], 
 		}
 	}
 
+	// group is the group an operation counts in: none for one with no
+	// answer, which the search may leave for last whatever its group. size
+	// is how many operations each group has; once one of them is
+	// linearized, the rest come next, before anything else.
+	group := func(op *Op[I, O]) int64 {
+		if op.Return == Pending {
+			return 0
+		}
+		return op.Group
+	}
+	size := map[int64]int{}
+	for i := range ops {
+		if g := group(&ops[i]); g != 0 {
+			size[g]++
+		}
+	}
+
 	type frame struct {
 		call  *entry
 		state S
@@ -202,7 +228,34 @@ func CheckWithin[S comparable, I, O any](ctx context.Context, m Model[S, I, O], 
 		best       = Result[S]{Outcome: Illegal, State: state, Stuck: -1}
 		bestDepth  = -1
 		steps      int
+		open       int64 // the group begun and not finished, if any
+		openLeft   int   // how many of its operations remain
 	)
+	// enter and leave keep open and openLeft as an operation is linearized
+	// and un-linearized: a group opens with its first operation and closes
+	// with its last.
+	enter := func(g int64) {
+		if g == 0 {
+			return
+		}
+		if open == 0 {
+			open, openLeft = g, size[g]
+		}
+		if openLeft--; openLeft == 0 {
+			open = 0
+		}
+	}
+	leave := func(g int64) {
+		if g == 0 {
+			return
+		}
+		if open == 0 {
+			open, openLeft = g, 0
+		}
+		if openLeft++; openLeft == size[g] {
+			open = 0
+		}
+	}
 	seen.add(linearized, state)
 	e := head.next
 	for head.next != nil {
@@ -214,6 +267,11 @@ func CheckWithin[S comparable, I, O any](ctx context.Context, m Model[S, I, O], 
 		}
 		if e.call {
 			op := &ops[e.op]
+			if open != 0 && group(op) != open {
+				// A group has begun: only the rest of it may come next.
+				e = e.next
+				continue
+			}
 			if j := after[e.op]; j >= 0 && !linearized.has(j) {
 				// The same operation, called before, is not placed yet:
 				// any order with this one first is as well tried with
@@ -233,6 +291,7 @@ func CheckWithin[S comparable, I, O any](ctx context.Context, m Model[S, I, O], 
 				linearized.set(e.op)
 				if seen.add(linearized, next) {
 					stack = append(stack, frame{e, state})
+					enter(group(op))
 					state = next
 					lift(e)
 					e = head.next
@@ -268,6 +327,7 @@ func CheckWithin[S comparable, I, O any](ctx context.Context, m Model[S, I, O], 
 		stack = stack[:len(stack)-1]
 		state = f.state
 		linearized.clear(f.call.op)
+		leave(group(&ops[f.call.op]))
 		unlift(f.call)
 		e = f.call.next
 	}

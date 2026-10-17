@@ -40,6 +40,7 @@ import (
 
 	"github.com/pkg/sftp"
 	cryptossh "golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
 
 	"github.com/dotnwat/torx"
 )
@@ -314,6 +315,7 @@ type sshStream struct {
 	killErr   error
 	exited    chan struct{} // closed once the node has reported the command's exit
 	code      int           // the reported exit status, valid once exited is closed: the code, or -1 for a signal death
+	sig       os.Signal     // the signal of a signal death the node named, valid once exited is closed; nil otherwise
 	done      chan struct{} // closed once the session has ended, with the exit reported or without it
 }
 
@@ -340,27 +342,28 @@ func (s *sshStream) exec(cmd torx.Cmd) error {
 // watchRequests handles the session's requests until the channel closes,
 // recording the command's exit when the node reports it -- an exit-status
 // request with the code, or an exit-signal request for a signal death, which
-// the Process contract renders as -1 -- and refusing whatever else wants a
-// reply, as OpenSSH's client does. The exit is reported at most once, so the
-// first report is the command's.
+// the Process contract renders as -1, keeping the signal's name for
+// ExitSignal -- and refusing whatever else wants a reply, as OpenSSH's client
+// does. The exit is reported at most once, so the first report is the
+// command's.
 func (s *sshStream) watchRequests(reqs <-chan *cryptossh.Request) {
 	reported := false
-	report := func(code int) {
+	report := func(code int, sig os.Signal) {
 		if reported {
 			return
 		}
 		reported = true
-		s.code = code
+		s.code, s.sig = code, sig
 		close(s.exited)
 	}
 	for req := range reqs {
 		switch req.Type {
 		case "exit-status":
 			if len(req.Payload) >= 4 {
-				report(int(binary.BigEndian.Uint32(req.Payload)))
+				report(int(binary.BigEndian.Uint32(req.Payload)), nil)
 			}
 		case "exit-signal":
-			report(-1)
+			report(-1, exitSignal(req.Payload))
 		default:
 			if req.WantReply {
 				_ = req.Reply(false, nil)
@@ -368,6 +371,25 @@ func (s *sshStream) watchRequests(reqs <-chan *cryptossh.Request) {
 		}
 	}
 	close(s.done)
+}
+
+// exitSignal is the signal an exit-signal request names (RFC 4254, section
+// 6.10: the name without SIG, whether a core was dumped, an error message,
+// and a language tag), or nil for a name this host has no number for.
+func exitSignal(payload []byte) os.Signal {
+	var msg struct {
+		Signal     string
+		CoreDumped bool
+		Error      string
+		Lang       string
+	}
+	if cryptossh.Unmarshal(payload, &msg) != nil {
+		return nil
+	}
+	if num := unix.SignalNum("SIG" + msg.Signal); num != 0 {
+		return num
+	}
+	return nil
 }
 
 // copyOutput copies the command's stdout and stderr into pw, interleaved as
@@ -432,6 +454,19 @@ func (s *sshStream) Wait(ctx context.Context) (int, error) {
 	// node closed the channel without sending one. A report never follows a
 	// close, so this is final.
 	return -1, torx.Wrap(torx.ErrBackend, "ssh: wait", errors.New("the session ended without reporting the command's exit"))
+}
+
+// ExitSignal implements torx.ExitSignaler: the signal the node named in its
+// report of the command's death, once it has reported one. The node names it
+// under the same condition as it reports a signal death at all, which Wait
+// describes.
+func (s *sshStream) ExitSignal() (os.Signal, bool) {
+	select {
+	case <-s.exited:
+		return s.sig, s.sig != nil
+	default:
+		return nil, false
+	}
 }
 
 // Close tears the stream down and reports whether the remote kill succeeded. A
@@ -611,9 +646,8 @@ func (b *backend) Signal(ctx context.Context, pid int, sig os.Signal) error {
 	if err != nil {
 		return err
 	}
-	if res.ExitCode != 0 {
-		return torx.Wrap(torx.ErrBackend, "ssh: signal",
-			fmt.Errorf("kill exited %d: %s", res.ExitCode, strings.TrimSpace(string(res.Stderr))))
+	if err := res.ExitError("kill"); err != nil {
+		return torx.Wrap(torx.ErrBackend, "ssh: signal", err)
 	}
 	return nil
 }
@@ -625,16 +659,18 @@ func runToCompletion(ctx context.Context, sess *cryptossh.Session, line string) 
 	if err := sess.Start(line); err != nil {
 		return err
 	}
-	done := make(chan error, 1)
-	go func() { done <- sess.Wait() }()
+	var waitErr error
+	done := make(chan struct{})
+	go func() { waitErr = sess.Wait(); close(done) }()
 	select {
 	case <-ctx.Done():
+		// The session is killed: ctx says why, not its wait.
 		_ = sess.Signal(cryptossh.SIGKILL)
 		_ = sess.Close()
 		<-done
 		return ctx.Err()
-	case err := <-done:
-		return err
+	case <-done:
+		return waitErr
 	}
 }
 

@@ -13,10 +13,15 @@ package torx
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
+	"time"
 )
 
 // Artifact names a file on a node to collect after a job runs.
@@ -24,6 +29,12 @@ type Artifact struct {
 	Name          string // logical name and local filename
 	Path          string // path on the node
 	CollectOnPass bool   // gather even when the job passed; a failure gathers all
+	// Dir says Path is a directory, collected as a gzipped tar of it named
+	// Name: the data directory of a server, say, registered so that a
+	// failed run keeps the state the server left on disk to examine with
+	// the system's own tools. The archive holds the directory under its
+	// own name. Archiving runs tar on the node, in its scratch directory.
+	Dir bool
 }
 
 // Archiver is implemented by a service that exposes artifacts to collect after a
@@ -59,10 +70,83 @@ func Collect(ctx context.Context, n *Node, artifacts []Artifact, passed bool, de
 	}
 
 	var errs MultiError
+	// Directories are archived in the node's scratch directory, made once
+	// for all of them; without it, none of them can be collected.
+	dirs := slices.ContainsFunc(wanted, func(a Artifact) bool { return a.Dir })
+	if dirs {
+		if err := n.Mkdir(ctx, n.Scratch().Root); err != nil {
+			errs.Append(Wrap(ErrService, "collect: mkdir "+n.Scratch().Root+" for directory archives", err))
+			dirs = false
+		}
+	}
 	for _, a := range wanted {
-		errs.Append(n.Get(ctx, a.Path, filepath.Join(destDir, a.Name)))
+		switch {
+		case !a.Dir:
+			errs.Append(n.Get(ctx, a.Path, filepath.Join(destDir, a.Name)))
+		case dirs:
+			errs.Append(collectDir(ctx, n, a, filepath.Join(destDir, a.Name)))
+		}
 	}
 	return errs.Err()
+}
+
+// cleanupTimeout bounds the removal of a directory artifact's archive from
+// the node, which runs however the collection ended: a node that has
+// stalled must not hold the teardown for good.
+const cleanupTimeout = 30 * time.Second
+
+// collectDir archives the directory a names on n into the node's scratch
+// directory, copies the archive to dest, and removes it from the node.
+// Streaming the archive straight off the node, with no copy in scratch, is
+// issue #59.
+func collectDir(ctx context.Context, n *Node, a Artifact, dest string) error {
+	archive := path.Join(n.Scratch().Root, ".artifact-"+a.Name)
+	dir := path.Clean(a.Path)
+	// tar is given the directory as name/. from its parent, so that a path
+	// whose last element is a symlink archives the directory it points to,
+	// under the link's name, not the link, and the links inside stay links.
+	// GNU, BSD and busybox tar all take that, and name the members
+	// name/./...; GNU's --transform, which would strip the dot, is GNU's
+	// alone. The -- keeps a name beginning with a dash from being read as an
+	// option. BSD and busybox tar exit 1 for a directory that is not there,
+	// as for any error, and write an empty archive, which an exit of 1 below
+	// would keep: so the directory is made sure of first.
+	if res, err := n.Exec(ctx, Command("test", "-d", dir)); err != nil {
+		return Wrap(ErrService, "collect: archive "+a.Path, err)
+	} else if res.ExitCode != 0 {
+		return Wrap(ErrService, "collect: archive "+a.Path, errors.New("not a directory"))
+	}
+	res, err := n.Exec(ctx, Command("tar", "-C", path.Dir(dir), "-czf", archive, "--", path.Base(dir)+"/."))
+	defer func() {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		defer cancel()
+		_ = n.Rm(rctx, archive)
+	}()
+	if err != nil {
+		return Wrap(ErrService, "collect: archive "+a.Path, err)
+	}
+	var warned error
+	switch {
+	case res.ExitCode == 1:
+		// A file changed as tar read it: a process that outlived its stop
+		// still writes to the directory, or the directory is the scratch
+		// directory, where the archive itself grows. GNU tar exits 1 for
+		// that and writes the archive all the same, which is what a failed
+		// run needs kept: note it, and keep it. BSD tar exits 1 for any
+		// error, and so writes what it could, which is kept the same; should
+		// the archive not be there at all, tar's word is the error.
+		warned = res.ExitError("tar")
+		Logf(ctx, "warn", "archiving %s on %s: %s", a.Path, n.Name(), strings.TrimSpace(string(res.Stderr)))
+	case res.ExitCode != 0:
+		return Wrap(ErrService, "collect: archive "+a.Path, res.ExitError("tar"))
+	}
+	if err := n.Get(ctx, archive, dest); err != nil {
+		if warned != nil {
+			return Wrap(ErrService, "collect: archive "+a.Path, fmt.Errorf("%w, and then %w", warned, err))
+		}
+		return err
+	}
+	return nil
 }
 
 // Finalizers is a LIFO stack of cleanup callbacks run on teardown. The zero

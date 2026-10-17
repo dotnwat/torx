@@ -390,3 +390,33 @@ func TestStopSendsNoDumpToAGracefulExit(t *testing.T) {
 		t.Errorf("a command that exited within the grace period was sent the dump signal (stat: %v)", err)
 	}
 }
+
+// TestExitSignal reports the signal a local command died by, and none for
+// one that exited.
+func TestExitSignal(t *testing.T) {
+	ctx := context.Background()
+	n := testNode(t, "n0")
+	for _, tc := range []struct {
+		script string
+		want   os.Signal
+	}{
+		{"kill -KILL $$", syscall.SIGKILL},
+		{"kill -TERM $$", syscall.SIGTERM},
+		{"exit 3", nil},
+	} {
+		t.Run(tc.script, func(t *testing.T) {
+			p, err := n.Stream(ctx, Command("sh", "-c", tc.script))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			if _, err := p.Wait(ctx); err != nil {
+				t.Fatal(err)
+			}
+			sig, ok := ExitSignal(p)
+			if ok != (tc.want != nil) || sig != tc.want {
+				t.Errorf("ExitSignal = %v, %v; want %v", sig, ok, tc.want)
+			}
+		})
+	}
+}

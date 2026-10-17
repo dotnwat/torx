@@ -44,6 +44,25 @@ type Process interface {
 	Wait(ctx context.Context) (int, error)
 }
 
+// ExitSignaler is a Process whose backend can tell which signal terminated
+// its command, as the local and ssh backends' can; ExitSignal asks it.
+type ExitSignaler interface {
+	// ExitSignal reports the signal that terminated the command, once Wait
+	// has seen it exit, if a signal did.
+	ExitSignal() (os.Signal, bool)
+}
+
+// ExitSignal reports the signal that terminated p's command, once Wait has
+// seen it exit, when a signal did and p's backend can tell: when p is an
+// ExitSignaler. Wait reports any such death as -1; this says whether a
+// crash was a SIGSEGV or a SIGABRT, or a kill from outside the program.
+func ExitSignal(p Process) (os.Signal, bool) {
+	if s, ok := p.(ExitSignaler); ok {
+		return s.ExitSignal()
+	}
+	return nil, false
+}
+
 // Shutdown stops p gracefully: it sends sig, waits up to grace for the command
 // to exit, and then closes p, which kills whatever is left and reaps it. It
 // returns the command's exit status when the command exited within the grace
