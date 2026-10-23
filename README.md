@@ -557,6 +557,18 @@ before its snapshot and no others, a read an hour in the past as much as one
 at the present; the reads at one snapshot share an `Op.Group`, so a write
 whose answer was lost reaches all of them or none.
 
+The [`logcheck`](logcheck/) package checks a record of appends to a log
+whose server gives each entry an offset of its own -- a stream's sequence,
+a partition's offset -- against the log as it stands once every fault is
+healed: `logcheck.Check` reports an acked append the log lost or holds
+elsewhere, one it holds though every attempt was refused, one it holds more
+often than its attempts could have put it there, a value no client wrote,
+an append conditional on a last offset that follows another, and an append
+the log holds before one acked before it was sent. With entries filed under
+keys, the log is a map of registers too, and `logcheck.CheckReads` checks
+reads of a key's last entry for linearizability, in the order the log put
+the key's entries in.
+
 The [`listappend`](listappend/) package checks a record of transactions,
 after Elle: transactions read lists and append unique elements to them, so
 the reads of a key reveal the order of its versions, and from that order
