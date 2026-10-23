@@ -165,8 +165,9 @@ An issue the checker cannot tell apart from others is sidestepped instead.
 | `stale-direct-read` | a direct get is served by any replica, which may be behind |
 | `stale-read` | a leader read that breaks linearizability while a fault silenced a server, or soon after: a deposed leader answering, since JetStream has no leader leases |
 | `deposed-refusal` | a write refused, and stored, while a fault silenced a server or soon after: a deposed leader refused a conditional write the new leader stored |
+| `flush-error` | a conditional write that broke its condition, a leader read that broke linearizability, or a refused write stored, while a disk was full or soon after: a leader whose flush failed checked writes against a store that had dropped messages (finding 2) |
 | `compress-truncate` | sidestepped: a run never draws S2 compression with sync always (finding 1) |
-| `copy-scale-stall` | sidestepped: the nemesis never scales a copy (finding 3) |
+| `copy-stall` | a copy behind its origins once every fault healed, which a new leader brings up to date (finding 3) |
 | `snapshot-sources` | sidestepped: the servers run with the feature flag `js_snapshot_sources` off (finding 5) |
 
 ## Findings
@@ -181,13 +182,16 @@ Against nats-server 2.15.1 and `main` (2026-10-20):
    `fileStore.Truncate` that needs no tombstone leaves the block it cut the
    write block, but the new block it made for tombstones had the old last
    block compressed in the background. 2.14.8 too; not 2.12.15.
-2. A write error while a replica flushes its buffered messages takes the
-   stream out of service on that replica until the server restarts, though
-   the disk works again; the replica's store has dropped messages it had
-   applied.
-3. A mirror, or a stream that sources others, scaled to one replica and
-   back while its origins take writes stops copying, and reports no lag,
-   until its leader changes. 2.12.15 and 2.14.8 too.
+2. A write error while a replica flushes its buffered messages -- its disk
+   filled for a moment -- drops messages its store had applied. On the
+   stream's leader, until the stream notices, conditional writes are
+   checked against what is left: one whose condition is already false
+   commits, a lost update. On any replica, the stream is out of service
+   there until the server restarts, though the disk works again.
+3. A mirror, or a stream that sources others, stops copying, and reports
+   no lag, until its leader changes, after it is scaled to one replica and
+   back while its origins take writes, or after its origin loses a replica.
+   2.12.15 and 2.14.8 too.
 4. A stream's leader cut off from its peers keeps answering publishes and
    refuses conditional ones from its stale state ("wrong last sequence")
    while the leader its peers elected stores them, for as long as it takes

@@ -332,11 +332,7 @@ func (j *chaosJob) stepDown(ctx context.Context, rng *rand.Rand, admin *nats.Cli
 // scale changes a stream's replica count; the heal changes it back. With
 // cancel, it cancels the change instead, a moment after asking for it.
 func (j *chaosJob) scale(ctx context.Context, rng *rand.Rand, admin *nats.Client, cancel bool) (nemesis.Heal, string, error) {
-	streams := j.streams()
-	if j.allow["copy-scale-stall"] {
-		streams = slices.DeleteFunc(streams, func(s string) bool { return slices.Contains(copyStreams, s) })
-	}
-	stream := pick(rng, streams, 1)[0]
+	stream := pick(rng, j.streams(), 1)[0]
 	si, err := admin.StreamInfo(ctx, stream)
 	if err != nil {
 		return nil, stream, errors.Join(nemesis.ErrNoTarget, err)

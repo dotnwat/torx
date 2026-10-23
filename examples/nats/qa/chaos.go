@@ -49,7 +49,7 @@ const (
 	defaultDuration = 60
 	// defaultAllow are the known issues a run allows unless it says
 	// otherwise: every one there is, so that a run finds others.
-	defaultAllow = "stale-direct-read,stale-read,deposed-refusal,compress-truncate,copy-scale-stall,snapshot-sources"
+	defaultAllow = "stale-direct-read,stale-read,deposed-refusal,flush-error,compress-truncate,copy-stall,snapshot-sources"
 )
 
 const (
@@ -63,6 +63,12 @@ const (
 // knownIssues are issues of NATS a run can allow, so that a run that keeps
 // finding one can find others. README.md describes each.
 var knownIssues = map[string]bool{
+	// A leader whose flush failed for want of space answers from a store
+	// that dropped messages it had applied, and passes conditional writes
+	// whose condition is already false (results/nats-findings, finding 2).
+	// The checker tells these apart: an anomaly of a write or a read in
+	// flight while a disk was full, or soon after.
+	"flush-error": true,
 	// With the feature flag js_snapshot_sources, on by default from 2.16, a
 	// stream that sources others, led by a replica that crashed after its
 	// last snapshot, sources again what it had sourced since
@@ -76,11 +82,12 @@ var knownIssues = map[string]bool{
 	// reproduces it). The checker tells these apart: a refused write the
 	// stream holds, sent while a fault silenced a server or soon after.
 	"deposed-refusal": true,
-	// A mirror or a stream that sources others, scaled to one replica and
-	// back while its origins take writes, stops copying until its leader
-	// changes, and reports no lag (results/nats-findings, finding 3).
-	// Allowed, the nemesis never scales a copy.
-	"copy-scale-stall": true,
+	// A mirror or a stream that sources others stops copying, and reports
+	// no lag, after it is scaled to one replica and back or its origin
+	// loses a replica, until its leader changes (results/nats-findings,
+	// finding 3). The job tells it apart: a copy behind once every fault
+	// healed that a new leader brings up to date.
+	"copy-stall": true,
 	// A file stream compressed with S2 corrupts its last block when its
 	// store is truncated within that block -- as a replica that syncs
 	// always does on every restart after a crash, back to its last
@@ -512,7 +519,16 @@ func (j *chaosJob) Run(ctx context.Context, jc *torx.JobContext) error {
 
 	// The copies copy what is left.
 	if state, ok := j.caughtUp(ctx, admin); !ok {
-		j.note(anomaly{Kind: "copies-behind", Detail: "the mirror and sourcing streams did not catch up with their origins: " + state + "\n" + j.describeReplicas(ctx, copyStreams)})
+		// A new leader starts copying again what a stalled one stopped.
+		detail := state + "\n" + j.describeReplicas(ctx, copyStreams)
+		for _, s := range copyStreams {
+			_ = admin.StepDown(ctx, s, "")
+		}
+		if state, ok := j.caughtUp(ctx, admin); ok {
+			j.note(anomaly{Kind: "copy-stall", Detail: "the copies caught up with their origins only once their leaders changed: " + detail})
+		} else {
+			j.note(anomaly{Kind: "copies-behind", Detail: "the copies did not catch up with their origins, even under new leaders: " + state + "\n" + j.describeReplicas(ctx, copyStreams)})
+		}
 	}
 
 	// What each replica holds, before the final reads move the streams'

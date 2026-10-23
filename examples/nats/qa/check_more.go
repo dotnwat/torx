@@ -101,26 +101,41 @@ var silencing = map[string]bool{
 // may still answer reads: until it hears of the term that deposed it.
 const staleAfter = 10 * time.Second
 
-// staleReads reclassifies, when a silencing fault was held while the
-// operation was in flight or had healed less than staleAfter before: a
-// leader read that broke linearizability as a stale read, and a write the
-// stream holds though it was refused as a deposed leader's refusal.
+// staleReads reclassifies anomalies a fault explains, by the fault held
+// while the operation was in flight or that had healed less than
+// staleAfter before. A full disk explains a write that broke its condition,
+// a leader read that broke linearizability, and a refused write stored: a
+// leader whose flush failed answered from a store that had dropped
+// messages. Failing that, a silencing fault explains a leader read that
+// broke linearizability, a stale read, and a refused write stored, a
+// deposed leader's refusal.
 func (j *chaosJob) staleReads(hist []op, events []nemesis.Event, bad []anomaly) []anomaly {
-	var windows []nemesis.Window
+	var silenced, full []nemesis.Window
 	for _, w := range nemesis.Windows(events) {
-		if silencing[w.Fault] {
-			windows = append(windows, w)
+		switch {
+		case silencing[w.Fault]:
+			silenced = append(silenced, w)
+		case w.Fault == "disk-full":
+			full = append(full, w)
 		}
 	}
-	as := map[string]string{"nonlinearizable-read": "stale-read", "failed-visible": "deposed-refusal"}
+	during := func(ws []nemesis.Window, o op) bool {
+		call, ret := j.start.Add(time.Duration(o.Call)), j.start.Add(time.Duration(o.Return))
+		if o.Return == 0 {
+			ret = call.Add(time.Minute)
+		}
+		return slices.ContainsFunc(ws, func(w nemesis.Window) bool { return w.Overlaps(call, ret, staleAfter) })
+	}
+	bySilence := map[string]string{"nonlinearizable-read": "stale-read", "failed-visible": "deposed-refusal"}
+	byDisk := map[string]bool{"condition": true, "nonlinearizable-read": true, "failed-visible": true}
 	for i, a := range bad {
-		kind, ok := as[a.Kind]
-		if !ok || len(a.Ops) == 0 {
+		if len(a.Ops) == 0 {
 			continue
 		}
 		o := hist[a.Ops[0]]
-		call, ret := j.start.Add(time.Duration(o.Call)), j.start.Add(time.Duration(o.Return))
-		if slices.ContainsFunc(windows, func(w nemesis.Window) bool { return w.Overlaps(call, ret, staleAfter) }) {
+		if byDisk[a.Kind] && during(full, o) {
+			bad[i].Kind = "flush-error"
+		} else if kind, ok := bySilence[a.Kind]; ok && during(silenced, o) {
 			bad[i].Kind = kind
 		}
 	}
