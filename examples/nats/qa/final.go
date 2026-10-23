@@ -125,6 +125,9 @@ func readAll(ctx context.Context, c *nats.Client, stream string) ([]msg, error) 
 		if stream == ctrStream || stream == ctrAggStream {
 			mm.Val, mm.Incr = counterVal(m.Data), m.Header.Get("Nats-Incr")
 		}
+		if stream == schedStream {
+			mm.Scheduler, mm.Time = m.Header.Get("Nats-Scheduler"), m.Time
+		}
 		out = append(out, mm)
 		seq = m.Seq + 1
 	}

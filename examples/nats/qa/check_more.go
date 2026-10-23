@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dotnwat/torx/examples/nats/qa/nats"
@@ -140,4 +141,93 @@ func (j *chaosJob) staleReads(hist []op, events []nemesis.Event, bad []anomaly) 
 		}
 	}
 	return bad
+}
+
+// scheduleEarly is how much before its time a scheduled message may fire:
+// the stream stamps it with its own clock, and the job reads its time in
+// whole seconds.
+const scheduleEarly = time.Second
+
+// checkSchedules holds the scheduled messages to the final schedule
+// stream: a schedule the stream took fired once, onto its target, no
+// sooner than its time, and was purged; one it refused never fired; and
+// nothing fired that no client scheduled.
+func checkSchedules(hist []op, f *final) []anomaly {
+	var bad []anomaly
+	type schedule struct {
+		ops             []op
+		at              int64
+		stored, refused bool
+	}
+	scheds := map[string]*schedule{}
+	var order []string
+	for _, o := range hist {
+		if o.Stream != schedStream || o.Kind != "schedule" {
+			continue
+		}
+		s := scheds[o.Value]
+		if s == nil {
+			s = &schedule{at: o.At, refused: true}
+			scheds[o.Value] = s
+			order = append(order, o.Value)
+		}
+		s.ops = append(s.ops, o)
+		if o.Out == nats.OK {
+			s.stored = true
+		}
+		if o.Out != nats.Fail || o.Code == codeDuplicateInProcess {
+			s.refused = false
+		}
+	}
+	fired := map[string][]msg{}
+	for _, m := range f.msgs {
+		if v, ok := strings.CutPrefix(m.Subject, "sched.t."); ok {
+			fired[v] = append(fired[v], m)
+			if scheds[v] == nil || m.Scheduler != "sched.s."+v {
+				bad = append(bad, anomaly{Kind: "schedule-phantom", Detail: fmt.Sprintf("%s holds %s at %d from %q, which no client scheduled there", f.stream, m.Subject, m.Seq, m.Scheduler)})
+			}
+		}
+	}
+	for _, v := range order {
+		s := scheds[v]
+		fs := fired[v]
+		ops := attemptsString(s.ops)
+		var idx []int
+		for _, o := range s.ops {
+			idx = append(idx, o.Index)
+		}
+		switch {
+		case len(fs) > 1:
+			bad = append(bad, anomaly{Kind: "schedule-duplicate", Detail: fmt.Sprintf("%s fired %d times, at %v: %s", v, len(fs), seqsOf(fs), ops), Ops: idx})
+		case len(fs) == 0 && s.stored:
+			bad = append(bad, anomaly{Kind: "schedule-missed", Detail: fmt.Sprintf("%s, acked, never fired (due %s): %s", v, time.Unix(s.at, 0).UTC().Format(time.RFC3339), ops), Ops: idx})
+		case len(fs) > 0 && s.refused:
+			bad = append(bad, anomaly{Kind: "schedule-refused-fired", Detail: fmt.Sprintf("%s fired at %v though every attempt was refused: %s", v, seqsOf(fs), ops), Ops: idx})
+		}
+		for _, m := range fs {
+			if due := time.Unix(s.at, 0); !m.Time.IsZero() && m.Time.Before(due.Add(-scheduleEarly)) {
+				bad = append(bad, anomaly{Kind: "schedule-early", Detail: fmt.Sprintf("%s fired at %s, due %s: %s", v, m.Time.UTC().Format(time.RFC3339Nano), due.UTC().Format(time.RFC3339), ops), Ops: idx})
+			}
+		}
+		if len(fs) > 0 && len(f.bySubject["sched.s."+v]) > 0 {
+			bad = append(bad, anomaly{Kind: "schedule-not-purged", Detail: fmt.Sprintf("%s fired, and its schedule is still at %v", v, f.bySubject["sched.s."+v]), Ops: idx})
+		}
+	}
+	return bad
+}
+
+func seqsOf(ms []msg) []uint64 {
+	var out []uint64
+	for _, m := range ms {
+		out = append(out, m.Seq)
+	}
+	return out
+}
+
+func attemptsString(as []op) string {
+	var out []string
+	for _, a := range as {
+		out = append(out, a.String())
+	}
+	return strings.Join(out, "; ")
 }

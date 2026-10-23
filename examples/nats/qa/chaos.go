@@ -448,7 +448,9 @@ func (j *chaosJob) Run(ctx context.Context, jc *torx.JobContext) error {
 	ctr["allow_msg_counter"] = true
 	batch := j.streamConfig(batchStream, "batch.>")
 	batch["allow_atomic"] = true
-	for _, cfg := range []map[string]any{j.streamConfig(regStream, "reg.>"), j.streamConfig(logStream, "log.>"), ctr, batch, j.streamConfig(workStream, "work.>")} {
+	sched := j.streamConfig(schedStream, "sched.>")
+	sched["allow_msg_schedules"] = true
+	for _, cfg := range []map[string]any{j.streamConfig(regStream, "reg.>"), j.streamConfig(logStream, "log.>"), ctr, batch, j.streamConfig(workStream, "work.>"), sched} {
 		if err := createStream(ctx, admin, cfg); err != nil {
 			return err
 		}
@@ -674,13 +676,16 @@ func (j *chaosJob) check(ctx context.Context, jc *torx.JobContext, hist []op, cs
 	}
 	for _, stream := range j.streams() {
 		f := finals[stream]
-		if f == nil || slices.Contains(copyStreams, stream) {
+		if f == nil || slices.Contains(copyStreams, stream) || stream == schedStream {
 			continue
 		}
 		bad = append(bad, checkStream(hist, stream, f)...)
 	}
 	if f := finals[batchStream]; f != nil {
 		bad = append(bad, checkBatches(hist, f)...)
+	}
+	if f := finals[schedStream]; f != nil {
+		bad = append(bad, checkSchedules(hist, f)...)
 	}
 	if o, m := finals[regStream], finals[mirrorStream]; o != nil && m != nil {
 		bad = append(bad, checkMirror(o, m)...)

@@ -312,7 +312,7 @@ func (j *chaosJob) partitionRing(ctx context.Context, rng *rand.Rand) (nemesis.H
 
 // streams are the streams the job made.
 func (j *chaosJob) streams() []string {
-	return append([]string{regStream, logStream, ctrStream, batchStream, workStream}, copyStreams...)
+	return append([]string{regStream, logStream, ctrStream, batchStream, workStream, schedStream}, copyStreams...)
 }
 
 func (j *chaosJob) stepDown(ctx context.Context, rng *rand.Rand, admin *nats.Client) (nemesis.Heal, string, error) {

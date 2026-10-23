@@ -32,6 +32,10 @@ type msg struct {
 	// Val and Incr are a counter's value and the increment that made it.
 	Val  string `json:"val,omitempty"`
 	Incr string `json:"incr,omitempty"`
+	// Scheduler is the schedule a scheduled message fired from, and Time
+	// when the stream took it.
+	Scheduler string    `json:"scheduler,omitempty"`
+	Time      time.Time `json:"time,omitzero"`
 }
 
 // final is a stream's messages as they stand once every fault is healed:

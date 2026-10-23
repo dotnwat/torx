@@ -84,6 +84,7 @@ are file streams (memory streams a quarter of the time), each of
 | `ctr` | a counter stream: `incr` adds to `ctr.<k>`, `cget` reads it |
 | `batch` | atomic batches of one to six messages over several subjects, half of them conditional on the first subject's last sequence |
 | `work` | `enqueue`d messages, which `consumers` (2) clients fetch from a durable pull consumer and ack (waiting for the server to confirm), nak, or leave to be redelivered |
+| `sched` | `schedule`d messages: each on a subject of its own, due a few seconds on, for the stream to publish to a target subject and purge |
 | `regm` | a mirror of `reg` |
 | `agg` | sources `reg`, `batch`, and `work` |
 | `ctragg` | a counter stream that sources `ctr` |
@@ -134,6 +135,8 @@ every replica in turn, made the stream's leader for the read. Then:
   after another;
 - each counter's value is the one before it plus its increment, and acks
   and reads report the values the stream holds;
+- each schedule the stream took fired once, no sooner than its time, and
+  was purged; none it refused fired;
 - the consumer delivered every message, first in the stream's order, what
   the stream holds at each sequence, never a consumer sequence twice, and
   never a message again after confirming its ack;

@@ -34,6 +34,10 @@ const (
 	// messages over several subjects, all of which the stream takes or
 	// none.
 	batchStream = "batch"
+	// schedStream takes scheduled messages (allow_msg_schedules): a
+	// message on sched.s.<id> scheduled for a time, which the stream
+	// publishes then to sched.t.<id> and purges.
+	schedStream = "sched"
 )
 
 // idHeader carries the id of the write a message is, on every message
@@ -63,6 +67,8 @@ type op struct {
 	Expect *uint64 `json:"expect,omitempty"`
 	// Incr is what an increment added to its counter.
 	Incr int64 `json:"incr,omitempty"`
+	// At is when a scheduled message is to fire, in Unix seconds.
+	At int64 `json:"at,omitempty"`
 	// Attempt numbers a write's attempts from 0: an attempt after the
 	// first resends it after an answer was lost.
 	Attempt int `json:"attempt,omitempty"`
@@ -147,19 +153,20 @@ func isRead(kind string) bool { return kind == "get" || kind == "dget" || kind =
 
 // opWeights are how often a client draws each kind of operation.
 var opWeights = map[string]int{
-	"put":     3, // write a register unconditionally
-	"cas":     3, // write a register if its last sequence is the one the client last saw
-	"get":     3, // read a register from the stream's leader
-	"dget":    2, // read a register from any replica (direct get)
-	"append":  1, // append to the log if its last sequence is the one the client last saw
-	"incr":    2, // add to a counter
-	"cget":    1, // read a counter from the stream's leader
-	"batch":   1, // write an atomic batch, conditional on its first subject's last sequence or not
-	"enqueue": 2, // write a message for the consumer to deliver
+	"put":      3, // write a register unconditionally
+	"cas":      3, // write a register if its last sequence is the one the client last saw
+	"get":      3, // read a register from the stream's leader
+	"dget":     2, // read a register from any replica (direct get)
+	"append":   1, // append to the log if its last sequence is the one the client last saw
+	"incr":     2, // add to a counter
+	"cget":     1, // read a counter from the stream's leader
+	"batch":    1, // write an atomic batch, conditional on its first subject's last sequence or not
+	"enqueue":  2, // write a message for the consumer to deliver
+	"schedule": 1, // schedule a message for a time a few seconds on
 }
 
 // opKinds are the kinds, in the order a client draws them.
-var opKinds = []string{"put", "cas", "get", "dget", "append", "incr", "cget", "batch", "enqueue"}
+var opKinds = []string{"put", "cas", "get", "dget", "append", "incr", "cget", "batch", "enqueue", "schedule"}
 
 // workload is the clients' load, and the history of what they did.
 type workload struct {
@@ -272,6 +279,9 @@ func (w *workload) run(ctx context.Context, c int, rng *rand.Rand) {
 			w.batch(ctx, c, rng, value)
 		case "enqueue":
 			w.write(ctx, c, rng, op{Kind: kind, Stream: workStream, Subject: fmt.Sprintf("work.%d", key), Value: value}, rng.IntN(2) == 0)
+		case "schedule":
+			at := time.Now().Add(time.Duration(1+rng.IntN(8)) * time.Second).Truncate(time.Second).Add(time.Second)
+			w.write(ctx, c, rng, op{Kind: kind, Stream: schedStream, Subject: "sched.s." + value, Value: value, At: at.Unix()}, rng.IntN(2) == 0)
 		}
 	}
 }
@@ -331,6 +341,10 @@ func (w *workload) write(ctx context.Context, c int, rng *rand.Rand, o op, msgID
 		}
 		if o.Stream == ctrStream {
 			hdr.Set("Nats-Incr", fmt.Sprintf("%+d", o.Incr))
+		}
+		if o.At != 0 {
+			hdr.Set("Nats-Schedule", "@at "+time.Unix(o.At, 0).UTC().Format(time.RFC3339))
+			hdr.Set("Nats-Schedule-Target", "sched.t."+o.Value)
 		}
 		if o.Expect != nil {
 			name := "Nats-Expected-Last-Subject-Sequence"
