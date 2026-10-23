@@ -123,8 +123,10 @@ func (j *chaosJob) caughtUp(ctx context.Context, admin *nats.Client) (string, bo
 			if got := info[aggStream].State.Msgs; got != want {
 				not = append(not, fmt.Sprintf("%s holds %d messages, its origins %d", aggStream, got, want))
 			}
-			if got, want := info[ctrAggStream].State.Subjects, info[ctrStream].State.Subjects; got != want {
-				not = append(not, fmt.Sprintf("%s has %d counters, %s %d", ctrAggStream, got, ctrStream, want))
+			// Each increment the counter stream sources is a message of its
+			// own there.
+			if got, want := info[ctrAggStream].State.Msgs, info[ctrStream].State.Msgs; got != want {
+				not = append(not, fmt.Sprintf("%s holds %d messages, %s %d", ctrAggStream, got, ctrStream, want))
 			}
 		}
 		if ctx.Err() == nil {
