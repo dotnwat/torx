@@ -371,10 +371,18 @@ go run ./path/to/suite -nodes 3 'my\..*'
 
 # Results land under ./results/<timestamp>/ with a `latest` symlink:
 #   results/<ts>/run.json
-#   results/<ts>/<jobVariant>/{events.ndjson, test_log, result.json,
+#   results/<ts>/<jobVariant>/{events.ndjson, test_log, result.json, worker.log,
 #                              <the job's own artifacts>,
 #                              <service>/<node>/stdout.log[, stdout.<k>.log]}
 ```
+
+`worker.log`, if the worker printed anything, is its own output: what the
+Go runtime prints when the job panics, detects a data race, or is sent
+`SIGQUIT`. A worker
+still running halfway through the grace period it has to exit once its job
+is cancelled (a timeout, an interrupt) is sent `SIGQUIT` before it is
+killed, so a job stuck where cancellation cannot reach it leaves the stack
+of every goroutine there, to say where.
 
 Useful flags: `-nodes N` (local pool size), `-parallel N` (concurrent jobs),
 `-results <file>` (newline-delimited JSON results), `-results-dir <dir>` (the

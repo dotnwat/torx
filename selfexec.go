@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -64,12 +66,41 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	cmd.Env = append(append(os.Environ(), l.Env...), workerTagEnv+"="+tag)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// The worker's own output -- what the Go runtime prints when it panics,
+	// is sent SIGQUIT, or detects a data race -- goes to the driver's, and,
+	// when the run persists results, to worker.log in the variant's
+	// directory as well, so that it stays with the run it explains.
+	if dir, err := jobResultsDir(a.Session.ResultsDir, variantID(a.JobID, a.Params)); err == nil && dir != "" {
+		if f, err := os.OpenFile(filepath.Join(dir, workerLogFile), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+			defer func() {
+				// Most workers print nothing; leave no empty file behind.
+				if fi, err := f.Stat(); err == nil && fi.Size() == 0 {
+					_ = os.Remove(f.Name())
+				}
+				_ = f.Close()
+			}()
+			cmd.Stdout, cmd.Stderr = io.MultiWriter(os.Stdout, f), io.MultiWriter(os.Stderr, f)
+		}
+	}
 	// Own process group so cancellation reaches the whole worker tree.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	exited := make(chan struct{})
 	cmd.Cancel = func() error {
 		// Ask the worker to stop gracefully so it can run teardown; WaitDelay
 		// escalates to a kill if it does not exit in time.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		// A worker still running halfway through its grace is likely stuck:
+		// have it print every goroutine's stack, into worker.log, before
+		// the kill leaves no trace of where.
+		go func() {
+			t := time.NewTimer(workerGracePeriod / 2)
+			defer t.Stop()
+			select {
+			case <-exited:
+			case <-t.C:
+				_ = cmd.Process.Signal(syscall.SIGQUIT)
+			}
+		}()
 		return nil
 	}
 	cmd.WaitDelay = workerGracePeriod
@@ -106,6 +137,7 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	waitCh := make(chan error, 1)
 	go func() {
 		err := cmd.Wait()
+		close(exited)
 		select {
 		case <-drainDone:
 		case <-time.After(eventDrainGrace):
