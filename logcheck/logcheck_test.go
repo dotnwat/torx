@@ -1,0 +1,224 @@
+package logcheck
+
+import (
+	"context"
+	"slices"
+	"testing"
+
+	"github.com/dotnwat/torx/linearize"
+)
+
+// acked is an append of value under key, acked at off over [call, ret].
+func acked(op int, key, value string, call, ret int64, off uint64) Append {
+	return Append{Value: value, Key: key, Attempts: []Attempt{{Op: op, Call: call, Return: ret, Outcome: OK, Offset: off}}}
+}
+
+// unknown is an append of value under key whose answer was lost.
+func unknown(op int, key, value string, call int64) Append {
+	return Append{Value: value, Key: key, Attempts: []Attempt{{Op: op, Call: call, Outcome: Unknown}}}
+}
+
+func refused(op int, key, value string, call, ret int64) Append {
+	return Append{Value: value, Key: key, Attempts: []Attempt{{Op: op, Call: call, Return: ret, Outcome: Failed}}}
+}
+
+func after(a Append, off uint64) Append {
+	a.AfterKey = &off
+	return a
+}
+
+func e(off uint64, key, value string) Entry { return Entry{Offset: off, Key: key, Value: value} }
+
+func kinds(as []Anomaly) []string {
+	var out []string
+	for _, a := range as {
+		out = append(out, a.Kind)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func TestCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		appends []Append
+		log     []Entry
+		want    []string
+	}{{
+		name: "clean",
+		appends: []Append{
+			acked(0, "a", "x", 0, 10, 1), after(acked(1, "a", "y", 11, 20, 3), 1),
+			acked(2, "b", "z", 12, 15, 2), unknown(3, "b", "w", 30), refused(4, "a", "v", 40, 41),
+		},
+		log: []Entry{e(1, "a", "x"), e(2, "b", "z"), e(3, "a", "y"), e(4, "b", "w")},
+	}, {
+		name:    "lost",
+		appends: []Append{acked(0, "a", "x", 0, 10, 1), acked(1, "a", "y", 11, 12, 2)},
+		log:     []Entry{e(1, "a", "x")},
+		want:    []string{"lost"},
+	}, {
+		name:    "phantom",
+		appends: []Append{acked(0, "a", "x", 0, 10, 1)},
+		log:     []Entry{e(1, "a", "x"), e(2, "a", "zz")},
+		want:    []string{"phantom"},
+	}, {
+		name:    "two acked at one offset",
+		appends: []Append{acked(0, "a", "x", 0, 10, 1), acked(1, "a", "y", 0, 10, 1)},
+		log:     []Entry{e(1, "a", "x"), e(2, "a", "y")},
+		want:    []string{"ack-mismatch"},
+	}, {
+		name:    "acked under another key",
+		appends: []Append{acked(0, "a", "x", 0, 10, 1)},
+		log:     []Entry{e(1, "b", "x")},
+		want:    []string{"ack-mismatch"},
+	}, {
+		name:    "condition",
+		appends: []Append{acked(0, "a", "x", 0, 10, 1), acked(1, "a", "y", 11, 12, 2), after(acked(2, "a", "z", 13, 14, 3), 1)},
+		log:     []Entry{e(1, "a", "x"), e(2, "a", "y"), e(3, "a", "z")},
+		want:    []string{"condition"},
+	}, {
+		name: "condition on the log",
+		appends: []Append{acked(0, "a", "x", 0, 10, 1), acked(1, "b", "y", 11, 12, 2),
+			func() Append { a := acked(2, "a", "z", 13, 14, 3); one := uint64(1); a.AfterLog = &one; return a }()},
+		log:  []Entry{e(1, "a", "x"), e(2, "b", "y"), e(3, "a", "z")},
+		want: []string{"condition"},
+	}, {
+		name:    "realtime order",
+		appends: []Append{acked(0, "a", "x", 0, 10, 2), acked(1, "b", "y", 20, 30, 1)},
+		log:     []Entry{e(1, "b", "y"), e(2, "a", "x")},
+		want:    []string{"realtime-order"},
+	}, {
+		name:    "an unknown append landing before one acked before it was sent",
+		appends: []Append{acked(0, "a", "x", 0, 10, 2), unknown(1, "b", "y", 20)},
+		log:     []Entry{e(1, "b", "y"), e(2, "a", "x")},
+		want:    []string{"realtime-order"},
+	}, {
+		name:    "refused, yet there",
+		appends: []Append{refused(0, "a", "x", 0, 10)},
+		log:     []Entry{e(1, "a", "x")},
+		want:    []string{"failed-visible"},
+	}, {
+		name: "resent with no idempotency key, twice",
+		appends: []Append{{Value: "x", Key: "a", Attempts: []Attempt{
+			{Op: 0, Call: 0, Outcome: Unknown}, {Op: 1, Call: 5, Return: 10, Outcome: OK, Offset: 2},
+		}}},
+		log: []Entry{e(1, "a", "x"), e(2, "a", "x")},
+	}, {
+		name: "resent under an idempotency key, twice",
+		appends: []Append{{Value: "x", Key: "a", Idempotent: true, Attempts: []Attempt{
+			{Op: 0, Call: 0, Outcome: Unknown}, {Op: 1, Call: 5, Return: 10, Outcome: OK, Offset: 2},
+		}}},
+		log:  []Entry{e(1, "a", "x"), e(2, "a", "x")},
+		want: []string{"duplicate"},
+	}, {
+		name:    "sent once, twice",
+		appends: []Append{acked(0, "a", "x", 0, 10, 2)},
+		log:     []Entry{e(1, "a", "x"), e(2, "a", "x")},
+		want:    []string{"duplicate"},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Check(tc.appends, tc.log)
+			for _, a := range got {
+				t.Log(a)
+			}
+			if !slices.Equal(kinds(got), tc.want) {
+				t.Fatalf("found %v, want %v", kinds(got), tc.want)
+			}
+		})
+	}
+}
+
+func read(op int, key string, call, ret int64, off uint64, value string) Read {
+	return Read{Op: op, Key: key, Call: call, Return: ret, Offset: off, Value: value}
+}
+
+func TestCheckReads(t *testing.T) {
+	appends := []Append{
+		acked(0, "a", "x", 0, 10, 1),
+		acked(1, "a", "y", 11, 12, 2),
+		unknown(2, "a", "z", 30), // lands at 4
+		acked(3, "b", "w", 0, 5, 3),
+	}
+	log := []Entry{e(1, "a", "x"), e(2, "a", "y"), e(3, "b", "w"), e(4, "a", "z")}
+	for _, tc := range []struct {
+		name  string
+		reads []Read
+		want  []string
+	}{{
+		name: "clean",
+		reads: []Read{
+			read(10, "a", 5, 6, 0, ""),        // before x took effect
+			read(11, "a", 5, 11, 1, "x"),      // x
+			read(12, "a", 11, 12, 1, "x"),     // concurrent with y
+			read(13, "a", 13, 14, 2, "y"),     // y
+			read(14, "a", 31, 32, 2, "y"),     // z not yet
+			read(15, "a", 40, 41, 4, "z"),     // z
+			read(16, "b", 6, 7, 3, "w"),       // another key
+			read(17, "c", 1, 2, 0, ""),        // no entries at all
+			read(18, "a", 35, 36, 4, "z"),     // z seen once ...
+			read(19, "a", 37, 38, 4, "z"),     // ... and after
+			read(20, "a", 12, 13, 2, "y"),     // y concurrent with its ack
+			read(21, "b", 100, 101, 3, "w"),   // long after
+			read(22, "a", 100, 101, 4, "z"),   // z long after
+			read(23, "a", 11, 12, 2, "y"),     // y within y's own call
+			read(24, "a", 10, 10, 1, "x"),     // at x's return
+			read(25, "b", 0, 1, 0, ""),        // w not yet
+			read(26, "a", 0, 100, 1, "x"),     // a long read
+			read(27, "a", 31, 100, 4, "z"),    // a long read of z
+			read(28, "a", 31, 100, 2, "y"),    // a long read of y
+			read(29, "b", 4, 5, 3, "w"),       // w within its call
+			read(30, "a", 9, 10, 1, "x"),      // x within its call
+			read(31, "a", 12, 30, 2, "y"),     // y up to z's call
+			read(32, "a", 13, 1000, 4, "z"),   // z, read long
+			read(33, "a", 2000, 2001, 4, "z"), // z at the end
+		},
+	}, {
+		name:  "stale",
+		reads: []Read{read(10, "a", 20, 21, 1, "x")},
+		want:  []string{"nonlinearizable-read"},
+	}, {
+		name:  "new then old",
+		reads: []Read{read(10, "a", 40, 41, 4, "z"), read(11, "a", 42, 43, 2, "y")},
+		want:  []string{"nonlinearizable-read"},
+	}, {
+		name:  "nothing after something",
+		reads: []Read{read(10, "a", 20, 21, 0, "")},
+		want:  []string{"nonlinearizable-read"},
+	}, {
+		name:  "dirty",
+		reads: []Read{read(10, "a", 20, 21, 9, "q")},
+		want:  []string{"dirty-read"},
+	}, {
+		name:  "the right offset, the wrong value",
+		reads: []Read{read(10, "a", 20, 21, 2, "q")},
+		want:  []string{"dirty-read"},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, undecided := CheckReads(context.Background(), appends, log, tc.reads, linearize.Limits{})
+			if len(undecided) > 0 {
+				t.Fatalf("undecided: %v", undecided)
+			}
+			for _, a := range got {
+				t.Log(a)
+			}
+			if !slices.Equal(kinds(got), tc.want) {
+				t.Fatalf("found %v, want %v", kinds(got), tc.want)
+			}
+		})
+	}
+}
+
+// A duplicate's later copy may have landed any time after the append was
+// sent, so a read may see the key's entries move back to it.
+func TestCheckReadsDuplicate(t *testing.T) {
+	appends := []Append{
+		{Value: "x", Key: "a", Attempts: []Attempt{{Op: 0, Call: 0, Outcome: Unknown}, {Op: 1, Call: 5, Return: 10, Outcome: OK, Offset: 1}}},
+		acked(2, "a", "y", 11, 12, 2),
+	}
+	log := []Entry{e(1, "a", "x"), e(2, "a", "y"), e(3, "a", "x")}
+	reads := []Read{read(10, "a", 13, 14, 2, "y"), read(11, "a", 20, 21, 3, "x")}
+	got, _ := CheckReads(context.Background(), appends, log, reads, linearize.Limits{})
+	if len(got) > 0 {
+		t.Fatalf("found %v", got)
+	}
+}

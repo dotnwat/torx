@@ -247,3 +247,76 @@ func waitForFile(t *testing.T, path string) {
 	}
 	t.Fatalf("file %s did not appear within the deadline", filepath.Base(path))
 }
+
+func init() {
+	Register("wtest.stderr", func() Job { return &wStderrJob{} })
+	Register("wtest.stuck", func() Job { return &wStuckJob{} })
+}
+
+// wStderrJob writes to the worker's standard error itself, as the Go runtime
+// does when it panics or finds a data race.
+type wStderrJob struct{ JobBase }
+
+func (*wStderrJob) Declare(*JobContext) {}
+func (*wStderrJob) Run(context.Context, *JobContext) error {
+	_, err := os.Stderr.WriteString("straight to fd 2\n")
+	return err
+}
+
+// wStuckJob ignores its context: a job stuck where cancellation cannot
+// reach it.
+type wStuckJob struct{ JobBase }
+
+func (*wStuckJob) Declare(*JobContext) {}
+func (*wStuckJob) Run(context.Context, *JobContext) error {
+	stuckForAnHour()
+	return nil
+}
+
+func stuckForAnHour() { time.Sleep(time.Hour) }
+
+func TestSelfExecLauncherKeepsWorkerOutput(t *testing.T) {
+	runDir := t.TempDir()
+	launcher := SelfExecLauncher{Env: []string{"TORX_TEST_WORKER=1"}}
+	res, err := launcher.Launch(context.Background(),
+		Assignment{JobID: "wtest.stderr", Session: SessionConfig{ResultsDir: runDir}}, discardSink{})
+	if err != nil || res.Status != StatusPass {
+		t.Fatalf("Launch: %+v, %v", res, err)
+	}
+	got, err := os.ReadFile(filepath.Join(runDir, "wtest.stderr", workerLogFile))
+	if err != nil || !strings.Contains(string(got), "straight to fd 2") {
+		t.Errorf("%s = %q (%v), want what the worker wrote", workerLogFile, got, err)
+	}
+
+	// A worker that prints nothing leaves no file.
+	if _, err := launcher.Launch(context.Background(), Assignment{JobID: "wtest.artifact", Session: SessionConfig{ResultsDir: runDir}}, discardSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "wtest.artifact", workerLogFile)); !os.IsNotExist(err) {
+		t.Errorf("a quiet worker left %s: %v", workerLogFile, err)
+	}
+}
+
+// A worker that does not exit when its job is cancelled leaves the stacks
+// of its goroutines in worker.log before it is killed.
+func TestSelfExecLauncherDumpsAStuckWorker(t *testing.T) {
+	runDir := t.TempDir()
+	launcher := SelfExecLauncher{Env: []string{"TORX_TEST_WORKER=1"}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	res, err := launcher.Launch(ctx, Assignment{JobID: "wtest.stuck", Session: SessionConfig{ResultsDir: runDir}}, discardSink{})
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if res.Status == StatusPass {
+		t.Errorf("a stuck job passed")
+	}
+	if took := time.Since(start); took > time.Second+workerGracePeriod+2*time.Second {
+		t.Errorf("Launch took %v", took)
+	}
+	got, err := os.ReadFile(filepath.Join(runDir, "wtest.stuck", workerLogFile))
+	if err != nil || !strings.Contains(string(got), "stuckForAnHour") {
+		t.Errorf("%s (%v) does not show where the worker was stuck:\n%s", workerLogFile, err, got)
+	}
+}

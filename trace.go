@@ -32,6 +32,9 @@ const (
 	eventsFile  = "events.ndjson"
 	testLogFile = "test_log"
 	resultFile  = "result.json"
+	// workerLogFile is the worker process's own output, which the
+	// SelfExecLauncher keeps.
+	workerLogFile = "worker.log"
 )
 
 // reservedJobFile reports whether name is one of the framework's own files in a
@@ -40,7 +43,8 @@ const (
 // file, and an artifact written under one would truncate the open trace or be
 // overwritten by the final result.json.
 func reservedJobFile(name string) bool {
-	return strings.EqualFold(name, eventsFile) || strings.EqualFold(name, testLogFile) || strings.EqualFold(name, resultFile)
+	return strings.EqualFold(name, eventsFile) || strings.EqualFold(name, testLogFile) || strings.EqualFold(name, resultFile) ||
+		strings.EqualFold(name, workerLogFile)
 }
 
 // teeSink fans each event out to several sinks.

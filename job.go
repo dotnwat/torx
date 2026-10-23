@@ -224,7 +224,7 @@ func (jc *JobContext) CollectArtifacts(ctx context.Context) error {
 // from nodes into directories there, so a job's files are told apart from
 // theirs by being files at the top: name must be a single non-traversal path
 // component that is neither one of the framework's own files (result.json,
-// test_log, events.ndjson) nor a registered service's name, in any letter
+// test_log, events.ndjson, worker.log) nor a registered service's name, in any letter
 // case, since a case-insensitive filesystem would take a case variant for the
 // same file; any other name is a programming error and panics. Writing a name
 // again replaces the file, and concurrent writes are serialized, so the file

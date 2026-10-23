@@ -371,10 +371,18 @@ go run ./path/to/suite -nodes 3 'my\..*'
 
 # Results land under ./results/<timestamp>/ with a `latest` symlink:
 #   results/<ts>/run.json
-#   results/<ts>/<jobVariant>/{events.ndjson, test_log, result.json,
+#   results/<ts>/<jobVariant>/{events.ndjson, test_log, result.json, worker.log,
 #                              <the job's own artifacts>,
 #                              <service>/<node>/stdout.log[, stdout.<k>.log]}
 ```
+
+`worker.log`, if the worker printed anything, is its own output: what the
+Go runtime prints when the job panics, detects a data race, or is sent
+`SIGQUIT`. A worker
+still running halfway through the grace period it has to exit once its job
+is cancelled (a timeout, an interrupt) is sent `SIGQUIT` before it is
+killed, so a job stuck where cancellation cannot reach it leaves the stack
+of every goroutine there, to say where.
 
 Useful flags: `-nodes N` (local pool size), `-parallel N` (concurrent jobs),
 `-results <file>` (newline-delimited JSON results), `-results-dir <dir>` (the
@@ -532,6 +540,10 @@ again until `ctx` ends, heals the last fault even then, and reports every
 fault and heal to a `Record` hook, for the job's history. `nemesis.Holds`
 keeps track of what a fault holds down, so that a supervisor -- the
 nemesis's `Before` hook -- restarts only what exited on its own.
+`nemesis.Windows` pairs the recorded faults with their heals, and
+`Window.Overlaps` says whether an operation ran while one held or soon
+after: what is a bug in a quiet system -- a stale read, say -- may be what
+the system promises while a partition cuts its server off.
 
 The [`linearize`](linearize/) package checks the record. Given a model of
 the object -- an initial state and a step function -- and the operations
@@ -552,6 +564,18 @@ snapshot, so a history is legal exactly when every read holds the writes
 before its snapshot and no others, a read an hour in the past as much as one
 at the present; the reads at one snapshot share an `Op.Group`, so a write
 whose answer was lost reaches all of them or none.
+
+The [`logcheck`](logcheck/) package checks a record of appends to a log
+whose server gives each entry an offset of its own -- a stream's sequence,
+a partition's offset -- against the log as it stands once every fault is
+healed: `logcheck.Check` reports an acked append the log lost or holds
+elsewhere, one it holds though every attempt was refused, one it holds more
+often than its attempts could have put it there, a value no client wrote,
+an append conditional on a last offset that follows another, and an append
+the log holds before one acked before it was sent. With entries filed under
+keys, the log is a map of registers too, and `logcheck.CheckReads` checks
+reads of a key's last entry for linearizability, in the order the log put
+the key's entries in.
 
 The [`listappend`](listappend/) package checks a record of transactions,
 after Elle: transactions read lists and append unique elements to them, so

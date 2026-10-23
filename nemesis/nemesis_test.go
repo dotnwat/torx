@@ -69,7 +69,7 @@ func TestRunAlternatesFaultsAndHeals(t *testing.T) {
 		t.Fatalf("%d events, want an even number of at least 4", len(got))
 	}
 	for i, ev := range got {
-		if ev.Fault != "crash" || ev.Target != "n1" || ev.Heal != (i%2 == 1) || ev.End.Before(ev.Start) {
+		if ev.Fault != "crash" || ev.Target != "n1" || ev.Heal != (i%2 == 1) || ev.Held != (i%2 == 0) || ev.End.Before(ev.Start) {
 			t.Fatalf("event %d: %+v", i, ev)
 		}
 	}
@@ -191,5 +191,56 @@ func TestHolds(t *testing.T) {
 	}
 	if h.Held("n1") {
 		t.Fatal("a failed heal kept its hold")
+	}
+}
+
+func TestWindows(t *testing.T) {
+	at := func(s int) time.Time { return time.Unix(int64(s), 0) }
+	evs := []Event{
+		{Fault: "partition", Target: "a", Start: at(10), End: at(11), Held: true},
+		{Fault: "stepdown", Target: "s", Start: at(12), End: at(13)},
+		{Fault: "pause", Target: "b", Start: at(14), End: at(14), Held: true},
+		{Fault: "partition", Target: "a", Heal: true, Start: at(20), End: at(21)},
+		{Fault: "partition", Target: "a", Start: at(30), End: at(31), Held: true},
+		{Fault: "partition", Target: "a", Heal: true, Start: at(40), End: at(41)},
+		{Fault: "crash", Target: "c", Start: at(50), End: at(50), Held: true, Err: errors.New("half applied")},
+	}
+	want := []Window{
+		{"partition", "a", at(10), at(21)},
+		{"stepdown", "s", at(12), at(13)},
+		{"pause", "b", at(14), time.Time{}}, // never healed
+		{"partition", "a", at(30), at(41)},
+		{"crash", "c", at(50), time.Time{}},
+	}
+	got := Windows(evs)
+	if len(got) != len(want) {
+		t.Fatalf("windows %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("window %d: %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	w := Window{Start: at(10), End: at(20)}
+	for _, tc := range []struct {
+		from, to int
+		after    time.Duration
+		want     bool
+	}{
+		{0, 9, 0, false},
+		{0, 10, 0, true},
+		{15, 16, 0, true},
+		{20, 30, 0, true},
+		{21, 30, 0, false},
+		{25, 30, 5 * time.Second, true},
+		{26, 30, 5 * time.Second, false},
+	} {
+		if got := w.Overlaps(at(tc.from), at(tc.to), tc.after); got != tc.want {
+			t.Errorf("[%d,%d] after %v: %v, want %v", tc.from, tc.to, tc.after, got, tc.want)
+		}
+	}
+	if !(Window{Start: at(10)}).Overlaps(at(1000), at(1001), 0) {
+		t.Errorf("a window never healed ended")
 	}
 }
