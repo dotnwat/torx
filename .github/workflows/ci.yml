@@ -117,6 +117,39 @@ jobs:
       - name: run the rqlite chaos job under -netns
         run: go run ./examples/rqlite/harness -netns 'rqlite\.chaos'
 
+  # The NATS example is a module of its own, which the jobs above do not
+  # build. This job checks it, builds the nats-server release it targets,
+  # and runs its smoke job and a short chaos job under -netns.
+  example-nats:
+    name: example (nats)
+    runs-on: ubuntu-latest
+    env:
+      NATS_SERVER_VERSION: v2.15.1
+    defaults:
+      run:
+        working-directory: examples/nats
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - name: go.mod and go.sum are tidy
+        run: go mod tidy -diff
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - name: let unprivileged users create user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: install nftables
+        run: sudo apt-get install -y nftables
+      - name: build nats-server
+        run: GOBIN="$RUNNER_TEMP/bin" go install "github.com/nats-io/nats-server/v2@${NATS_SERVER_VERSION}"
+      - name: run the smoke job
+        run: go run ./harness -nats "$RUNNER_TEMP/bin/nats-server" 'nats\.smoke'
+      - name: run a short chaos job under -netns
+        run: |
+          echo '{"nats.chaos": {"configs": [{"duration": 30, "faults": "crash,restart,pause,partition-one,stepdown,stepdown-consumer"}]}}' > "$RUNNER_TEMP/params.json"
+          go run ./harness -nats "$RUNNER_TEMP/bin/nats-server" -netns -params "$RUNNER_TEMP/params.json" 'nats\.chaos'
+
   # The tutorial's last step provisions docker containers and runs the suite
   # against them over ssh. The matrix above skips that test where docker is
   # not usable; this job runs it with the skip turned into a failure, and
