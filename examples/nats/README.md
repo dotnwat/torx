@@ -175,9 +175,11 @@ An issue the checker cannot tell apart from others is sidestepped instead.
 
 ## Findings
 
-Against nats-server 2.15.1 and `main` (2026-10-20):
+Against nats-server 2.15.1 and `main` (2026-10-20); each has an issue with
+a reproducer, tracked in
+[#67](https://github.com/dotnwat/torx/issues/67):
 
-1. A file stream compressed with S2 corrupts its last block when its store
+1. [#62](https://github.com/dotnwat/torx/issues/62) A file stream compressed with S2 corrupts its last block when its store
    is truncated within that block -- as a replica that syncs always does on
    every restart after a crash -- and every message in the block becomes
    unreadable on that replica; once one led a stream, the stream's leader
@@ -185,21 +187,21 @@ Against nats-server 2.15.1 and `main` (2026-10-20):
    `fileStore.Truncate` that needs no tombstone leaves the block it cut the
    write block, but the new block it made for tombstones had the old last
    block compressed in the background. 2.14.8 too; not 2.12.15.
-2. A write error while a replica flushes its buffered messages -- its disk
+2. [#63](https://github.com/dotnwat/torx/issues/63) A write error while a replica flushes its buffered messages -- its disk
    filled for a moment -- drops messages its store had applied. On the
    stream's leader, until the stream notices, conditional writes are
    checked against what is left: one whose condition is already false
    commits, a lost update. On any replica, the stream is out of service
    there until the server restarts, though the disk works again.
-3. A mirror, or a stream that sources others, stops copying, and reports
+3. [#64](https://github.com/dotnwat/torx/issues/64) A mirror, or a stream that sources others, stops copying, and reports
    no lag, until its leader changes, after it is scaled to one replica and
    back while its origins take writes, or after its origin loses a replica.
    2.12.15 and 2.14.8 too.
-4. A stream's leader cut off from its peers keeps answering publishes and
+4. [#65](https://github.com/dotnwat/torx/issues/65) A stream's leader cut off from its peers keeps answering publishes and
    refuses conditional ones from its stale state ("wrong last sequence")
    while the leader its peers elected stores them, for as long as it takes
    it to notice -- about fifteen seconds. A client told its write failed
    retries a write that took effect.
-5. With the feature flag `js_snapshot_sources` (on by default from 2.16, on
+5. [#66](https://github.com/dotnwat/torx/issues/66) With the feature flag `js_snapshot_sources` (on by default from 2.16, on
    `main`), a stream that sources others, led by a replica that crashed
    after its last snapshot, sources again everything it had sourced since.
