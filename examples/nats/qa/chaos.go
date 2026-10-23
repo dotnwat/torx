@@ -591,7 +591,7 @@ func createConsumer(ctx context.Context, c *nats.Client) error {
 		return last == nil, nil
 	}, time.Second)
 	if err != nil {
-		return fmt.Errorf("create consumer: %w (last: %v)", err, last)
+		return fmt.Errorf("create consumer: %w (last: %w)", err, last)
 	}
 	return nil
 }
@@ -612,7 +612,7 @@ func createStream(ctx context.Context, c *nats.Client, cfg map[string]any) error
 		return err == nil && si.Cluster != nil && si.Cluster.Leader != "", nil
 	}, time.Second)
 	if err != nil {
-		return fmt.Errorf("create stream %s: %w (last: %v)", cfg["name"], err, last)
+		return fmt.Errorf("create stream %s: %w (last: %w)", cfg["name"], err, last)
 	}
 	return nil
 }

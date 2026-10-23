@@ -84,13 +84,10 @@ func (j *deposedJob) Run(ctx context.Context, jc *torx.JobContext) error {
 		defer cancel()
 		return cl.Publish(rctx, "dep.x", []byte(value), hdr)
 	}
-	var last uint64
 	for i := range 10 {
-		ack, err := publish(fmt.Sprintf("before-%d", i), nil)
-		if err != nil {
+		if _, err := publish(fmt.Sprintf("before-%d", i), nil); err != nil {
 			return fmt.Errorf("publish before the partition: %w", err)
 		}
-		last = ack.Seq
 	}
 
 	// Cut the leader off from everyone but the bridge.
@@ -154,17 +151,15 @@ func (j *deposedJob) Run(ctx context.Context, jc *torx.JobContext) error {
 		if err != nil {
 			continue
 		}
-		last = ack.Seq
+		// On condition of the subject's last sequence being the one the
+		// new leader just acked.
 		value := fmt.Sprintf("cas-%d", i)
-		e := last
-		ack, err = publish(value, &e)
-		switch {
-		case err != nil:
+		e := ack.Seq
+		if _, err := publish(value, &e); err != nil {
 			refused = append(refused, attempt{value, e, err})
 			lastRefusal = time.Since(partitioned)
-		default:
+		} else {
 			acked++
-			last = ack.Seq
 		}
 	}
 	torx.Logf(ctx, "info", "%d conditional writes acked, %d refused, the last refused %v after the new leader was elected", acked, len(refused), lastRefusal.Round(time.Millisecond))
@@ -175,7 +170,7 @@ func (j *deposedJob) Run(ctx context.Context, jc *torx.JobContext) error {
 	}
 	f, bad := j.finalRead(ctx, admin)
 	if f == nil {
-		return fmt.Errorf("reading the stream back: %v", bad)
+		return fmt.Errorf("reading the stream back: %w", bad)
 	}
 	var lies []string
 	for _, a := range refused {
