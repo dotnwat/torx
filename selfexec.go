@@ -256,11 +256,9 @@ func (w *workerOutput) started() {
 		r       *os.File
 		console io.Writer
 	}{{w.outR, os.Stdout}, {w.errR, os.Stderr}} {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _ = io.Copy(tee{w.file, c.console}, c.r)
-		}()
+		})
 	}
 	go func() {
 		wg.Wait()
