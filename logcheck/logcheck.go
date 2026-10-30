@@ -19,7 +19,13 @@
 //     than the one it was conditional on;
 //   - realtime-order: an append the log holds before one that was acked
 //     before it was sent. A log is one sequence, which orders its appends as
-//     they happened.
+//     they happened;
+//   - collision: two entries at one offset, which a log cannot hold. The
+//     checks go on with the first.
+//
+// Offsets start at 1: 0 stands for no entry, in a read that found none and
+// in a condition on there being none. A log whose offsets start at 0 -- a
+// Kafka partition's -- is checked shifted up by one.
 //
 // Appends filed under keys -- a subject, a message key -- make the log a
 // map of registers too, each key's value its last entry. CheckReads checks
@@ -35,7 +41,6 @@ import (
 	"maps"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/dotnwat/torx/linearize"
 )
@@ -85,6 +90,8 @@ type Append struct {
 
 // Entry is an entry of the log as it stands once every fault is healed.
 type Entry struct {
+	// Offset is the entry's place in the log, 1 or more; an entry at 0 is a
+	// programming error and panics.
 	Offset uint64
 	Key    string
 	Value  string
@@ -94,7 +101,7 @@ type Entry struct {
 type Anomaly struct {
 	// Kind is the anomaly: "lost", "ack-mismatch", "phantom",
 	// "duplicate", "failed-visible", "condition", "realtime-order",
-	// "dirty-read", "nonlinearizable-read".
+	// "collision", "dirty-read", "nonlinearizable-read".
 	Kind string
 	// Value is the value it concerns, if one; Key, the key.
 	Value, Key string
@@ -111,11 +118,22 @@ type log struct {
 	byValue  map[string][]uint64
 	byKey    map[string][]uint64
 	offsets  []uint64
+	// collisions are the entries at an offset another entry already had,
+	// which are left out of the index.
+	collisions []Anomaly
 }
 
 func index(entries []Entry) *log {
 	l := &log{byOffset: map[uint64]Entry{}, byValue: map[string][]uint64{}, byKey: map[string][]uint64{}}
 	for _, e := range entries {
+		if e.Offset == 0 {
+			panic(fmt.Sprintf("logcheck: the log holds %s (key %q) at offset 0; offsets start at 1", e.Value, e.Key))
+		}
+		if first, ok := l.byOffset[e.Offset]; ok {
+			l.collisions = append(l.collisions, Anomaly{Kind: "collision", Value: e.Value, Key: e.Key,
+				Detail: fmt.Sprintf("the log holds %s (key %q) at %d, where it already holds %s (key %q)", e.Value, e.Key, e.Offset, first.Value, first.Key)})
+			continue
+		}
 		l.byOffset[e.Offset] = e
 		l.byValue[e.Value] = append(l.byValue[e.Value], e.Offset)
 		l.byKey[e.Key] = append(l.byKey[e.Key], e.Offset)
@@ -141,16 +159,17 @@ func before(offs []uint64, off uint64) uint64 {
 }
 
 // timing is when an append was called and acked: its first attempt's call,
-// and its first OK attempt's return, or linearize.Pending if none was OK.
-func timing(a Append) (call, ret int64) {
+// and its first OK attempt's return and the offset that ack named, or
+// linearize.Pending and 0 if none was OK.
+func timing(a Append) (call, ret int64, off uint64) {
 	call, ret = a.Attempts[0].Call, linearize.Pending
 	for _, t := range a.Attempts {
 		call = min(call, t.Call)
 		if t.Outcome == OK && t.Return < ret {
-			ret = t.Return
+			ret, off = t.Return, t.Offset
 		}
 	}
-	return call, ret
+	return call, ret, off
 }
 
 func ops(a Append) []int {
@@ -173,15 +192,21 @@ func Check(appends []Append, entries []Entry) []Anomaly {
 		}
 		appended[a.Value] = true
 		offs := l.byValue[a.Value]
-		if len(offs) > 1 && (a.Idempotent || len(offs) > len(a.Attempts)) {
-			bad = append(bad, Anomaly{Kind: "duplicate", Value: a.Value, Key: a.Key, Ops: ops(a),
-				Detail: fmt.Sprintf("the log holds %s at %v, from %d attempts (idempotent: %v)", a.Value, offs, len(a.Attempts), a.Idempotent)})
-		}
-		refused := true
+		could := 0 // the attempts that may have put the value in the log
 		for _, t := range a.Attempts {
 			if t.Outcome != Failed {
-				refused = false
+				could++
 			}
+		}
+		switch {
+		case could == 0 && len(offs) > 0:
+			bad = append(bad, Anomaly{Kind: "failed-visible", Value: a.Value, Key: a.Key, Ops: ops(a),
+				Detail: fmt.Sprintf("the log refused every attempt at %s, and holds it at %v", a.Value, offs)})
+		case len(offs) > 1 && (a.Idempotent || len(offs) > could):
+			bad = append(bad, Anomaly{Kind: "duplicate", Value: a.Value, Key: a.Key, Ops: ops(a),
+				Detail: fmt.Sprintf("the log holds %s at %v, from %d attempts not refused (idempotent: %v)", a.Value, offs, could, a.Idempotent)})
+		}
+		for _, t := range a.Attempts {
 			if t.Outcome != OK {
 				continue
 			}
@@ -195,22 +220,21 @@ func Check(appends []Append, entries []Entry) []Anomaly {
 					Detail: fmt.Sprintf("%s (key %q) was acked at %d, and the log holds %s (key %q) there", a.Value, a.Key, t.Offset, e.Value, e.Key)})
 			}
 		}
-		if refused && len(offs) > 0 {
-			bad = append(bad, Anomaly{Kind: "failed-visible", Value: a.Value, Key: a.Key, Ops: ops(a),
-				Detail: fmt.Sprintf("the log refused every attempt at %s, and holds it at %v", a.Value, offs)})
-		}
-		if len(offs) > 0 && (a.AfterKey != nil || a.AfterLog != nil) {
-			off := offs[0]
-			if a.AfterKey != nil {
-				if prev := before(l.byKey[a.Key], off); prev != *a.AfterKey {
-					bad = append(bad, Anomaly{Kind: "condition", Value: a.Value, Key: a.Key, Ops: ops(a),
-						Detail: fmt.Sprintf("the log holds %s at %d, after %d under key %q, though it was conditional on %d", a.Value, off, prev, a.Key, *a.AfterKey)})
+		// Every copy the log holds was accepted on the condition: a second
+		// copy follows the first, if nothing else.
+		if a.AfterKey != nil || a.AfterLog != nil {
+			for _, off := range offs {
+				if a.AfterKey != nil {
+					if prev := before(l.byKey[a.Key], off); prev != *a.AfterKey {
+						bad = append(bad, Anomaly{Kind: "condition", Value: a.Value, Key: a.Key, Ops: ops(a),
+							Detail: fmt.Sprintf("the log holds %s at %d, after %d under key %q, though it was conditional on %d", a.Value, off, prev, a.Key, *a.AfterKey)})
+					}
 				}
-			}
-			if a.AfterLog != nil {
-				if prev := before(l.offsets, off); prev != *a.AfterLog {
-					bad = append(bad, Anomaly{Kind: "condition", Value: a.Value, Key: a.Key, Ops: ops(a),
-						Detail: fmt.Sprintf("the log holds %s at %d, after %d, though it was conditional on the log's last entry being %d", a.Value, off, prev, *a.AfterLog)})
+				if a.AfterLog != nil {
+					if prev := before(l.offsets, off); prev != *a.AfterLog {
+						bad = append(bad, Anomaly{Kind: "condition", Value: a.Value, Key: a.Key, Ops: ops(a),
+							Detail: fmt.Sprintf("the log holds %s at %d, after %d, though it was conditional on the log's last entry being %d", a.Value, off, prev, *a.AfterLog)})
+					}
 				}
 			}
 		}
@@ -221,16 +245,19 @@ func Check(appends []Append, entries []Entry) []Anomaly {
 				Detail: fmt.Sprintf("the log holds %s at %d (key %q), which no client appended", e.Value, off, e.Key)})
 		}
 	}
+	bad = append(bad, l.collisions...)
 	return append(bad, realtimeOrder(appends, l)...)
 }
 
 // realtimeOrder reports each append the log holds before one that was
-// acked before it was sent: the latest such, for each.
+// acked before it was sent: the latest such, for each. An acked append is
+// where its ack put it; the other is at the first place the log holds it.
 func realtimeOrder(appends []Append, l *log) []Anomaly {
 	type placed struct {
 		a         Append
 		call, ret int64
-		off       uint64
+		first     uint64 // the first offset the log holds the value at
+		acked     uint64 // the offset its first ack named, if the log holds the value there; first otherwise
 	}
 	var in []placed
 	for _, a := range appends {
@@ -238,8 +265,12 @@ func realtimeOrder(appends []Append, l *log) []Anomaly {
 			continue
 		}
 		if offs := l.byValue[a.Value]; len(offs) > 0 {
-			call, ret := timing(a)
-			in = append(in, placed{a, call, ret, offs[0]})
+			call, ret, ackOff := timing(a)
+			p := placed{a, call, ret, offs[0], offs[0]}
+			if _, found := slices.BinarySearch(offs, ackOff); found {
+				p.acked = ackOff
+			}
+			in = append(in, p)
 		}
 	}
 	byCall := slices.Clone(in)
@@ -251,13 +282,13 @@ func realtimeOrder(appends []Append, l *log) []Anomaly {
 	i := 0
 	for _, b := range byCall {
 		for ; i < len(byRet) && byRet[i].ret < b.call; i++ {
-			if done == nil || byRet[i].off > done.off {
+			if done == nil || byRet[i].acked > done.acked {
 				done = &byRet[i]
 			}
 		}
-		if done != nil && done.off > b.off {
+		if done != nil && done.acked > b.first {
 			bad = append(bad, Anomaly{Kind: "realtime-order", Value: b.a.Value, Key: b.a.Key, Ops: append(ops(done.a), ops(b.a)...),
-				Detail: fmt.Sprintf("the log holds %s at %d, before %s at %d, which was acked before %s was sent", b.a.Value, b.off, done.a.Value, done.off, b.a.Value)})
+				Detail: fmt.Sprintf("the log holds %s at %d, before %s at %d, which was acked before %s was sent", b.a.Value, b.first, done.a.Value, done.acked, b.a.Value)})
 		}
 	}
 	return bad
@@ -289,12 +320,15 @@ type readIn struct {
 // each must return the key's last entry at some instant between its call
 // and its return, in an order that respects real time, with the key's
 // appends in the order the log holds them. A read of an entry the log does
-// not hold is a dirty read, and is left out of the search. It returns what
-// it found, and the keys whose search did not finish within ctx and lim.
+// not hold is a dirty read, and is left out of the search; so is a read of
+// an entry no client appended, which Check reports as a phantom, and the
+// entry itself, since when it landed is anyone's guess. It returns what it
+// found, and the keys whose search did not finish within ctx and lim.
 func CheckReads(ctx context.Context, appends []Append, entries []Entry, reads []Read, lim linearize.Limits) ([]Anomaly, []string) {
 	l := index(entries)
 	var bad []Anomaly
 	byKey := map[string][]linearize.Op[readIn, uint64]{}
+	placed := map[string][]uint64{} // each key's entries some append put there
 	for _, a := range appends {
 		if len(a.Attempts) == 0 {
 			continue
@@ -303,15 +337,19 @@ func CheckReads(ctx context.Context, appends []Append, entries []Entry, reads []
 		if len(offs) == 0 {
 			continue
 		}
-		call, ret := timing(a)
+		call, ret, _ := timing(a)
 		for i, off := range offs {
 			r := ret
 			if i > 0 {
 				r = linearize.Pending // a duplicate: when it landed is unknown
 			}
 			k := l.byOffset[off].Key
+			placed[k] = append(placed[k], off)
 			byKey[k] = append(byKey[k], linearize.Op[readIn, uint64]{Call: call, Return: r, Input: readIn{off: off, op: a.Attempts[0].Op}})
 		}
+	}
+	for _, offs := range placed {
+		slices.Sort(offs)
 	}
 	for _, r := range reads {
 		if r.Offset != 0 {
@@ -321,13 +359,16 @@ func CheckReads(ctx context.Context, appends []Append, entries []Entry, reads []
 					Detail: fmt.Sprintf("a read of %q returned %s at %d, which the log does not hold there", r.Key, r.Value, r.Offset)})
 				continue
 			}
+			if _, found := slices.BinarySearch(placed[r.Key], r.Offset); !found {
+				continue // a phantom
+			}
 		}
 		byKey[r.Key] = append(byKey[r.Key], linearize.Op[readIn, uint64]{Call: r.Call, Return: r.Return, Input: readIn{op: r.Op, read: true}, Output: r.Offset})
 	}
 	var unknown []string
 	for _, key := range slices.Sorted(maps.Keys(byKey)) {
 		hist := byKey[key]
-		offs := l.byKey[key]
+		offs := placed[key]
 		last := func(pos int) uint64 {
 			if pos == 0 {
 				return 0
@@ -356,7 +397,7 @@ func CheckReads(ctx context.Context, appends []Append, entries []Entry, reads []
 
 // explain says where the search of a key got stuck: the operation it
 // could not place, the key's last entry then, and the operations nearest
-// it.
+// it, those concurrent with it first.
 func explain(key string, hist []linearize.Op[readIn, uint64], res linearize.Result[int], last func(int) uint64) Anomaly {
 	a := Anomaly{Kind: "nonlinearizable-read", Key: key}
 	var b strings.Builder
@@ -370,18 +411,22 @@ func explain(key string, hist []linearize.Op[readIn, uint64], res linearize.Resu
 	}
 	var near []linearize.Op[readIn, uint64]
 	for i, o := range hist {
-		if i != res.Stuck && o.Call <= stuck.Return && o.Return >= stuck.Call-int64(time.Second) {
+		if i != res.Stuck {
 			near = append(near, o)
 		}
 	}
-	dist := func(o linearize.Op[readIn, uint64]) int64 {
-		if d := o.Call - stuck.Call; d >= 0 {
-			return d
-		} else {
-			return -d
+	// gap is how far an operation is from the stuck one, in the history's
+	// clock, whatever its unit: 0 for one concurrent with it.
+	gap := func(o linearize.Op[readIn, uint64]) int64 {
+		switch {
+		case o.Return < stuck.Call:
+			return stuck.Call - o.Return
+		case stuck.Return < o.Call:
+			return o.Call - stuck.Return
 		}
+		return 0
 	}
-	slices.SortStableFunc(near, func(x, y linearize.Op[readIn, uint64]) int { return cmp.Compare(dist(x), dist(y)) })
+	slices.SortStableFunc(near, func(x, y linearize.Op[readIn, uint64]) int { return cmp.Compare(gap(x), gap(y)) })
 	for _, o := range near[:min(len(near), 8)] {
 		a.Ops = append(a.Ops, o.Input.op)
 	}

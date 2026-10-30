@@ -115,6 +115,35 @@ func TestCheck(t *testing.T) {
 		appends: []Append{acked(0, "a", "x", 0, 10, 2)},
 		log:     []Entry{e(1, "a", "x"), e(2, "a", "x")},
 		want:    []string{"duplicate"},
+	}, {
+		// A refused attempt cannot have put the value there.
+		name: "refused, then acked, twice",
+		appends: []Append{{Value: "x", Key: "a", Attempts: []Attempt{
+			{Op: 0, Call: 0, Return: 1, Outcome: Failed}, {Op: 1, Call: 5, Return: 10, Outcome: OK, Offset: 2},
+		}}},
+		log:  []Entry{e(1, "a", "x"), e(2, "a", "x")},
+		want: []string{"duplicate"},
+	}, {
+		// The second copy follows the first, whatever the condition.
+		name: "conditional, resent, twice",
+		appends: []Append{acked(0, "a", "x", 0, 1, 1), after(Append{Value: "v", Key: "a", Attempts: []Attempt{
+			{Op: 1, Call: 2, Outcome: Unknown}, {Op: 2, Call: 5, Return: 10, Outcome: OK, Offset: 4},
+		}}, 1)},
+		log:  []Entry{e(1, "a", "x"), e(2, "a", "v"), e(4, "a", "v")},
+		want: []string{"condition"},
+	}, {
+		// An acked append is where its ack put it, not at an earlier copy.
+		name: "realtime order against an ack, with an earlier copy",
+		appends: []Append{{Value: "d", Key: "a", Attempts: []Attempt{
+			{Op: 0, Call: 0, Outcome: Unknown}, {Op: 1, Call: 20, Return: 30, Outcome: OK, Offset: 7},
+		}}, acked(2, "b", "x", 40, 45, 5)},
+		log:  []Entry{e(2, "a", "d"), e(5, "b", "x"), e(7, "a", "d")},
+		want: []string{"realtime-order"},
+	}, {
+		name:    "two entries at one offset",
+		appends: []Append{acked(0, "a", "x", 0, 10, 5), acked(1, "b", "y", 0, 10, 5)},
+		log:     []Entry{e(5, "a", "x"), e(5, "b", "y")},
+		want:    []string{"ack-mismatch", "collision"},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := Check(tc.appends, tc.log)
@@ -126,6 +155,15 @@ func TestCheck(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckRejectsOffsetZero(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("an entry at offset 0 was accepted")
+		}
+	}()
+	Check([]Append{acked(0, "a", "x", 0, 10, 0)}, []Entry{e(0, "a", "x")})
 }
 
 func read(op int, key string, call, ret int64, off uint64, value string) Read {
@@ -220,5 +258,42 @@ func TestCheckReadsDuplicate(t *testing.T) {
 	got, _ := CheckReads(context.Background(), appends, log, reads, linearize.Limits{})
 	if len(got) > 0 {
 		t.Fatalf("found %v", got)
+	}
+}
+
+// An entry no client appended is not in the key's order the search uses:
+// the reads of what came after it are placed as if it were not there, and
+// a read of it is left out.
+func TestCheckReadsPhantom(t *testing.T) {
+	appends := []Append{acked(0, "a", "x", 0, 10, 1), acked(1, "a", "y", 20, 30, 3)}
+	log := []Entry{e(1, "a", "x"), e(2, "a", "ph"), e(3, "a", "y")}
+	reads := []Read{read(10, "a", 11, 12, 1, "x"), read(11, "a", 15, 16, 2, "ph"), read(12, "a", 31, 32, 3, "y")}
+	got, undecided := CheckReads(context.Background(), appends, log, reads, linearize.Limits{})
+	if len(got) > 0 || len(undecided) > 0 {
+		t.Fatalf("found %v, undecided %v", got, undecided)
+	}
+	got, _ = CheckReads(context.Background(), appends, log, []Read{read(13, "a", 31, 32, 1, "x")}, linearize.Limits{})
+	if !slices.Equal(kinds(got), []string{"nonlinearizable-read"}) {
+		t.Fatalf("a stale read beside a phantom: found %v", kinds(got))
+	}
+}
+
+// explain names the operations nearest the one it could not place,
+// whatever the clock's unit, and does not run off the end of a history
+// whose stuck operation never returned.
+func TestExplainNearest(t *testing.T) {
+	appends := []Append{acked(0, "a", "x", 0, 1, 1), acked(1, "a", "y", 2, 3, 2)}
+	log := []Entry{e(1, "a", "x"), e(2, "a", "y")}
+	var reads []Read
+	for i := range 20 {
+		reads = append(reads, read(10+i, "a", int64(100+10*i), int64(101+10*i), 2, "y"))
+	}
+	reads = append(reads, read(50, "a", 1000, 1001, 1, "x")) // stale, long after
+	got, _ := CheckReads(context.Background(), appends, log, reads, linearize.Limits{})
+	if len(got) != 1 || got[0].Kind != "nonlinearizable-read" {
+		t.Fatalf("found %v", got)
+	}
+	if got[0].Ops[0] != 50 || len(got[0].Ops) != 9 || !slices.Contains(got[0].Ops, 29) || slices.Contains(got[0].Ops, 10) {
+		t.Errorf("ops %v: want the stale read, then the eight reads nearest it", got[0].Ops)
 	}
 }
