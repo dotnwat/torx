@@ -3,6 +3,7 @@ package torx
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -246,4 +247,273 @@ func waitForFile(t *testing.T, path string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("file %s did not appear within the deadline", filepath.Base(path))
+}
+
+func init() {
+	Register("wtest.stderr", func() Job { return &wStderrJob{} })
+	Register("wtest.stuck", func() Job { return &wStuckJob{} })
+}
+
+// wStderrJob writes to the worker's standard error itself, as the Go runtime
+// does when it panics or finds a data race.
+type wStderrJob struct{ JobBase }
+
+func (*wStderrJob) Declare(*JobContext) {}
+func (*wStderrJob) Run(context.Context, *JobContext) error {
+	_, err := os.Stderr.WriteString("straight to fd 2\n")
+	return err
+}
+
+// wStuckJob ignores its context: a job stuck where cancellation cannot
+// reach it.
+type wStuckJob struct{ JobBase }
+
+func (*wStuckJob) Declare(*JobContext) {}
+func (*wStuckJob) Run(context.Context, *JobContext) error {
+	stuckForAnHour()
+	return nil
+}
+
+func stuckForAnHour() { time.Sleep(time.Hour) }
+
+func TestSelfExecLauncherKeepsWorkerOutput(t *testing.T) {
+	runDir := t.TempDir()
+	launcher := SelfExecLauncher{Env: []string{"TORX_TEST_WORKER=1"}}
+	res, err := launcher.Launch(context.Background(),
+		Assignment{JobID: "wtest.stderr", Session: SessionConfig{ResultsDir: runDir}}, discardSink{})
+	if err != nil || res.Status != StatusPass {
+		t.Fatalf("Launch: %+v, %v", res, err)
+	}
+	got, err := os.ReadFile(filepath.Join(runDir, "wtest.stderr", workerLogFile))
+	if err != nil || !strings.Contains(string(got), "straight to fd 2") {
+		t.Errorf("%s = %q (%v), want what the worker wrote", workerLogFile, got, err)
+	}
+
+	// A run into the same directory again (-run-dir) starts the file over,
+	// as it does result.json.
+	if _, err := launcher.Launch(context.Background(),
+		Assignment{JobID: "wtest.stderr", Session: SessionConfig{ResultsDir: runDir}}, discardSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := os.ReadFile(filepath.Join(runDir, "wtest.stderr", workerLogFile)); err != nil || string(again) != string(got) {
+		t.Errorf("%s after a second run = %q (%v), want the second run's output alone", workerLogFile, again, err)
+	}
+
+	// A worker that prints nothing leaves no file.
+	if _, err := launcher.Launch(context.Background(), Assignment{JobID: "wtest.artifact", Session: SessionConfig{ResultsDir: runDir}}, discardSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "wtest.artifact", workerLogFile)); !os.IsNotExist(err) {
+		t.Errorf("a quiet worker left %s: %v", workerLogFile, err)
+	}
+}
+
+// A worker that does not exit when its job is cancelled leaves the stacks
+// of its goroutines in worker.log before it is killed.
+func TestSelfExecLauncherDumpsAStuckWorker(t *testing.T) {
+	runDir := t.TempDir()
+	launcher := SelfExecLauncher{Env: []string{"TORX_TEST_WORKER=1"}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	res, err := launcher.Launch(ctx, Assignment{JobID: "wtest.stuck", Session: SessionConfig{ResultsDir: runDir}}, discardSink{})
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if res.Status == StatusPass {
+		t.Errorf("a stuck job passed")
+	}
+	// The dump comes once the grace is up, and the worker exits on it;
+	// the kill, defaultDumpGrace later, is the bound either way.
+	if took := time.Since(start); took > time.Second+workerGracePeriod+defaultDumpGrace+2*time.Second {
+		t.Errorf("Launch took %v", took)
+	}
+	got, err := os.ReadFile(filepath.Join(runDir, "wtest.stuck", workerLogFile))
+	if err != nil || !strings.Contains(string(got), "stuckForAnHour") {
+		t.Errorf("%s (%v) does not show where the worker was stuck:\n%s", workerLogFile, err, got)
+	}
+	// The worker left no result.json; the driver's result is there instead.
+	if saved := savedResult(t, runDir, "wtest.stuck"); saved.Status != StatusFail || !saved.Dirty {
+		t.Errorf("result.json = %+v, want the driver's failed, dirty result", saved)
+	}
+}
+
+// savedResult reads the result.json of the variant in runDir.
+func savedResult(t *testing.T, runDir, variant string) JobResult {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(runDir, variant, resultFile))
+	if err != nil {
+		t.Fatalf("%s: %v", resultFile, err)
+	}
+	var res JobResult
+	if err := json.Unmarshal(b, &res); err != nil {
+		t.Fatalf("%s: %v", resultFile, err)
+	}
+	return res
+}
+
+func init() {
+	Register("wtest.inherit", func() Job { return &wInheritJob{} })
+}
+
+// wInheritJob leaves a process running with the worker's own standard
+// output and error, as a job that starts a helper the way a shell would
+// and forgets it does.
+type wInheritJob struct{ JobBase }
+
+func (*wInheritJob) Declare(*JobContext) {}
+func (*wInheritJob) Run(_ context.Context, jc *JobContext) error {
+	cmd := exec.Command("sleep", "300")
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if pidfile := jc.Params.String("pidfile", ""); pidfile != "" {
+		_ = os.WriteFile(pidfile, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644)
+	}
+	return nil
+}
+
+// A process the worker leaves holding its output must not hold the driver
+// up once the worker has exited: Launch returns with the result as soon as
+// the leftover is killed, not after a grace for the pipes to close.
+func TestSelfExecLauncherOutputOutlivedByAChild(t *testing.T) {
+	pidfile := filepath.Join(t.TempDir(), "pid")
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidfile)
+		if err != nil {
+			return
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	runDir := t.TempDir()
+	launcher := SelfExecLauncher{Env: []string{"TORX_TEST_WORKER=1"}}
+	start := time.Now()
+	res, err := launcher.Launch(context.Background(),
+		Assignment{JobID: "wtest.inherit", Params: Params{"pidfile": pidfile}, Session: SessionConfig{ResultsDir: runDir}}, discardSink{})
+	if err != nil || res.Status != StatusPass {
+		t.Fatalf("Launch: %+v, %v", res, err)
+	}
+	// Where leftovers cannot be found and killed (not Linux), the drain
+	// gives up on the pipes after eventDrainGrace; nowhere does the wait
+	// run to WaitDelay.
+	if took := time.Since(start); took > eventDrainGrace+2*time.Second {
+		t.Errorf("Launch took %v with a child holding the worker's output", took)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "wtest.inherit", workerLogFile)); !os.IsNotExist(err) {
+		t.Errorf("a quiet worker left %s: %v", workerLogFile, err)
+	}
+}
+
+// A worker.log that cannot be written is a slice of the results tree not
+// persisted, and the result says so.
+func TestSelfExecLauncherReportsWorkerLogFailure(t *testing.T) {
+	runDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(runDir, "wtest.stderr", workerLogFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launcher := SelfExecLauncher{Env: []string{"TORX_TEST_WORKER=1"}}
+	res, err := launcher.Launch(context.Background(),
+		Assignment{JobID: "wtest.stderr", Session: SessionConfig{ResultsDir: runDir}}, discardSink{})
+	if err != nil || res.Status != StatusPass {
+		t.Fatalf("Launch: %+v, %v", res, err)
+	}
+	if !strings.Contains(res.PersistErr, workerLogFile) {
+		t.Errorf("PersistErr = %q, want the failure to keep %s", res.PersistErr, workerLogFile)
+	}
+	// And so does the result.json the worker wrote before the driver knew.
+	if saved := savedResult(t, runDir, "wtest.stderr"); saved.PersistErr != res.PersistErr {
+		t.Errorf("result.json's PersistErr = %q, want %q", saved.PersistErr, res.PersistErr)
+	}
+}
+
+// A console that is gone -- the driver's output piped to a reader that has
+// quit -- costs the copy to it and nothing more: the driver, which carries
+// the worker's output to it, does not die of the broken pipe.
+func TestDriverOutlivesItsConsole(t *testing.T) {
+	dir := t.TempDir()
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(),
+		"TORX_TEST_DRIVER=1",
+		"TORX_TEST_DRIVER_ARGS=-results-dir "+filepath.Join(dir, "results")+" wtest.stderr",
+	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stderr = w
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start driver: %v", err)
+	}
+	// The reader of the driver's standard error quits before the worker
+	// has anything to say to it.
+	_ = w.Close()
+	_ = r.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("driver: %v\n%s", err, out.String())
+	}
+	// The worker's output went through the driver to the console that was
+	// gone, and to worker.log, which has it.
+	got, err := os.ReadFile(filepath.Join(dir, "results", "latest", "wtest.stderr", workerLogFile))
+	if err != nil || !strings.Contains(string(got), "straight to fd 2") {
+		t.Errorf("%s = %q (%v), want what the worker wrote", workerLogFile, got, err)
+	}
+}
+
+// A console no one reads holds nothing up and loses nothing of worker.log:
+// the copy to the log goes on while the console's blocks, and once the
+// worker's pipes have closed, close waits outputCloseGrace for the console
+// and no longer.
+func TestWorkerOutputOutlastsAnUnreadConsole(t *testing.T) {
+	w, err := newWorkerOutput(filepath.Join(t.TempDir(), workerLogFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A console whose pipe is full and whose reader reads no more.
+	var fds [2]int
+	if err := syscall.Pipe(fds[:]); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Close(fds[0]) }()
+	_ = syscall.SetNonblock(fds[1], true)
+	for junk := make([]byte, 4096); ; {
+		if _, err := syscall.Write(fds[1], junk); err != nil {
+			break
+		}
+	}
+	_ = syscall.SetNonblock(fds[1], false)
+	_ = w.outC.Close()
+	w.outC = os.NewFile(uintptr(fds[1]), "console")
+	// The worker's end of its standard output, which it writes to and lets
+	// go of.
+	wfd, err := syscall.Dup(int(w.outW.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := os.NewFile(uintptr(wfd), "worker stdout")
+	w.started()
+	// Far more than a pipe holds.
+	line := []byte(strings.Repeat("x", 1023) + "\n")
+	const n = 2048
+	for range n {
+		if _, err := worker.Write(line); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = worker.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), eventDrainGrace)
+	defer cancel()
+	start := time.Now()
+	w.drain(ctx)
+	w.close()
+	if took := time.Since(start); took > outputCloseGrace+2*time.Second {
+		t.Errorf("drain and close took %v with the console unread", took)
+	}
+	if fi, err := os.Stat(w.file.Name()); err != nil || fi.Size() != int64(n*len(line)) {
+		t.Errorf("%s holds %v bytes (%v), want %d: the console held up the copy to the log", workerLogFile, fi, err, n*len(line))
+	}
 }

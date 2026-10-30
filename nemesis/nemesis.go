@@ -60,6 +60,9 @@ type Event struct {
 	Target string
 	Start  time.Time
 	End    time.Time
+	// Held says the fault holds until a heal: its Inject returned one. A
+	// fault over once applied -- a leader stepping down -- holds nothing.
+	Held bool
 	// Err is why the fault, or its heal, failed, or ErrNoTarget.
 	Err error
 }
@@ -130,7 +133,7 @@ func (n *Nemesis) Run(ctx context.Context) {
 		fctx := context.WithoutCancel(ctx)
 		ev := Event{Fault: f.Name, Start: time.Now()}
 		heal, target, err := f.Inject(fctx, n.Rand)
-		ev.End, ev.Target, ev.Err = time.Now(), target, err
+		ev.End, ev.Target, ev.Err, ev.Held = time.Now(), target, err, heal != nil
 		n.record(ev)
 		if heal == nil {
 			continue
@@ -236,4 +239,63 @@ func Released(release func(), heal Heal) Heal {
 		}
 		return heal(ctx)
 	}
+}
+
+// Window is a span of time a fault held: from when its injection began to
+// when its heal ended, or, for a fault over once applied, to when its
+// injection ended. End is zero for a fault never healed: one whose heal
+// had not run when the events end, or whose heal failed, which HealErr
+// says -- for all the nemesis knows, such a fault holds still.
+type Window struct {
+	Fault, Target string
+	Start, End    time.Time
+	// HealErr is why the fault's heal failed, if it did.
+	HealErr error
+}
+
+// Windows are the spans the faults in events held, in the order they were
+// injected: each injection paired with the first heal after it of the same
+// fault and target. An injection that found no target held nothing, and is
+// no window; a heal that failed leaves its window open. A job uses them to
+// tell which of its operations ran while a fault held, or soon after -- a
+// read that went stale while a partition cut its server off, say -- since
+// what is a bug in a quiet system may be what the system promises under
+// that fault. A window left open by a failed heal excuses everything after
+// it, so a job may want to treat one as a run gone wrong instead.
+func Windows(events []Event) []Window {
+	var out []Window
+	open := map[[2]string][]int{} // fault and target -> windows awaiting a heal
+	for _, e := range events {
+		k := [2]string{e.Fault, e.Target}
+		switch {
+		case e.Heal:
+			if q := open[k]; len(q) > 0 {
+				if e.Err != nil {
+					out[q[0]].HealErr = e.Err
+				} else {
+					out[q[0]].End = e.End
+				}
+				open[k] = q[1:]
+			}
+		case e.Held:
+			open[k] = append(open[k], len(out))
+			out = append(out, Window{Fault: e.Fault, Target: e.Target, Start: e.Start})
+		case errors.Is(e.Err, ErrNoTarget):
+			// Nothing was there to apply the fault to.
+		default:
+			out = append(out, Window{Fault: e.Fault, Target: e.Target, Start: e.Start, End: e.End})
+		}
+	}
+	return out
+}
+
+// Overlaps reports whether the window, stretched by after past its end,
+// overlaps the span from from to to: whether an operation over that span
+// ran while the fault held, or within after of its heal. A window never
+// healed runs to the end of time.
+func (w Window) Overlaps(from, to time.Time, after time.Duration) bool {
+	if w.Start.After(to) {
+		return false
+	}
+	return w.End.IsZero() || !w.End.Add(after).Before(from)
 }
