@@ -288,6 +288,16 @@ func TestSelfExecLauncherKeepsWorkerOutput(t *testing.T) {
 		t.Errorf("%s = %q (%v), want what the worker wrote", workerLogFile, got, err)
 	}
 
+	// A run into the same directory again (-run-dir) starts the file over,
+	// as it does result.json.
+	if _, err := launcher.Launch(context.Background(),
+		Assignment{JobID: "wtest.stderr", Session: SessionConfig{ResultsDir: runDir}}, discardSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := os.ReadFile(filepath.Join(runDir, "wtest.stderr", workerLogFile)); err != nil || string(again) != string(got) {
+		t.Errorf("%s after a second run = %q (%v), want the second run's output alone", workerLogFile, again, err)
+	}
+
 	// A worker that prints nothing leaves no file.
 	if _, err := launcher.Launch(context.Background(), Assignment{JobID: "wtest.artifact", Session: SessionConfig{ResultsDir: runDir}}, discardSink{}); err != nil {
 		t.Fatal(err)
@@ -312,11 +322,68 @@ func TestSelfExecLauncherDumpsAStuckWorker(t *testing.T) {
 	if res.Status == StatusPass {
 		t.Errorf("a stuck job passed")
 	}
-	if took := time.Since(start); took > time.Second+workerGracePeriod+2*time.Second {
+	// The dump comes once the grace is up, and the worker exits on it;
+	// the kill, defaultDumpGrace later, is the bound either way.
+	if took := time.Since(start); took > time.Second+workerGracePeriod+defaultDumpGrace+2*time.Second {
 		t.Errorf("Launch took %v", took)
 	}
 	got, err := os.ReadFile(filepath.Join(runDir, "wtest.stuck", workerLogFile))
 	if err != nil || !strings.Contains(string(got), "stuckForAnHour") {
 		t.Errorf("%s (%v) does not show where the worker was stuck:\n%s", workerLogFile, err, got)
+	}
+}
+
+func init() {
+	Register("wtest.inherit", func() Job { return &wInheritJob{} })
+}
+
+// wInheritJob leaves a process running with the worker's own standard
+// output and error, as a job that starts a helper the way a shell would
+// and forgets it does.
+type wInheritJob struct{ JobBase }
+
+func (*wInheritJob) Declare(*JobContext) {}
+func (*wInheritJob) Run(_ context.Context, jc *JobContext) error {
+	cmd := exec.Command("sleep", "300")
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if pidfile := jc.Params.String("pidfile", ""); pidfile != "" {
+		_ = os.WriteFile(pidfile, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644)
+	}
+	return nil
+}
+
+// A process the worker leaves holding its output must not hold the driver
+// up once the worker has exited: Launch returns with the result as soon as
+// the leftover is killed, not after a grace for the pipes to close.
+func TestSelfExecLauncherOutputOutlivedByAChild(t *testing.T) {
+	pidfile := filepath.Join(t.TempDir(), "pid")
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidfile)
+		if err != nil {
+			return
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	runDir := t.TempDir()
+	launcher := SelfExecLauncher{Env: []string{"TORX_TEST_WORKER=1"}}
+	start := time.Now()
+	res, err := launcher.Launch(context.Background(),
+		Assignment{JobID: "wtest.inherit", Params: Params{"pidfile": pidfile}, Session: SessionConfig{ResultsDir: runDir}}, discardSink{})
+	if err != nil || res.Status != StatusPass {
+		t.Fatalf("Launch: %+v, %v", res, err)
+	}
+	// Where leftovers cannot be found and killed (not Linux), the drain
+	// gives up on the pipes after eventDrainGrace; nowhere does the wait
+	// run to WaitDelay.
+	if took := time.Since(start); took > eventDrainGrace+2*time.Second {
+		t.Errorf("Launch took %v with a child holding the worker's output", took)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "wtest.inherit", workerLogFile)); !os.IsNotExist(err) {
+		t.Errorf("a quiet worker left %s: %v", workerLogFile, err)
 	}
 }
