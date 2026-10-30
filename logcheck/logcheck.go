@@ -164,28 +164,51 @@ func before(offs []uint64, off uint64) uint64 {
 	return offs[i-1]
 }
 
-// calls is when each of the n copies of an append the log holds was sent,
-// at the earliest. Copies land in the log's order and each attempt places
-// one at most, so the i-th copy by offset was sent no earlier than the
-// i-th earliest attempt not refused -- a refused attempt put nothing in
-// the log -- or, if every attempt was refused, the i-th earliest of all. A
-// copy beyond the attempts, a duplicate anomaly's, gets the last.
-func calls(a Append, n int) []int64 {
-	var cs []int64
+// calls is when each copy of an append the log holds, by offset, was
+// sent, at the earliest. A copy at an offset an ack named is the acked
+// attempt's, sent when it was. The rest landed in the log's order, and
+// each attempt placed one at most, so the i-th of them was sent no earlier
+// than the i-th earliest of the attempts left over, those not refused --
+// a refused attempt put nothing in the log -- or those refused if every
+// one was. A copy beyond the attempts, a duplicate anomaly's, gets the
+// last of them, or the append's first call if none is left over.
+func calls(a Append, offs []uint64) []int64 {
+	out := make([]int64, len(offs))
+	placed := make([]bool, len(offs))
+	var left, refused []int64
+	first := int64(math.MaxInt64)
 	for _, t := range a.Attempts {
-		if t.Outcome != Failed {
-			cs = append(cs, t.Call)
+		first = min(first, t.Call)
+		if t.Outcome == OK {
+			if i, ok := slices.BinarySearch(offs, t.Offset); ok {
+				if !placed[i] || t.Call < out[i] {
+					out[i] = t.Call
+				}
+				placed[i] = true
+				continue
+			}
+		}
+		if t.Outcome == Failed {
+			refused = append(refused, t.Call)
+		} else {
+			left = append(left, t.Call)
 		}
 	}
-	if len(cs) == 0 {
-		for _, t := range a.Attempts {
-			cs = append(cs, t.Call)
-		}
+	if len(left) == 0 {
+		left = refused
 	}
-	slices.Sort(cs)
-	out := make([]int64, n)
+	slices.Sort(left)
+	j := 0
 	for i := range out {
-		out[i] = cs[min(i, len(cs)-1)]
+		if placed[i] {
+			continue
+		}
+		if len(left) == 0 {
+			out[i] = first
+		} else {
+			out[i] = left[min(j, len(left)-1)]
+		}
+		j++
 	}
 	return out
 }
@@ -303,7 +326,7 @@ func realtimeOrder(appends []Append, l *log) []Anomaly {
 		if len(offs) == 0 {
 			continue
 		}
-		for i, call := range calls(a, len(offs)) {
+		for i, call := range calls(a, offs) {
 			byCall = append(byCall, sent{a, call, offs[i]})
 		}
 		for _, t := range a.Attempts {
@@ -453,7 +476,7 @@ func windows(appends []Append, l *log, reads []Read) map[uint64]window {
 			continue
 		}
 		offs := l.byValue[a.Value]
-		for i, call := range calls(a, len(offs)) {
+		for i, call := range calls(a, offs) {
 			w := window{call, linearize.Pending}
 			for _, t := range a.Attempts {
 				if t.Outcome == OK && t.Offset == offs[i] {

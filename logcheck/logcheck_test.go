@@ -176,6 +176,24 @@ func TestCheck(t *testing.T) {
 		}}, acked(2, "b", "y", 10, 20, 3)},
 		log:  []Entry{e(1, "a", "x"), e(2, "a", "x"), e(3, "b", "y")},
 		want: []string{"realtime-order"},
+	}, {
+		// The ack says the resend, sent at 100, placed offset 1, which
+		// precedes y, acked by 60.
+		name: "an ack naming an offset the log held before the attempt was sent",
+		appends: []Append{{Value: "x", Key: "a", Attempts: []Attempt{
+			{Op: 0, Call: 0, Outcome: Unknown}, {Op: 1, Call: 100, Return: 110, Outcome: OK, Offset: 1},
+		}}, acked(2, "b", "y", 50, 60, 2)},
+		log:  []Entry{e(1, "a", "x"), e(2, "b", "y"), e(3, "a", "x")},
+		want: []string{"realtime-order"},
+	}, {
+		// The first attempt was acked at 3, so the copy at 1 is the
+		// resend's, sent at 100, after that ack.
+		name: "a resend's copy before the first attempt's, acked before the resend",
+		appends: []Append{{Value: "x", Key: "a", Attempts: []Attempt{
+			{Op: 0, Call: 0, Return: 10, Outcome: OK, Offset: 3}, {Op: 1, Call: 100, Outcome: Unknown},
+		}}},
+		log:  []Entry{e(1, "a", "x"), e(3, "a", "x")},
+		want: []string{"realtime-order"},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := Check(tc.appends, tc.log)
@@ -410,5 +428,17 @@ func TestCheckReadsResendCopy(t *testing.T) {
 	got, _ = CheckReads(context.Background(), appends, log, []Read{read(10, "a", 50, 51, 1, "x"), read(11, "a", 200, 201, 2, "x")}, linearize.Limits{})
 	if len(got) > 0 {
 		t.Fatalf("the first copy read at 50 and the second at 200: found %v", got)
+	}
+	// Acked, the resend's copy is the one its ack named, whichever that is.
+	appends = []Append{{Value: "x", Key: "a", Attempts: []Attempt{
+		{Op: 0, Call: 0, Outcome: Unknown}, {Op: 1, Call: 100, Return: 110, Outcome: OK, Offset: 1},
+	}}}
+	got, _ = CheckReads(context.Background(), appends, log, []Read{read(10, "a", 50, 51, 1, "x")}, linearize.Limits{})
+	if !slices.Equal(kinds(got), []string{"nonlinearizable-read"}) {
+		t.Fatalf("the resend's copy, at 1 by its ack, read at 50: found %v", got)
+	}
+	got, _ = CheckReads(context.Background(), appends, log, []Read{read(10, "a", 120, 121, 1, "x"), read(11, "a", 200, 201, 2, "x")}, linearize.Limits{})
+	if len(got) > 0 {
+		t.Fatalf("the resend's copy read at 120 and the first attempt's at 200: found %v", got)
 	}
 }
