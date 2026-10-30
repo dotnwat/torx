@@ -32,6 +32,13 @@ const workerTagEnv = "TORX_WORKER_TAG"
 // hang forever.
 const eventDrainGrace = 5 * time.Second
 
+// outputCloseGrace bounds how long Launch waits for the copies of the
+// worker's output to end once their pipes are closed. A copy ends at once
+// then, unless it is blocked writing to a console no one is reading, which
+// the driver's own writes would block on too: Launch leaves it to finish
+// when the console is read again, rather than wait on it.
+const outputCloseGrace = time.Second
+
 // SelfExecLauncher runs each job in a worker subprocess by re-executing this
 // binary in worker mode. It is the production launcher: a panic, hang, exit, or
 // leaked goroutine in job code is confined to the worker process. The assignment
@@ -76,8 +83,11 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	// when the run persists results, to worker.log in the variant's
 	// directory as well, so that it stays with the run it explains.
 	var out *workerOutput
+	var outErr error // why the worker's output is not kept, if it is not
 	if dir, err := jobResultsDir(a.Session.ResultsDir, variantID(a.JobID, a.Params)); err == nil && dir != "" {
-		if o, err := newWorkerOutput(filepath.Join(dir, workerLogFile)); err == nil {
+		if o, err := newWorkerOutput(filepath.Join(dir, workerLogFile)); err != nil {
+			outErr = err
+		} else {
 			out = o
 			cmd.Stdout, cmd.Stderr = o.outW, o.errW
 			defer o.close()
@@ -199,9 +209,20 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 		if waitErr != nil {
 			err = fmt.Errorf("driver: worker produced no result: %w", waitErr)
 		}
-		res := failResult(variantID(a.JobID, a.Params), a.Params, err)
-		res.Dirty = true
-		return res, nil
+		result = failResult(variantID(a.JobID, a.Params), a.Params, err)
+		result.Dirty = true
+	}
+	// The worker's output not kept is a slice of the results tree not
+	// persisted, which the result says, as it says of its own files.
+	if outErr == nil {
+		outErr = out.failure()
+	}
+	if outErr != nil {
+		msg := fmt.Sprintf("driver: %s: %v", workerLogFile, outErr)
+		if result.PersistErr != "" {
+			msg = result.PersistErr + "; " + msg
+		}
+		result.PersistErr = msg
 	}
 	return result, nil
 }
@@ -217,8 +238,12 @@ type workerOutput struct {
 	file       *os.File
 	outR, errR *os.File // the driver's ends
 	outW, errW *os.File // the worker's ends, which the driver holds until it has started
+	outC, errC *os.File // the console, duplicated
 	copying    bool
 	done       chan struct{} // closed once both copies have ended
+
+	mu  sync.Mutex
+	err error // the first failure to write worker.log
 }
 
 func newWorkerOutput(path string) (*workerOutput, error) {
@@ -229,17 +254,44 @@ func newWorkerOutput(path string) (*workerOutput, error) {
 		return nil, err
 	}
 	w := &workerOutput{file: f, done: make(chan struct{})}
+	ok := false
+	defer func() {
+		if !ok {
+			w.close()
+		}
+	}()
 	if w.outR, w.outW, err = os.Pipe(); err != nil {
-		_ = f.Close()
 		return nil, err
 	}
 	if w.errR, w.errW, err = os.Pipe(); err != nil {
-		_ = f.Close()
-		_ = w.outR.Close()
-		_ = w.outW.Close()
 		return nil, err
 	}
+	if w.outC, err = dupConsole(os.Stdout); err != nil {
+		return nil, fmt.Errorf("stdout: %w", err)
+	}
+	if w.errC, err = dupConsole(os.Stderr); err != nil {
+		return nil, fmt.Errorf("stderr: %w", err)
+	}
+	ok = true
 	return w, nil
+}
+
+// dupConsole duplicates one of the driver's standard streams for a copy to
+// write to. A write to os.Stdout or os.Stderr that finds its pipe closed
+// ends the driver, by the os package's rule for those two files alone; a
+// duplicate of the descriptor is not held to it, so a console that is gone
+// costs the copy to it and nothing more.
+func dupConsole(f *os.File) (*os.File, error) {
+	// Hold the fork lock, as the os package does, so that no child forked
+	// meanwhile inherits the descriptor before it is marked close-on-exec.
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	fd, err := syscall.Dup(int(f.Fd()))
+	if err != nil {
+		return nil, err
+	}
+	syscall.CloseOnExec(fd)
+	return os.NewFile(uintptr(fd), f.Name()), nil
 }
 
 // started begins the copying once the worker has started: the driver lets
@@ -252,12 +304,9 @@ func (w *workerOutput) started() {
 	_ = w.errW.Close()
 	w.copying = true
 	var wg sync.WaitGroup
-	for _, c := range []struct {
-		r       *os.File
-		console io.Writer
-	}{{w.outR, os.Stdout}, {w.errR, os.Stderr}} {
+	for _, c := range []struct{ r, console *os.File }{{w.outR, w.outC}, {w.errR, w.errC}} {
 		wg.Go(func() {
-			_, _ = io.Copy(tee{w.file, c.console}, c.r)
+			_, _ = io.Copy(tee{w, c.console}, c.r)
 		})
 	}
 	go func() {
@@ -278,34 +327,65 @@ func (w *workerOutput) drain(ctx context.Context) {
 	case <-ctx.Done():
 		_ = w.outR.Close()
 		_ = w.errR.Close()
-		<-w.done
 	}
 }
 
 // close releases everything, and leaves no file behind a worker that
-// printed nothing, as most do.
+// printed nothing, as most do. A copy still blocked on the console after
+// outputCloseGrace is left to end on its own, and the file is closed under
+// it.
 func (w *workerOutput) close() {
-	_ = w.outW.Close()
-	_ = w.errW.Close()
-	_ = w.outR.Close()
-	_ = w.errR.Close()
-	if w.copying {
-		<-w.done
+	for _, f := range []*os.File{w.outW, w.errW, w.outR, w.errR} {
+		if f != nil {
+			_ = f.Close()
+		}
 	}
-	if fi, err := w.file.Stat(); err == nil && fi.Size() == 0 {
+	ended := !w.copying
+	if w.copying {
+		select {
+		case <-w.done:
+			ended = true
+		case <-time.After(outputCloseGrace):
+		}
+	}
+	if fi, err := w.file.Stat(); ended && err == nil && fi.Size() == 0 {
 		_ = os.Remove(w.file.Name())
 	}
 	_ = w.file.Close()
+	for _, f := range []*os.File{w.outC, w.errC} {
+		if f != nil {
+			_ = f.Close()
+		}
+	}
+}
+
+// failure is why worker.log is incomplete, if it is.
+func (w *workerOutput) failure() error {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.err
 }
 
 // tee writes to worker.log and to the console, each whether or not the
 // other could be written, and never fails: a copy that stopped would leave
 // the worker blocked on a full pipe, and the log is the copy meant to
 // outlast a console that is gone.
-type tee struct{ file, console io.Writer }
+type tee struct {
+	w       *workerOutput
+	console io.Writer
+}
 
 func (t tee) Write(p []byte) (int, error) {
-	_, _ = t.file.Write(p)
+	if _, err := t.w.file.Write(p); err != nil {
+		t.w.mu.Lock()
+		if t.w.err == nil {
+			t.w.err = err
+		}
+		t.w.mu.Unlock()
+	}
 	_, _ = t.console.Write(p)
 	return len(p), nil
 }

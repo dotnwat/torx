@@ -387,3 +387,112 @@ func TestSelfExecLauncherOutputOutlivedByAChild(t *testing.T) {
 		t.Errorf("a quiet worker left %s: %v", workerLogFile, err)
 	}
 }
+
+// A worker.log that cannot be written is a slice of the results tree not
+// persisted, and the result says so.
+func TestSelfExecLauncherReportsWorkerLogFailure(t *testing.T) {
+	runDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(runDir, "wtest.stderr", workerLogFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launcher := SelfExecLauncher{Env: []string{"TORX_TEST_WORKER=1"}}
+	res, err := launcher.Launch(context.Background(),
+		Assignment{JobID: "wtest.stderr", Session: SessionConfig{ResultsDir: runDir}}, discardSink{})
+	if err != nil || res.Status != StatusPass {
+		t.Fatalf("Launch: %+v, %v", res, err)
+	}
+	if !strings.Contains(res.PersistErr, workerLogFile) {
+		t.Errorf("PersistErr = %q, want the failure to keep %s", res.PersistErr, workerLogFile)
+	}
+}
+
+// A console that is gone -- the driver's output piped to a reader that has
+// quit -- costs the copy to it and nothing more: the driver, which carries
+// the worker's output to it, does not die of the broken pipe.
+func TestDriverOutlivesItsConsole(t *testing.T) {
+	dir := t.TempDir()
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(),
+		"TORX_TEST_DRIVER=1",
+		"TORX_TEST_DRIVER_ARGS=-results-dir "+filepath.Join(dir, "results")+" wtest.stderr",
+	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stderr = w
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start driver: %v", err)
+	}
+	// The reader of the driver's standard error quits before the worker
+	// has anything to say to it.
+	_ = w.Close()
+	_ = r.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("driver: %v\n%s", err, out.String())
+	}
+	// The worker's output went through the driver to the console that was
+	// gone, and to worker.log, which has it.
+	got, err := os.ReadFile(filepath.Join(dir, "results", "latest", "wtest.stderr", workerLogFile))
+	if err != nil || !strings.Contains(string(got), "straight to fd 2") {
+		t.Errorf("%s = %q (%v), want what the worker wrote", workerLogFile, got, err)
+	}
+}
+
+// A copy blocked writing to a console no one reads does not hold Launch:
+// once the worker's pipes are closed, close waits outputCloseGrace for the
+// copies and no longer.
+func TestWorkerOutputGivesUpOnAConsoleNoOneReads(t *testing.T) {
+	w, err := newWorkerOutput(filepath.Join(t.TempDir(), workerLogFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A console whose pipe is full and whose reader reads no more.
+	var fds [2]int
+	if err := syscall.Pipe(fds[:]); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Close(fds[0]) }()
+	_ = syscall.SetNonblock(fds[1], true)
+	for junk := make([]byte, 4096); ; {
+		if _, err := syscall.Write(fds[1], junk); err != nil {
+			break
+		}
+	}
+	_ = syscall.SetNonblock(fds[1], false)
+	_ = w.outC.Close()
+	w.outC = os.NewFile(uintptr(fds[1]), "console")
+	// The worker's end of its standard output, which it writes to and lets
+	// go of.
+	wfd, err := syscall.Dup(int(w.outW.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := os.NewFile(uintptr(wfd), "worker stdout")
+	w.started()
+	if _, err := worker.WriteString("hello\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = worker.Close()
+	// The copy reaches worker.log before it blocks on the console.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if b, _ := os.ReadFile(w.file.Name()); strings.Contains(string(b), "hello") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the copy did not reach worker.log")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	w.drain(ctx)
+	w.close()
+	if took := time.Since(start); took > outputCloseGrace+2*time.Second {
+		t.Errorf("drain and close took %v with the console unread", took)
+	}
+}
