@@ -167,6 +167,15 @@ func TestCheck(t *testing.T) {
 		appends: []Append{unknown(0, "a", "x", 0)},
 		log:     []Entry{e(1, "b", "x")},
 		want:    []string{"misfiled"},
+	}, {
+		// One attempt at x had been sent when y was acked, so one copy of
+		// x may precede y; the second is the resend's, sent after.
+		name: "a resend's copy before an append acked before the resend",
+		appends: []Append{{Value: "x", Key: "a", Attempts: []Attempt{
+			{Op: 0, Call: 0, Outcome: Unknown}, {Op: 1, Call: 100, Outcome: Unknown},
+		}}, acked(2, "b", "y", 10, 20, 3)},
+		log:  []Entry{e(1, "a", "x"), e(2, "a", "x"), e(3, "b", "y")},
+		want: []string{"realtime-order"},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := Check(tc.appends, tc.log)
@@ -367,5 +376,39 @@ func TestCheckReadsAcrossKeys(t *testing.T) {
 	got, _ = CheckReads(context.Background(), appends, log, []Read{read(10, "a", 20, 21, 2, "x")}, linearize.Limits{})
 	if !slices.Equal(kinds(got), []string{"nonlinearizable-read"}) {
 		t.Fatalf("a read that saw an entry bounded by an earlier key's call: found %v", got)
+	}
+}
+
+// A read that returned an entry saw it landed, which bounds every entry
+// before it, under any key: a read of b that saw offset 2 says offset 1,
+// under a, had landed too.
+func TestCheckReadsReadAsEvidence(t *testing.T) {
+	appends := []Append{unknown(0, "a", "x", 0), unknown(1, "b", "y", 0)}
+	log := []Entry{e(1, "a", "x"), e(2, "b", "y")}
+	reads := []Read{read(10, "b", 20, 21, 2, "y"), read(11, "a", 30, 31, 0, "")}
+	got, _ := CheckReads(context.Background(), appends, log, reads, linearize.Limits{})
+	if !slices.Equal(kinds(got), []string{"nonlinearizable-read"}) {
+		t.Fatalf("found %v", got)
+	}
+	if len(got) > 0 && got[0].Ops[0] != 11 {
+		t.Errorf("blamed op %d, want the read of a that found nothing", got[0].Ops[0])
+	}
+}
+
+// A copy from a resend landed no earlier than the resend was sent: the
+// second copy of x is the attempt at 100's, and cannot have been read at
+// 50.
+func TestCheckReadsResendCopy(t *testing.T) {
+	appends := []Append{{Value: "x", Key: "a", Attempts: []Attempt{
+		{Op: 0, Call: 0, Outcome: Unknown}, {Op: 1, Call: 100, Outcome: Unknown},
+	}}}
+	log := []Entry{e(1, "a", "x"), e(2, "a", "x")}
+	got, _ := CheckReads(context.Background(), appends, log, []Read{read(10, "a", 50, 51, 2, "x")}, linearize.Limits{})
+	if !slices.Equal(kinds(got), []string{"nonlinearizable-read"}) {
+		t.Fatalf("found %v", got)
+	}
+	got, _ = CheckReads(context.Background(), appends, log, []Read{read(10, "a", 50, 51, 1, "x"), read(11, "a", 200, 201, 2, "x")}, linearize.Limits{})
+	if len(got) > 0 {
+		t.Fatalf("the first copy read at 50 and the second at 200: found %v", got)
 	}
 }
