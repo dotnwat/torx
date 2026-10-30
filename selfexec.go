@@ -89,9 +89,13 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	// directory as well, so that it stays with the run it explains.
 	var out *workerOutput
 	var outErr error // why the worker's output is not kept, if it is not
-	if dir, err := jobResultsDir(a.Session.ResultsDir, variantID(a.JobID, a.Params)); err == nil && dir != "" {
+	dir, err := jobResultsDir(a.Session.ResultsDir, variantID(a.JobID, a.Params))
+	switch {
+	case err != nil:
+		outErr = err
+	case dir != "":
 		if o, err := newWorkerOutput(filepath.Join(dir, workerLogFile)); err != nil {
-			outErr = err
+			outErr = fmt.Errorf("%s: %w", workerLogFile, err)
 		} else {
 			out = o
 			cmd.Stdout, cmd.Stderr = o.outW, o.errW
@@ -219,15 +223,28 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	}
 	// The worker's output not kept is a slice of the results tree not
 	// persisted, which the result says, as it says of its own files.
-	if outErr == nil {
-		outErr = out.failure()
-	}
-	if outErr != nil {
-		msg := fmt.Sprintf("driver: %s: %v", workerLogFile, outErr)
+	note := func(err error) {
+		msg := "driver: " + err.Error()
 		if result.PersistErr != "" {
 			msg = result.PersistErr + "; " + msg
 		}
 		result.PersistErr = msg
+	}
+	if outErr == nil {
+		if err := out.failure(); err != nil {
+			outErr = fmt.Errorf("%s: %w", workerLogFile, err)
+		}
+	}
+	if outErr != nil {
+		note(outErr)
+	}
+	// The worker wrote result.json before the driver had anything to add
+	// to it, and a worker that died wrote none: write the result as it
+	// stands, so that the variant's directory says what the run does.
+	if dir != "" && (outErr != nil || !haveResult) {
+		if err := writeResultJSON(dir, result); err != nil {
+			note(err)
+		}
 	}
 	return result, nil
 }

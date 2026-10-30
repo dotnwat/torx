@@ -3,6 +3,7 @@ package torx
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -331,6 +332,24 @@ func TestSelfExecLauncherDumpsAStuckWorker(t *testing.T) {
 	if err != nil || !strings.Contains(string(got), "stuckForAnHour") {
 		t.Errorf("%s (%v) does not show where the worker was stuck:\n%s", workerLogFile, err, got)
 	}
+	// The worker left no result.json; the driver's result is there instead.
+	if saved := savedResult(t, runDir, "wtest.stuck"); saved.Status != StatusFail || !saved.Dirty {
+		t.Errorf("result.json = %+v, want the driver's failed, dirty result", saved)
+	}
+}
+
+// savedResult reads the result.json of the variant in runDir.
+func savedResult(t *testing.T, runDir, variant string) JobResult {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(runDir, variant, resultFile))
+	if err != nil {
+		t.Fatalf("%s: %v", resultFile, err)
+	}
+	var res JobResult
+	if err := json.Unmarshal(b, &res); err != nil {
+		t.Fatalf("%s: %v", resultFile, err)
+	}
+	return res
 }
 
 func init() {
@@ -403,6 +422,10 @@ func TestSelfExecLauncherReportsWorkerLogFailure(t *testing.T) {
 	}
 	if !strings.Contains(res.PersistErr, workerLogFile) {
 		t.Errorf("PersistErr = %q, want the failure to keep %s", res.PersistErr, workerLogFile)
+	}
+	// And so does the result.json the worker wrote before the driver knew.
+	if saved := savedResult(t, runDir, "wtest.stderr"); saved.PersistErr != res.PersistErr {
+		t.Errorf("result.json's PersistErr = %q, want %q", saved.PersistErr, res.PersistErr)
 	}
 }
 
