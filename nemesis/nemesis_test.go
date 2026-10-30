@@ -204,6 +204,7 @@ func TestWindows(t *testing.T) {
 		{Fault: "partition", Target: "a", Start: at(30), End: at(31), Held: true},
 		{Fault: "partition", Target: "a", Heal: true, Start: at(40), End: at(41)},
 		{Fault: "crash", Target: "c", Start: at(50), End: at(50), Held: true, Err: errors.New("half applied")},
+		{Fault: "crash", Start: at(60), End: at(60), Err: ErrNoTarget},
 	}
 	want := []Window{
 		{"partition", "a", at(10), at(21)},

@@ -251,10 +251,11 @@ type Window struct {
 
 // Windows are the spans the faults in events held, in the order they were
 // injected: each injection paired with the first heal after it of the same
-// fault and target. A job uses them to tell which of its operations ran
-// while a fault held, or soon after -- a read that went stale while a
-// partition cut its server off, say -- since what is a bug in a quiet
-// system may be what the system promises under that fault.
+// fault and target. An injection that found no target held nothing, and is
+// no window. A job uses them to tell which of its operations ran while a
+// fault held, or soon after -- a read that went stale while a partition cut
+// its server off, say -- since what is a bug in a quiet system may be what
+// the system promises under that fault.
 func Windows(events []Event) []Window {
 	var out []Window
 	open := map[[2]string][]int{} // fault and target -> windows awaiting a heal
@@ -269,6 +270,8 @@ func Windows(events []Event) []Window {
 		case e.Held:
 			open[k] = append(open[k], len(out))
 			out = append(out, Window{Fault: e.Fault, Target: e.Target, Start: e.Start})
+		case errors.Is(e.Err, ErrNoTarget):
+			// Nothing was there to apply the fault to.
 		default:
 			out = append(out, Window{Fault: e.Fault, Target: e.Target, Start: e.Start, End: e.End})
 		}
