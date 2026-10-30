@@ -569,9 +569,10 @@ whose server gives each entry an offset of its own -- a stream's sequence,
 a partition's offset -- against the log as it stands once every fault is
 healed: `logcheck.Check` reports an acked append the log lost or holds
 elsewhere, one it holds though every attempt was refused, one it holds more
-often than its attempts could have put it there, a value no client wrote,
-an append conditional on a last offset that follows another, and an append
-the log holds before one acked before it was sent. With entries filed under
+often than its attempts could have put it there, one it holds under another
+key, a value no client wrote, an append conditional on a last offset that
+follows another, and an append the log holds before one acked before it
+was sent. With entries filed under
 keys, the log is a map of registers too, and `logcheck.CheckReads` checks
 reads of a key's last entry for linearizability, in the order the log put
 the key's entries in.

@@ -144,6 +144,29 @@ func TestCheck(t *testing.T) {
 		appends: []Append{acked(0, "a", "x", 0, 10, 5), acked(1, "b", "y", 0, 10, 5)},
 		log:     []Entry{e(5, "a", "x"), e(5, "b", "y")},
 		want:    []string{"ack-mismatch", "collision"},
+	}, {
+		// A refused attempt put nothing in the log: the append was sent
+		// when its first attempt not refused was, after y's ack.
+		name: "realtime order from the first attempt not refused",
+		appends: []Append{acked(0, "b", "y", 0, 10, 2), {Value: "x", Key: "a", Attempts: []Attempt{
+			{Op: 1, Call: 1, Return: 2, Outcome: Failed}, {Op: 2, Call: 20, Return: 30, Outcome: OK, Offset: 1},
+		}}},
+		log:  []Entry{e(1, "a", "x"), e(2, "b", "y")},
+		want: []string{"realtime-order"},
+	}, {
+		// An append acked twice was in the log at the higher offset by the
+		// later ack.
+		name: "realtime order against a later ack",
+		appends: []Append{{Value: "d", Key: "a", Attempts: []Attempt{
+			{Op: 0, Call: 0, Return: 10, Outcome: OK, Offset: 1}, {Op: 1, Call: 0, Return: 12, Outcome: OK, Offset: 3},
+		}}, acked(2, "b", "x", 20, 25, 2)},
+		log:  []Entry{e(1, "a", "d"), e(2, "b", "x"), e(3, "a", "d")},
+		want: []string{"realtime-order"},
+	}, {
+		name:    "an unknown append under another key",
+		appends: []Append{unknown(0, "a", "x", 0)},
+		log:     []Entry{e(1, "b", "x")},
+		want:    []string{"misfiled"},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := Check(tc.appends, tc.log)
@@ -175,7 +198,7 @@ func TestCheckReads(t *testing.T) {
 		acked(0, "a", "x", 0, 10, 1),
 		acked(1, "a", "y", 11, 12, 2),
 		unknown(2, "a", "z", 30), // lands at 4
-		acked(3, "b", "w", 0, 5, 3),
+		acked(3, "b", "w", 12, 15, 3),
 	}
 	log := []Entry{e(1, "a", "x"), e(2, "a", "y"), e(3, "b", "w"), e(4, "a", "z")}
 	for _, tc := range []struct {
@@ -191,7 +214,7 @@ func TestCheckReads(t *testing.T) {
 			read(13, "a", 13, 14, 2, "y"),     // y
 			read(14, "a", 31, 32, 2, "y"),     // z not yet
 			read(15, "a", 40, 41, 4, "z"),     // z
-			read(16, "b", 6, 7, 3, "w"),       // another key
+			read(16, "b", 16, 17, 3, "w"),     // another key
 			read(17, "c", 1, 2, 0, ""),        // no entries at all
 			read(18, "a", 35, 36, 4, "z"),     // z seen once ...
 			read(19, "a", 37, 38, 4, "z"),     // ... and after
@@ -204,7 +227,7 @@ func TestCheckReads(t *testing.T) {
 			read(26, "a", 0, 100, 1, "x"),     // a long read
 			read(27, "a", 31, 100, 4, "z"),    // a long read of z
 			read(28, "a", 31, 100, 2, "y"),    // a long read of y
-			read(29, "b", 4, 5, 3, "w"),       // w within its call
+			read(29, "b", 13, 15, 3, "w"),     // w within its call
 			read(30, "a", 9, 10, 1, "x"),      // x within its call
 			read(31, "a", 12, 30, 2, "y"),     // y up to z's call
 			read(32, "a", 13, 1000, 4, "z"),   // z, read long
@@ -295,5 +318,54 @@ func TestExplainNearest(t *testing.T) {
 	}
 	if got[0].Ops[0] != 50 || len(got[0].Ops) != 9 || !slices.Contains(got[0].Ops, 29) || slices.Contains(got[0].Ops, 10) {
 		t.Errorf("ops %v: want the stale read, then the eight reads nearest it", got[0].Ops)
+	}
+}
+
+// An ack names the copy it is for: the retry's ack at 2 says nothing of
+// when the copy at 1 landed, which the log's order does -- before the copy
+// at 2, so by its ack.
+func TestCheckReadsAckedCopy(t *testing.T) {
+	appends := []Append{{Value: "x", Key: "a", Attempts: []Attempt{
+		{Op: 0, Call: 0, Outcome: Unknown}, {Op: 1, Call: 5, Return: 10, Outcome: OK, Offset: 2},
+	}}}
+	log := []Entry{e(1, "a", "x"), e(2, "a", "x")}
+	got, _ := CheckReads(context.Background(), appends, log, []Read{read(10, "a", 20, 21, 1, "x")}, linearize.Limits{})
+	if !slices.Equal(kinds(got), []string{"nonlinearizable-read"}) {
+		t.Fatalf("found %v", got)
+	}
+}
+
+// A refused attempt put nothing in the log: the value cannot be read
+// before the attempt that did was sent.
+func TestCheckReadsRefusedAttempt(t *testing.T) {
+	appends := []Append{{Value: "x", Key: "a", Attempts: []Attempt{
+		{Op: 0, Call: 1, Return: 2, Outcome: Failed}, {Op: 1, Call: 20, Return: 30, Outcome: OK, Offset: 1},
+	}}}
+	log := []Entry{e(1, "a", "x")}
+	got, _ := CheckReads(context.Background(), appends, log, []Read{read(10, "a", 5, 6, 1, "x")}, linearize.Limits{})
+	if !slices.Equal(kinds(got), []string{"nonlinearizable-read"}) {
+		t.Fatalf("found %v", got)
+	}
+}
+
+// The log is one sequence: an entry landed by the time any entry after it
+// was acked, and no earlier than any entry before it was sent, whatever
+// their keys.
+func TestCheckReadsAcrossKeys(t *testing.T) {
+	// x to a, its answer lost, at 1; y to b, acked at 2 by 10: x was there
+	// by 10, and a read of a at 20 that finds nothing is stale.
+	appends := []Append{unknown(0, "a", "x", 0), acked(1, "b", "y", 5, 10, 2)}
+	log := []Entry{e(1, "a", "x"), e(2, "b", "y")}
+	got, _ := CheckReads(context.Background(), appends, log, []Read{read(10, "a", 20, 21, 0, "")}, linearize.Limits{})
+	if !slices.Equal(kinds(got), []string{"nonlinearizable-read"}) {
+		t.Fatalf("a read that missed an entry bounded by a later key's ack: found %v", got)
+	}
+	// y to b, sent at 50, at 1; x to a, its answer lost, at 2: x landed
+	// after 50, and a read of a at 20 cannot have seen it.
+	appends = []Append{acked(0, "b", "y", 50, 60, 1), unknown(1, "a", "x", 0)}
+	log = []Entry{e(1, "b", "y"), e(2, "a", "x")}
+	got, _ = CheckReads(context.Background(), appends, log, []Read{read(10, "a", 20, 21, 2, "x")}, linearize.Limits{})
+	if !slices.Equal(kinds(got), []string{"nonlinearizable-read"}) {
+		t.Fatalf("a read that saw an entry bounded by an earlier key's call: found %v", got)
 	}
 }

@@ -20,6 +20,8 @@
 //   - realtime-order: an append the log holds before one that was acked
 //     before it was sent. A log is one sequence, which orders its appends as
 //     they happened;
+//   - misfiled: an append the log holds under a key other than the one it
+//     was appended under;
 //   - collision: two entries at one offset, which a log cannot hold. The
 //     checks go on with the first.
 //
@@ -31,7 +33,10 @@
 // map of registers too, each key's value its last entry. CheckReads checks
 // reads of a key's last entry for linearizability, against the order the
 // log put the key's entries in, which settles every write's place: the
-// only search is for where each read fits.
+// only search is for where each read fits. The log being one sequence
+// bounds when each entry landed by its neighbours too -- no earlier than
+// any entry before it was sent, no later than any entry after it was
+// acked -- which the search of each key is told.
 package logcheck
 
 import (
@@ -39,6 +44,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 
@@ -101,7 +107,7 @@ type Entry struct {
 type Anomaly struct {
 	// Kind is the anomaly: "lost", "ack-mismatch", "phantom",
 	// "duplicate", "failed-visible", "condition", "realtime-order",
-	// "collision", "dirty-read", "nonlinearizable-read".
+	// "misfiled", "collision", "dirty-read", "nonlinearizable-read".
 	Kind string
 	// Value is the value it concerns, if one; Key, the key.
 	Value, Key string
@@ -158,15 +164,24 @@ func before(offs []uint64, off uint64) uint64 {
 	return offs[i-1]
 }
 
-// timing is when an append was called and acked: its first attempt's call,
-// and its first OK attempt's return and the offset that ack named, or
-// linearize.Pending and 0 if none was OK.
+// timing is when an append was called and acked: the first call among its
+// attempts not refused -- a refused attempt put nothing in the log -- or
+// among all of them if every one was; and its first OK attempt's return
+// and the offset that ack named, or linearize.Pending and 0 if none was
+// OK.
 func timing(a Append) (call, ret int64, off uint64) {
-	call, ret = a.Attempts[0].Call, linearize.Pending
+	call, ret = math.MaxInt64, linearize.Pending
 	for _, t := range a.Attempts {
-		call = min(call, t.Call)
+		if t.Outcome != Failed {
+			call = min(call, t.Call)
+		}
 		if t.Outcome == OK && t.Return < ret {
 			ret, off = t.Return, t.Offset
+		}
+	}
+	if call == math.MaxInt64 {
+		for _, t := range a.Attempts {
+			call = min(call, t.Call)
 		}
 	}
 	return call, ret, off
@@ -220,6 +235,16 @@ func Check(appends []Append, entries []Entry) []Anomaly {
 					Detail: fmt.Sprintf("%s (key %q) was acked at %d, and the log holds %s (key %q) there", a.Value, a.Key, t.Offset, e.Value, e.Key)})
 			}
 		}
+		// The log files each copy under the append's key; an ack that
+		// says otherwise is an ack-mismatch, above.
+		for _, off := range offs {
+			e := l.byOffset[off]
+			if e.Key == a.Key || slices.ContainsFunc(a.Attempts, func(t Attempt) bool { return t.Outcome == OK && t.Offset == off }) {
+				continue
+			}
+			bad = append(bad, Anomaly{Kind: "misfiled", Value: a.Value, Key: a.Key, Ops: ops(a),
+				Detail: fmt.Sprintf("the log holds %s at %d under key %q, and it was appended under key %q", a.Value, off, e.Key, a.Key)})
+		}
 		// Every copy the log holds was accepted on the condition: a second
 		// copy follows the first, if nothing else.
 		if a.AfterKey != nil || a.AfterLog != nil {
@@ -250,45 +275,53 @@ func Check(appends []Append, entries []Entry) []Anomaly {
 }
 
 // realtimeOrder reports each append the log holds before one that was
-// acked before it was sent: the latest such, for each. An acked append is
-// where its ack put it; the other is at the first place the log holds it.
+// acked before it was sent: the latest such, for each. Every ack is a
+// point of its own: an append acked at two offsets was in the log at the
+// higher by the later ack. The append held too early is at the first
+// place the log holds it.
 func realtimeOrder(appends []Append, l *log) []Anomaly {
-	type placed struct {
-		a         Append
-		call, ret int64
-		first     uint64 // the first offset the log holds the value at
-		acked     uint64 // the offset its first ack named, if the log holds the value there; first otherwise
+	type sent struct {
+		a     Append
+		call  int64
+		first uint64
 	}
-	var in []placed
+	type acked struct {
+		a   Append
+		ret int64
+		off uint64
+	}
+	var byCall []sent
+	var byRet []acked
 	for _, a := range appends {
 		if len(a.Attempts) == 0 {
 			continue
 		}
-		if offs := l.byValue[a.Value]; len(offs) > 0 {
-			call, ret, ackOff := timing(a)
-			p := placed{a, call, ret, offs[0], offs[0]}
-			if _, found := slices.BinarySearch(offs, ackOff); found {
-				p.acked = ackOff
+		offs := l.byValue[a.Value]
+		if len(offs) == 0 {
+			continue
+		}
+		call, _, _ := timing(a)
+		byCall = append(byCall, sent{a, call, offs[0]})
+		for _, t := range a.Attempts {
+			if _, held := slices.BinarySearch(offs, t.Offset); t.Outcome == OK && held {
+				byRet = append(byRet, acked{a, t.Return, t.Offset})
 			}
-			in = append(in, p)
 		}
 	}
-	byCall := slices.Clone(in)
-	slices.SortStableFunc(byCall, func(x, y placed) int { return cmp.Compare(x.call, y.call) })
-	byRet := slices.DeleteFunc(slices.Clone(in), func(p placed) bool { return p.ret == linearize.Pending })
-	slices.SortStableFunc(byRet, func(x, y placed) int { return cmp.Compare(x.ret, y.ret) })
+	slices.SortStableFunc(byCall, func(x, y sent) int { return cmp.Compare(x.call, y.call) })
+	slices.SortStableFunc(byRet, func(x, y acked) int { return cmp.Compare(x.ret, y.ret) })
 	var bad []Anomaly
-	var done *placed // of the appends acked so far, the one at the highest offset
+	var done *acked // of the acks so far, the one at the highest offset
 	i := 0
 	for _, b := range byCall {
 		for ; i < len(byRet) && byRet[i].ret < b.call; i++ {
-			if done == nil || byRet[i].acked > done.acked {
+			if done == nil || byRet[i].off > done.off {
 				done = &byRet[i]
 			}
 		}
-		if done != nil && done.acked > b.first {
+		if done != nil && done.off > b.first {
 			bad = append(bad, Anomaly{Kind: "realtime-order", Value: b.a.Value, Key: b.a.Key, Ops: append(ops(done.a), ops(b.a)...),
-				Detail: fmt.Sprintf("the log holds %s at %d, before %s at %d, which was acked before %s was sent", b.a.Value, b.first, done.a.Value, done.acked, b.a.Value)})
+				Detail: fmt.Sprintf("the log holds %s at %d, before %s at %d, which was acked before %s was sent", b.a.Value, b.first, done.a.Value, done.off, b.a.Value)})
 		}
 	}
 	return bad
@@ -319,33 +352,29 @@ type readIn struct {
 // CheckReads checks reads of each key's last entry for linearizability:
 // each must return the key's last entry at some instant between its call
 // and its return, in an order that respects real time, with the key's
-// appends in the order the log holds them. A read of an entry the log does
-// not hold is a dirty read, and is left out of the search; so is a read of
-// an entry no client appended, which Check reports as a phantom, and the
+// appends in the order the log holds them. An entry landed between its
+// append's call and the ack that named it, and, the log being one
+// sequence, no earlier than any entry before it was sent and no later
+// than any entry after it was acked. A read of an entry the log does not
+// hold is a dirty read, and is left out of the search; so is a read of an
+// entry no client appended, which Check reports as a phantom, and the
 // entry itself, since when it landed is anyone's guess. It returns what it
 // found, and the keys whose search did not finish within ctx and lim.
 func CheckReads(ctx context.Context, appends []Append, entries []Entry, reads []Read, lim linearize.Limits) ([]Anomaly, []string) {
 	l := index(entries)
 	var bad []Anomaly
+	landed := windows(appends, l)
 	byKey := map[string][]linearize.Op[readIn, uint64]{}
 	placed := map[string][]uint64{} // each key's entries some append put there
 	for _, a := range appends {
 		if len(a.Attempts) == 0 {
 			continue
 		}
-		offs := l.byValue[a.Value]
-		if len(offs) == 0 {
-			continue
-		}
-		call, ret, _ := timing(a)
-		for i, off := range offs {
-			r := ret
-			if i > 0 {
-				r = linearize.Pending // a duplicate: when it landed is unknown
-			}
+		for _, off := range l.byValue[a.Value] {
 			k := l.byOffset[off].Key
 			placed[k] = append(placed[k], off)
-			byKey[k] = append(byKey[k], linearize.Op[readIn, uint64]{Call: call, Return: r, Input: readIn{off: off, op: a.Attempts[0].Op}})
+			w := landed[off]
+			byKey[k] = append(byKey[k], linearize.Op[readIn, uint64]{Call: w.lo, Return: w.hi, Input: readIn{off: off, op: a.Attempts[0].Op}})
 		}
 	}
 	for _, offs := range placed {
@@ -393,6 +422,56 @@ func CheckReads(ctx context.Context, appends []Append, entries []Entry, reads []
 		}
 	}
 	return bad, unknown
+}
+
+// window is when an entry landed, as far as the history says: at lo or
+// later, by hi.
+type window struct{ lo, hi int64 }
+
+// windows bounds when each entry some append put in the log landed. On its
+// own, an entry landed no earlier than its append's first call not refused
+// and, if an ack named it, by that ack; the log being one sequence, no
+// earlier than any entry before it, nor later than any after it, either.
+// Where the two contradict each other -- an entry acked before one before
+// it was sent, which Check reports -- the entry's own bounds stand.
+func windows(appends []Append, l *log) map[uint64]window {
+	own := map[uint64]window{}
+	for _, a := range appends {
+		if len(a.Attempts) == 0 {
+			continue
+		}
+		call, _, _ := timing(a)
+		for _, off := range l.byValue[a.Value] {
+			w := window{call, linearize.Pending}
+			for _, t := range a.Attempts {
+				if t.Outcome == OK && t.Offset == off {
+					w.hi = min(w.hi, t.Return)
+				}
+			}
+			own[off] = w
+		}
+	}
+	out := maps.Clone(own)
+	floor := int64(math.MinInt64)
+	for _, off := range l.offsets {
+		if w, ok := out[off]; ok {
+			floor = max(floor, w.lo)
+			w.lo = floor
+			out[off] = w
+		}
+	}
+	ceil := linearize.Pending
+	for _, off := range slices.Backward(l.offsets) {
+		if w, ok := out[off]; ok {
+			ceil = min(ceil, w.hi)
+			w.hi = ceil
+			if w.lo > w.hi {
+				w = own[off]
+			}
+			out[off] = w
+		}
+	}
+	return out
 }
 
 // explain says where the search of a key got stuck: the operation it
