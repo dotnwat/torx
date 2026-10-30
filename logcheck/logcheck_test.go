@@ -195,6 +195,20 @@ func TestCheck(t *testing.T) {
 		log:  []Entry{e(1, "a", "x"), e(3, "a", "x")},
 		want: []string{"realtime-order"},
 	}, {
+		// Two attempts, two appends, one entry: one of them is lost.
+		name: "two attempts without an idempotency key acked at one offset",
+		appends: []Append{{Value: "x", Key: "a", Attempts: []Attempt{
+			{Op: 0, Call: 0, Return: 5, Outcome: OK, Offset: 1}, {Op: 1, Call: 10, Return: 15, Outcome: OK, Offset: 1},
+		}}},
+		log:  []Entry{e(1, "a", "x")},
+		want: []string{"lost"},
+	}, {
+		name: "two attempts under an idempotency key acked at one offset",
+		appends: []Append{{Value: "x", Key: "a", Idempotent: true, Attempts: []Attempt{
+			{Op: 0, Call: 0, Return: 5, Outcome: OK, Offset: 1}, {Op: 1, Call: 10, Return: 15, Outcome: OK, Offset: 1},
+		}}},
+		log: []Entry{e(1, "a", "x")},
+	}, {
 		// Deduplicated, the resend was told where the first attempt put
 		// x, before y: the first attempt was sent before y's ack.
 		name: "an idempotent resend acked where the first attempt put it",

@@ -9,6 +9,8 @@
 // the history is held to, and Check reports what it contradicts:
 //
 //   - lost: an acked append the log does not hold where its ack said;
+//     two acks at one offset for attempts sent without an idempotency key
+//     are two appends, of which the log holds one there at most;
 //   - ack-mismatch: an ack whose offset the log holds another value at;
 //   - phantom: a value in the log no client appended;
 //   - duplicate: a value the log holds more often than its attempts
@@ -251,10 +253,17 @@ func Check(appends []Append, entries []Entry) []Anomaly {
 			bad = append(bad, Anomaly{Kind: "duplicate", Value: a.Value, Key: a.Key, Ops: ops(a),
 				Detail: fmt.Sprintf("the log holds %s at %v, from %d attempts not refused (idempotent: %v)", a.Value, offs, could, a.Idempotent)})
 		}
+		acked := map[uint64]int{} // the attempt whose ack named each offset
 		for _, t := range a.Attempts {
 			if t.Outcome != OK {
 				continue
 			}
+			if first, ok := acked[t.Offset]; ok && !a.Idempotent {
+				bad = append(bad, Anomaly{Kind: "lost", Value: a.Value, Key: a.Key, Ops: []int{first, t.Op},
+					Detail: fmt.Sprintf("%s was acked at %d by two attempts sent without an idempotency key, each an append of its own, and the log holds one there at most", a.Value, t.Offset)})
+				continue
+			}
+			acked[t.Offset] = t.Op
 			e, ok := l.byOffset[t.Offset]
 			switch {
 			case !ok:
