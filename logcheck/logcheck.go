@@ -165,13 +165,17 @@ func before(offs []uint64, off uint64) uint64 {
 }
 
 // calls is when each copy of an append the log holds, by offset, was
-// sent, at the earliest. A copy at an offset an ack named is the acked
-// attempt's, sent when it was. The rest landed in the log's order, and
-// each attempt placed one at most, so the i-th of them was sent no earlier
-// than the i-th earliest of the attempts left over, those not refused --
-// a refused attempt put nothing in the log -- or those refused if every
-// one was. A copy beyond the attempts, a duplicate anomaly's, gets the
-// last of them, or the append's first call if none is left over.
+// sent, at the earliest. An append sent without an idempotency key is
+// stored once per attempt the log took, and each attempt's ack names the
+// copy that attempt placed: a copy at an offset an ack named is the acked
+// attempt's, sent when it was. An idempotent append's ack names the
+// value's place, whichever attempt put it there, and says nothing of
+// which. Every copy not so placed landed in the log's order, and each
+// attempt placed one at most, so the i-th of them was sent no earlier than
+// the i-th earliest of the attempts left over, those not refused -- a
+// refused attempt put nothing in the log -- or those refused if every one
+// was. A copy beyond the attempts, a duplicate anomaly's, gets the last of
+// them, or the append's first call if none is left over.
 func calls(a Append, offs []uint64) []int64 {
 	out := make([]int64, len(offs))
 	placed := make([]bool, len(offs))
@@ -179,7 +183,7 @@ func calls(a Append, offs []uint64) []int64 {
 	first := int64(math.MaxInt64)
 	for _, t := range a.Attempts {
 		first = min(first, t.Call)
-		if t.Outcome == OK {
+		if t.Outcome == OK && !a.Idempotent {
 			if i, ok := slices.BinarySearch(offs, t.Offset); ok {
 				if !placed[i] || t.Call < out[i] {
 					out[i] = t.Call

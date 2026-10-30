@@ -194,6 +194,14 @@ func TestCheck(t *testing.T) {
 		}}},
 		log:  []Entry{e(1, "a", "x"), e(3, "a", "x")},
 		want: []string{"realtime-order"},
+	}, {
+		// Deduplicated, the resend was told where the first attempt put
+		// x, before y: the first attempt was sent before y's ack.
+		name: "an idempotent resend acked where the first attempt put it",
+		appends: []Append{{Value: "x", Key: "a", Idempotent: true, Attempts: []Attempt{
+			{Op: 0, Call: 0, Outcome: Unknown}, {Op: 1, Call: 100, Return: 110, Outcome: OK, Offset: 1},
+		}}, acked(2, "b", "y", 10, 20, 2)},
+		log: []Entry{e(1, "a", "x"), e(2, "b", "y")},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := Check(tc.appends, tc.log)
@@ -440,5 +448,23 @@ func TestCheckReadsResendCopy(t *testing.T) {
 	got, _ = CheckReads(context.Background(), appends, log, []Read{read(10, "a", 120, 121, 1, "x"), read(11, "a", 200, 201, 2, "x")}, linearize.Limits{})
 	if len(got) > 0 {
 		t.Fatalf("the resend's copy read at 120 and the first attempt's at 200: found %v", got)
+	}
+}
+
+// An idempotent resend's ack names where the value is, which the first
+// attempt may have put there: x may be read before the resend, and y's
+// ack says it was there by 20.
+func TestCheckReadsIdempotentResend(t *testing.T) {
+	appends := []Append{{Value: "x", Key: "a", Idempotent: true, Attempts: []Attempt{
+		{Op: 0, Call: 0, Outcome: Unknown}, {Op: 1, Call: 100, Return: 110, Outcome: OK, Offset: 1},
+	}}, acked(2, "b", "y", 10, 20, 2)}
+	log := []Entry{e(1, "a", "x"), e(2, "b", "y")}
+	got, _ := CheckReads(context.Background(), appends, log, []Read{read(10, "a", 50, 51, 1, "x")}, linearize.Limits{})
+	if len(got) > 0 {
+		t.Fatalf("x read at 50, before the resend: found %v", got)
+	}
+	got, _ = CheckReads(context.Background(), appends, log, []Read{read(10, "a", 30, 31, 0, "")}, linearize.Limits{})
+	if !slices.Equal(kinds(got), []string{"nonlinearizable-read"}) {
+		t.Fatalf("nothing read at 30, after y's ack at 20 put x there: found %v", got)
 	}
 }
