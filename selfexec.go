@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"syscall"
@@ -32,12 +33,16 @@ const workerTagEnv = "TORX_WORKER_TAG"
 // hang forever.
 const eventDrainGrace = 5 * time.Second
 
-// outputCloseGrace bounds how long Launch waits for the copies of the
-// worker's output to end once their pipes are closed. A copy ends at once
-// then, unless it is blocked writing to a console no one is reading, which
-// the driver's own writes would block on too: Launch leaves it to finish
-// when the console is read again, rather than wait on it.
+// outputCloseGrace bounds how long Launch waits, once the worker's output
+// is all in worker.log, for the console to take the last of it. A console
+// no one is reading would hold it for ever, as it would the driver's own
+// writes: Launch leaves the copy to it to finish when the console is read
+// again, rather than wait on it.
 const outputCloseGrace = time.Second
+
+// consoleBacklog is how many writes the console may fall behind worker.log
+// before the copy to it drops what the log keeps.
+const consoleBacklog = 64
 
 // SelfExecLauncher runs each job in a worker subprocess by re-executing this
 // binary in worker mode. It is the production launcher: a panic, hang, exit, or
@@ -227,20 +232,25 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	return result, nil
 }
 
-// workerOutput carries a worker's standard output and error to the driver's
-// and to worker.log in the variant's directory. The worker writes to pipes
-// the driver copies out itself, rather than to writers exec would copy to
-// for it: exec's copying has Wait last until every holder of the pipes has
-// closed them, so a process the worker left behind with its output would
-// hold the driver up for the whole of WaitDelay. Here the worker's exit
-// ends the wait, and the copying ends at EOF, or when drain gives up on it.
+// workerOutput carries a worker's standard output and error to worker.log
+// in the variant's directory and to the driver's console. The worker
+// writes to pipes the driver copies out itself, rather than to writers
+// exec would copy to for it: exec's copying has Wait last until every
+// holder of the pipes has closed them, so a process the worker left behind
+// with its output would hold the driver up for the whole of WaitDelay.
+// Here the worker's exit ends the wait, and the copying ends at EOF, or
+// when drain gives up on it. The log is written as the output comes, and
+// the console as it keeps up: the log is the copy meant to be whole, and
+// a console that is slow, or gone, or that no one reads, costs the copy to
+// it alone.
 type workerOutput struct {
 	file       *os.File
 	outR, errR *os.File // the driver's ends
 	outW, errW *os.File // the worker's ends, which the driver holds until it has started
 	outC, errC *os.File // the console, duplicated
 	copying    bool
-	done       chan struct{} // closed once both copies have ended
+	done       chan struct{} // closed once worker.log has it all: both copies have ended
+	shown      chan struct{} // closed once the console has had all it will get
 
 	mu  sync.Mutex
 	err error // the first failure to write worker.log
@@ -253,7 +263,7 @@ func newWorkerOutput(path string) (*workerOutput, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := &workerOutput{file: f, done: make(chan struct{})}
+	w := &workerOutput{file: f, done: make(chan struct{}), shown: make(chan struct{})}
 	ok := false
 	defer func() {
 		if !ok {
@@ -303,15 +313,26 @@ func (w *workerOutput) started() {
 	_ = w.outW.Close()
 	_ = w.errW.Close()
 	w.copying = true
-	var wg sync.WaitGroup
+	var kept, shown sync.WaitGroup
 	for _, c := range []struct{ r, console *os.File }{{w.outR, w.outC}, {w.errR, w.errC}} {
-		wg.Go(func() {
-			_, _ = io.Copy(tee{w, c.console}, c.r)
+		backlog := make(chan []byte, consoleBacklog)
+		kept.Go(func() {
+			defer close(backlog)
+			_, _ = io.Copy(keeper{w, backlog}, c.r)
+		})
+		shown.Go(func() {
+			for p := range backlog {
+				_, _ = c.console.Write(p)
+			}
 		})
 	}
 	go func() {
-		wg.Wait()
+		kept.Wait()
 		close(w.done)
+	}()
+	go func() {
+		shown.Wait()
+		close(w.shown)
 	}()
 }
 
@@ -331,9 +352,9 @@ func (w *workerOutput) drain(ctx context.Context) {
 }
 
 // close releases everything, and leaves no file behind a worker that
-// printed nothing, as most do. A copy still blocked on the console after
-// outputCloseGrace is left to end on its own, and the file is closed under
-// it.
+// printed nothing, as most do. The console gets outputCloseGrace to take
+// the last of the output; one still behind then is left to catch up on
+// its own.
 func (w *workerOutput) close() {
 	for _, f := range []*os.File{w.outW, w.errW, w.outR, w.errR} {
 		if f != nil {
@@ -342,10 +363,16 @@ func (w *workerOutput) close() {
 	}
 	ended := !w.copying
 	if w.copying {
+		ctx, cancel := context.WithTimeout(context.Background(), outputCloseGrace)
+		defer cancel()
 		select {
 		case <-w.done:
 			ended = true
-		case <-time.After(outputCloseGrace):
+		case <-ctx.Done():
+		}
+		select {
+		case <-w.shown:
+		case <-ctx.Done():
 		}
 	}
 	if fi, err := w.file.Stat(); ended && err == nil && fi.Size() == 0 {
@@ -369,23 +396,26 @@ func (w *workerOutput) failure() error {
 	return w.err
 }
 
-// tee writes to worker.log and to the console, each whether or not the
-// other could be written, and never fails: a copy that stopped would leave
-// the worker blocked on a full pipe, and the log is the copy meant to
-// outlast a console that is gone.
-type tee struct {
+// keeper is where a copy of the worker's output goes: to worker.log as it
+// comes, and to the console's backlog as the console keeps up. It never
+// fails: a copy that stopped would leave the worker blocked on a full
+// pipe.
+type keeper struct {
 	w       *workerOutput
-	console io.Writer
+	console chan<- []byte
 }
 
-func (t tee) Write(p []byte) (int, error) {
-	if _, err := t.w.file.Write(p); err != nil {
-		t.w.mu.Lock()
-		if t.w.err == nil {
-			t.w.err = err
+func (k keeper) Write(p []byte) (int, error) {
+	if _, err := k.w.file.Write(p); err != nil {
+		k.w.mu.Lock()
+		if k.w.err == nil {
+			k.w.err = err
 		}
-		t.w.mu.Unlock()
+		k.w.mu.Unlock()
 	}
-	_, _ = t.console.Write(p)
+	select {
+	case k.console <- slices.Clone(p): // the copy reuses p
+	default: // the console is behind; the log has it
+	}
 	return len(p), nil
 }

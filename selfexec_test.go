@@ -441,10 +441,11 @@ func TestDriverOutlivesItsConsole(t *testing.T) {
 	}
 }
 
-// A copy blocked writing to a console no one reads does not hold Launch:
-// once the worker's pipes are closed, close waits outputCloseGrace for the
-// copies and no longer.
-func TestWorkerOutputGivesUpOnAConsoleNoOneReads(t *testing.T) {
+// A console no one reads holds nothing up and loses nothing of worker.log:
+// the copy to the log goes on while the console's blocks, and once the
+// worker's pipes have closed, close waits outputCloseGrace for the console
+// and no longer.
+func TestWorkerOutputOutlastsAnUnreadConsole(t *testing.T) {
 	w, err := newWorkerOutput(filepath.Join(t.TempDir(), workerLogFile))
 	if err != nil {
 		t.Fatal(err)
@@ -472,27 +473,24 @@ func TestWorkerOutputGivesUpOnAConsoleNoOneReads(t *testing.T) {
 	}
 	worker := os.NewFile(uintptr(wfd), "worker stdout")
 	w.started()
-	if _, err := worker.WriteString("hello\n"); err != nil {
-		t.Fatal(err)
+	// Far more than a pipe holds.
+	line := []byte(strings.Repeat("x", 1023) + "\n")
+	const n = 2048
+	for range n {
+		if _, err := worker.Write(line); err != nil {
+			t.Fatal(err)
+		}
 	}
 	_ = worker.Close()
-	// The copy reaches worker.log before it blocks on the console.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if b, _ := os.ReadFile(w.file.Name()); strings.Contains(string(b), "hello") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the copy did not reach worker.log")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), eventDrainGrace)
+	defer cancel()
 	start := time.Now()
 	w.drain(ctx)
 	w.close()
 	if took := time.Since(start); took > outputCloseGrace+2*time.Second {
 		t.Errorf("drain and close took %v with the console unread", took)
+	}
+	if fi, err := os.Stat(w.file.Name()); err != nil || fi.Size() != int64(n*len(line)) {
+		t.Errorf("%s holds %v bytes (%v), want %d: the console held up the copy to the log", workerLogFile, fi, err, n*len(line))
 	}
 }
