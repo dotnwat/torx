@@ -542,7 +542,9 @@ nemesis's `Before` hook -- restarts only what exited on its own.
 `nemesis.Windows` pairs the recorded faults with their heals, and
 `Window.Overlaps` says whether an operation ran while one held or soon
 after: what is a bug in a quiet system -- a stale read, say -- may be what
-the system promises while a partition cuts its server off.
+the system promises while a partition cuts its server off. A fault whose
+heal failed holds, for all the nemesis knows, to the end of the run, and
+its window says so.
 
 The [`linearize`](linearize/) package checks the record. Given a model of
 the object -- an initial state and a step function -- and the operations

@@ -194,6 +194,8 @@ func TestHolds(t *testing.T) {
 	}
 }
 
+var errStillPaused = errors.New("still paused")
+
 func TestWindows(t *testing.T) {
 	at := func(s int) time.Time { return time.Unix(int64(s), 0) }
 	evs := []Event{
@@ -205,13 +207,17 @@ func TestWindows(t *testing.T) {
 		{Fault: "partition", Target: "a", Heal: true, Start: at(40), End: at(41)},
 		{Fault: "crash", Target: "c", Start: at(50), End: at(50), Held: true, Err: errors.New("half applied")},
 		{Fault: "crash", Start: at(60), End: at(60), Err: ErrNoTarget},
+		{Fault: "pause", Target: "b", Heal: true, Start: at(70), End: at(71), Err: errStillPaused},
+		{Fault: "pause", Target: "b", Start: at(80), End: at(80), Held: true},
+		{Fault: "pause", Target: "b", Heal: true, Start: at(90), End: at(91)},
 	}
 	want := []Window{
-		{"partition", "a", at(10), at(21)},
-		{"stepdown", "s", at(12), at(13)},
-		{"pause", "b", at(14), time.Time{}}, // never healed
-		{"partition", "a", at(30), at(41)},
-		{"crash", "c", at(50), time.Time{}},
+		{"partition", "a", at(10), at(21), nil},
+		{"stepdown", "s", at(12), at(13), nil},
+		{"pause", "b", at(14), time.Time{}, errStillPaused}, // its heal failed
+		{"partition", "a", at(30), at(41), nil},
+		{"crash", "c", at(50), time.Time{}, nil}, // never healed
+		{"pause", "b", at(80), at(91), nil},      // healed by its own heal, not the failed one's successor
 	}
 	got := Windows(evs)
 	if len(got) != len(want) {
