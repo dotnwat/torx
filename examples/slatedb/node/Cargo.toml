@@ -1,0 +1,33 @@
+[package]
+name = "slatedb-node"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "A SlateDB process for the torx suite: a writer, reader, compactor, or garbage collector behind a small HTTP API"
+
+# The node is built on its own, never as part of an enclosing workspace.
+[workspace]
+
+[dependencies]
+# The release under test. The harness builds against a local checkout
+# instead by patching both crates (see harness/main.go).
+slatedb = { git = "https://github.com/slatedb/slatedb", tag = "v0.17.0" }
+slatedb-common = { git = "https://github.com/slatedb/slatedb", tag = "v0.17.0" }
+anyhow = "1"
+axum = "0.8"
+bytes = "1"
+chrono = "0.4"
+env_logger = "0.11"
+futures = "0.3"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
+[features]
+# Db::begin and Db::snapshot are async in SlateDB 0.17.0 and sync on main
+# after it; the harness sets this for a source whose begin is async.
+async-api = []
+
+[profile.release]
+debug = 1
