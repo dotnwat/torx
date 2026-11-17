@@ -12,6 +12,8 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -556,6 +558,41 @@ func TestBlock(t *testing.T) {
 	}
 	if got := strings.Join(sortedBySeq(s, nil), "\n"); got != strings.Join(want, "\n") {
 		t.Fatalf("faulted requests:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+	}
+}
+
+// A request a Block holds may come to wait with the store closed and its
+// rule lifted both, and has no effect then: the store closed first. Logf
+// is told of the fault before the request waits, so it is where the test
+// closes the store and then lifts the rule. The request picks among what
+// it has to wait for at random, hence the rounds.
+func TestBlockClosedBeforeLifted(t *testing.T) {
+	for range 100 {
+		var store atomic.Pointer[Server]
+		var once sync.Once
+		closed := make(chan struct{})
+		s, c := newStore(t, Options{Logf: func(string, ...any) {
+			once.Do(func() {
+				s := store.Load()
+				// Close returns once the request is done with, so it is
+				// not waited for here; the store is closed when done is.
+				go func() {
+					_ = s.Close()
+					close(closed)
+				}()
+				<-s.done
+				s.ClearRules()
+			})
+		}})
+		store.Store(s)
+		s.AddRule(Rule{Name: "b", Prob: 1, Action: Block, Ops: []Op{OpPut}})
+		if resp, _, err := c.do("PUT", "/b/k", []byte("x")); err == nil && resp.StatusCode == 200 {
+			t.Fatal("block: a held put was served by a store that had closed")
+		}
+		<-closed
+		if _, _, ok := s.Get("b", "k"); ok {
+			t.Fatal("block: a held put took effect though the store closed before its rule lifted")
+		}
 	}
 }
 

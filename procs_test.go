@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -220,6 +221,9 @@ type lossyBackend struct {
 	Backend
 	// tailGate, if not nil, holds every tail until it is closed.
 	tailGate chan struct{}
+	// started, if not nil, is called with each process as its launch goes
+	// through, before the launch hears that it has.
+	started func(*lossyProc)
 
 	mu    sync.Mutex
 	procs []*lossyProc
@@ -235,7 +239,17 @@ func (b *lossyBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
 	b.mu.Lock()
 	b.procs = append(b.procs, lp)
 	b.mu.Unlock()
+	if b.started != nil {
+		b.started(lp)
+	}
 	return lp, nil
+}
+
+// launched is how many processes the backend has started.
+func (b *lossyBackend) launched() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.procs)
 }
 
 func (b *lossyBackend) Exec(ctx context.Context, cmd Cmd) (ExecResult, error) {
@@ -255,6 +269,9 @@ func (b *lossyBackend) last() *lossyProc {
 type lossyProc struct {
 	Process
 	lost chan struct{} // closed once the node is out of reach
+	// unkillable makes the kill fail and nothing else: the node can still
+	// see the process, and cannot kill it.
+	unkillable atomic.Bool
 }
 
 func (p *lossyProc) isLost() bool {
@@ -290,6 +307,9 @@ func (p *lossyProc) Wait(ctx context.Context) (int, error) {
 func (p *lossyProc) Close() error {
 	if p.isLost() {
 		return Wrap(ErrBackend, "lossy: kill", errors.New("the node is out of reach"))
+	}
+	if p.unkillable.Load() {
+		return Wrap(ErrBackend, "lossy: kill", errors.New("the kill could not be carried out"))
 	}
 	return p.Process.Close()
 }
@@ -479,5 +499,140 @@ func TestProcsStopNodeWaitsForExit(t *testing.T) {
 	}
 	if len(p.Exits()) != 1 || len(p.Names()) != 0 {
 		t.Fatalf("exits %v, names %v", p.Exits(), p.Names())
+	}
+}
+
+// What StopNode stops stays stopped: a process that exits as its node is
+// stopped is not started again behind StopNode's back, by an OnExit that
+// restarts what exits or by a Restart that was waiting for it to be gone.
+func TestProcsStopNodeClosesSlots(t *testing.T) {
+	ctx := context.Background()
+	p, n, b := newLossyProcs(t)
+	b.tailGate = make(chan struct{})
+	relaunched := make(chan error, 1)
+	p.OnExit = func(e ProcExit) { relaunched <- p.Relaunch(ctx, e.Name, sleeper("replacement")) }
+	if err := p.Launch(ctx, "a", n, Command("sh", "-c", "echo dying; exit 3")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the exit", func() bool { return !p.Running("a") })
+	restarted := make(chan error, 1)
+	go func() { restarted <- p.Restart(ctx, "a") }()
+	stopped := make(chan error, 1)
+	go func() { stopped <- p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}) }()
+	waitFor(t, "StopNode to take the slot", func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.slots["a"].closing
+	})
+	// The exit settles under StopNode: OnExit hears of it, and the Restart
+	// that waited for it wakes.
+	close(b.tailGate)
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-relaunched; err == nil {
+		t.Fatal("OnExit started the process again as its node was stopped")
+	}
+	if err := <-restarted; err == nil {
+		t.Fatal("a Restart that was waiting started the process again as its node was stopped")
+	}
+	if got := b.launched(); got != 1 || len(p.Names()) != 0 {
+		t.Fatalf("%d processes launched, names %v; want the one, forgotten", got, p.Names())
+	}
+}
+
+// A launch whose context ends as it goes through is called off and its
+// process killed. One that cannot be killed may still run: its name stays
+// taken, and StopNode does not call the node stopped.
+func TestProcsLaunchCalledOff(t *testing.T) {
+	bg := context.Background()
+	p, n, b := newLossyProcs(t)
+
+	ctx, cancel := context.WithCancel(bg)
+	b.started = func(*lossyProc) { cancel() }
+	err := p.Launch(ctx, "gone", n, sleeper("gone"))
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrBackend) {
+		t.Fatalf("a launch called off: %v, want its context's error alone", err)
+	}
+	if b.last().alive() || p.Node("gone") != nil {
+		t.Fatalf("a launch called off left a process (alive %v) or a slot (%v)", b.last().alive(), p.Names())
+	}
+
+	ctx, cancel = context.WithCancel(bg)
+	b.started = func(lp *lossyProc) {
+		close(lp.lost)
+		cancel()
+	}
+	err = p.Launch(ctx, "a", n, sleeper("a"))
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrBackend) {
+		t.Fatalf("a launch called off whose kill failed: %v, want both errors", err)
+	}
+	b.started = nil
+	if !b.last().alive() {
+		t.Fatal("the process did not outlive the kill that failed")
+	}
+	if p.Running("a") || p.Node("a") != n {
+		t.Fatalf("after the launch: running %v, node %v; want a slot, not running", p.Running("a"), p.Node("a"))
+	}
+	if err := p.Launch(bg, "a", n, sleeper("b")); err == nil {
+		t.Fatal("a second Launch of the name started a process beside one that may still run")
+	}
+	if err := p.Restart(bg, "a"); !errors.Is(err, ErrBackend) {
+		t.Fatalf("Restart over a process that may still run: %v", err)
+	}
+	if got := b.launched(); got != 2 {
+		t.Fatalf("%d processes launched, want the two called off", got)
+	}
+	err = p.StopNode(bg, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second})
+	if !errors.Is(err, ErrBackend) {
+		t.Fatalf("StopNode after a kill that could not be carried out: %v", err)
+	}
+}
+
+// A stop that did not go as asked still ends in the kill, and only a kill
+// that failed leaves a process that may run: a stop whose context ended is
+// an error to its caller, and the slot starts again.
+func TestProcsStopCutShort(t *testing.T) {
+	ctx := context.Background()
+	p, n, b := newLossyProcs(t)
+	stubborn := Command("sh", "-c", `trap '' TERM; echo stubborn up; while :; do sleep 0.05; done`)
+	if err := p.Launch(ctx, "a", n, stubborn); err != nil {
+		t.Fatal(err)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "a"), "stubborn up")
+	old := b.last()
+	short, cancel := context.WithCancel(ctx)
+	stopped := make(chan error, 1)
+	go func() {
+		_, err := p.Terminate(short, "a", StopPolicy{Signal: syscall.SIGTERM, Grace: time.Minute})
+		stopped <- err
+	}()
+	waitFor(t, "the stop to begin", func() bool { return !p.Running("a") })
+	cancel()
+	if err := <-stopped; !errors.Is(err, context.Canceled) {
+		t.Fatalf("a stop whose context ended: %v", err)
+	}
+	if old.alive() {
+		t.Fatal("a stop cut short left its process running")
+	}
+	if err := p.Restart(ctx, "a"); err != nil {
+		t.Fatalf("Restart after a stop cut short, its process killed: %v", err)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "a"), "stubborn up")
+
+	// The kill is what fails: the process may still run.
+	b.last().unkillable.Store(true)
+	_, err := p.Terminate(ctx, "a", StopPolicy{Signal: syscall.SIGTERM, Grace: 100 * time.Millisecond})
+	if !errors.Is(err, ErrBackend) {
+		t.Fatalf("a stop whose kill failed: %v", err)
+	}
+	if !b.last().alive() {
+		t.Fatal("the process did not outlive the kill that failed")
+	}
+	if err := p.Restart(ctx, "a"); !errors.Is(err, ErrBackend) || !strings.Contains(err.Error(), "may still run") {
+		t.Fatalf("Restart over a process that may still run: %v", err)
+	}
+	if err := p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}); !errors.Is(err, ErrBackend) {
+		t.Fatalf("StopNode after a kill that could not be carried out: %v", err)
 	}
 }
