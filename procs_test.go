@@ -224,12 +224,19 @@ type lossyBackend struct {
 	// started, if not nil, is called with each process as its launch goes
 	// through, before the launch hears that it has.
 	started func(*lossyProc)
+	// unreachable makes a launch wait for its context to end and fail
+	// with the context's error, as one on a node out of reach does.
+	unreachable bool
 
 	mu    sync.Mutex
 	procs []*lossyProc
 }
 
 func (b *lossyBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
+	if b.unreachable {
+		<-ctx.Done()
+		return nil, Wrap(ErrBackend, "lossy: stream", ctx.Err())
+	}
 	// A process out of reach is not killed through its context either.
 	tp, err := b.Backend.Stream(context.WithoutCancel(ctx), cmd)
 	if err != nil {
@@ -586,6 +593,57 @@ func TestProcsLaunchCalledOff(t *testing.T) {
 	err = p.StopNode(bg, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second})
 	if !errors.Is(err, ErrBackend) {
 		t.Fatalf("StopNode after a kill that could not be carried out: %v", err)
+	}
+}
+
+// A launch its context cut short fails the way the context ended: a
+// deadline is not a cancellation, and a cause the caller gave is kept.
+func TestProcsLaunchCutShort(t *testing.T) {
+	bg := context.Background()
+	p, n, b := newLossyProcs(t)
+	b.unreachable = true
+
+	ctx, cancel := context.WithTimeout(bg, 50*time.Millisecond)
+	err := p.Launch(ctx, "a", n, sleeper("a"))
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		t.Fatalf("a launch whose deadline passed: %v, want a deadline, not a cancellation", err)
+	}
+
+	ctx, cancel = context.WithCancel(bg)
+	time.AfterFunc(50*time.Millisecond, cancel)
+	err = p.Launch(ctx, "a", n, sleeper("a"))
+	if !errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a launch that was canceled: %v, want a cancellation, not a deadline", err)
+	}
+
+	why := errors.New("the job was called off")
+	ctx, calledOff := context.WithCancelCause(bg)
+	time.AfterFunc(50*time.Millisecond, func() { calledOff(why) })
+	err = p.Launch(ctx, "a", n, sleeper("a"))
+	if !errors.Is(err, why) || !errors.Is(err, ErrBackend) {
+		t.Fatalf("a launch canceled for a cause: %v, want the cause and the backend's error", err)
+	}
+	if names := p.Names(); len(names) != 0 {
+		t.Fatalf("launches that failed left %v", names)
+	}
+
+	// A process launched under a deadline outlives it, as it does a
+	// cancellation.
+	b.unreachable = false
+	ctx, cancel = context.WithTimeout(bg, time.Second) // long enough to launch under, on a slow machine
+	defer cancel()
+	if err := p.Launch(ctx, "a", n, sleeper("a")); err != nil {
+		t.Fatal(err)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "a"), "a up")
+	<-ctx.Done()
+	time.Sleep(100 * time.Millisecond)
+	if !p.Running("a") || len(p.Exits()) != 0 {
+		t.Fatalf("the process died with its launch's deadline: running %v, exits %v", p.Running("a"), p.Exits())
+	}
+	if err := p.StopNode(bg, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}); err != nil {
+		t.Fatal(err)
 	}
 }
 

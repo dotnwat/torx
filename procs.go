@@ -213,29 +213,77 @@ func (p *Procs) lockStopped(ctx context.Context, name string) (*procSlot, error)
 	}
 }
 
+// lifeContext is the context a process is launched under and lives under.
+// The process dies with it, so it does not end as the launch's context
+// does, except while the launch is under way; it ends then as that one
+// did, so that a backend the caller's deadline cut short says a deadline
+// did, and for good when the process is let go.
+type lifeContext struct {
+	context.Context // the launch's context, for its values: never done
+	done            chan struct{}
+
+	mu  sync.Mutex
+	err error
+}
+
+func newLifeContext(ctx context.Context) *lifeContext {
+	return &lifeContext{Context: context.WithoutCancel(ctx), done: make(chan struct{})}
+}
+
+func (c *lifeContext) Done() <-chan struct{} { return c.done }
+
+func (c *lifeContext) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
+// end ends the context with err, unless it has ended.
+func (c *lifeContext) end(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err == nil {
+		c.err = err
+		close(c.done)
+	}
+}
+
+// release ends the context of a process that is gone, or never was.
+func (c *lifeContext) release() { c.end(context.Canceled) }
+
 func (p *Procs) startLocked(ctx context.Context, s *procSlot) error {
 	// The process dies with the context it was streamed under, so it gets
-	// one of its own, which ctx cancels only while the launch is under way.
-	life, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	stop := context.AfterFunc(ctx, cancel)
+	// one of its own, which ctx ends only while the launch is under way.
+	life := newLifeContext(ctx)
+	stop := context.AfterFunc(ctx, func() { life.end(ctx.Err()) })
 	tp, err := p.svc.StartCapturedAs(life, s.node, s.name, s.cmd)
-	if !stop() && err == nil {
-		// ctx ended as the launch went through, so the launch is called
-		// off and its process killed. One that cannot be killed may still
-		// run, as after any kill that failed.
-		err = context.Cause(ctx)
-		if cerr := tp.Close(); cerr != nil {
-			s.unstopped = fmt.Errorf("torx: calling off the launch of %s: %w", s.name, cerr)
-			err = errors.Join(err, s.unstopped)
+	if !stop() {
+		// ctx ended while the launch was under way, and the launch's
+		// error is how ctx ended.
+		cause := context.Cause(ctx)
+		switch {
+		case err == nil:
+			// The launch went through all the same, so it is called off
+			// and its process killed. One that cannot be killed may still
+			// run, as after any kill that failed.
+			err = cause
+			if cerr := tp.Close(); cerr != nil {
+				s.unstopped = fmt.Errorf("torx: calling off the launch of %s: %w", s.name, cerr)
+				err = errors.Join(err, s.unstopped)
+			}
+		case !errors.Is(err, cause):
+			// The backend's error says what it saw, which is not a cause
+			// the caller gave, and may be nothing of ctx at all.
+			err = errors.Join(cause, err)
 		}
 	}
 	if err != nil {
-		cancel()
+		life.release()
 		return err
 	}
 	s.launches++
 	s.proc, s.paused = tp, false
-	go p.watch(s, tp, s.launches, cancel)
+	go p.watch(s, tp, s.launches, life.release)
 	return nil
 }
 
