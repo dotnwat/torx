@@ -208,13 +208,21 @@ func (c *checker) addPrefix(a prefixcheck.Anomaly[uint64]) {
 	L := o.Report.TxLog
 	switch a.Kind {
 	case prefixcheck.NotAPrefix:
-		want := "nothing"
-		if uid, ok := c.orders[a.Branch][a.At]; ok {
-			want = c.describe(uid)
+		uid := L[a.At-1]
+		detail := fmt.Sprintf("%s holds %d transactions, which no primary committed in that order: at row %d it holds %s, ",
+			c.what(o), len(L), a.At, c.describe(uid))
+		want, known := c.orders[a.Branch][a.At]
+		switch first := slices.Index(L, uid) + 1; {
+		case known && want != uid:
+			detail += fmt.Sprintf("where epoch %d committed %s", a.Branch, c.describe(want))
+		case first < a.At:
+			// A transaction in doubt, held twice: the row is one it could
+			// stand at, had it not stood at another already.
+			detail += fmt.Sprintf("which it holds at row %d too", first)
+		default:
+			detail += fmt.Sprintf("where epoch %d committed nothing", a.Branch)
 		}
-		c.add(anomaly{Kind: "not-a-prefix", Obs: []int{o.ID},
-			Detail: fmt.Sprintf("%s holds %d transactions, which no primary committed in that order: at row %d it holds %s, where epoch %d committed %s",
-				c.what(o), len(L), a.At, c.describe(L[a.At-1]), a.Branch, want)})
+		c.add(anomaly{Kind: "not-a-prefix", Obs: []int{o.ID}, Detail: detail})
 	case prefixcheck.LostAcked:
 		detail := fmt.Sprintf("%s holds %d transactions, but a sync -wait that returned at %s acknowledged the %d epoch %d had committed when it was called",
 			c.what(o), len(L), a.Ack.Return.Format("15:04:05.000"), a.Ack.Prefix, a.Ack.Branch)

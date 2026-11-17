@@ -94,6 +94,33 @@ func TestCheckLostAndBack(t *testing.T) {
 	}
 }
 
+// A transaction in doubt may stand at a row the primary's log does not
+// account for, once: a copy that holds it twice is not a prefix, and the
+// anomaly says that is why, not that nothing was committed at the row.
+func TestCheckHeldTwice(t *testing.T) {
+	h := newHistory(4)
+	h.txns[3].Outcome, h.txns[3].N = inDoubt, 0
+	h.copyOf(obsRestore, 5, 1, 2, 3, 4) // in doubt, and it committed: fine
+	h.copyOf(obsRestore, 6, 1, 2, 3, 4, 4)
+	found, _ := h.check()
+	var details []string
+	for _, a := range found {
+		if a.Kind == "not-a-prefix" {
+			details = append(details, a.Detail)
+		}
+	}
+	if len(details) != 1 || !strings.Contains(details[0], "at row 5 it holds 4 (") || !strings.HasSuffix(details[0], "which it holds at row 4 too") {
+		t.Fatalf("not-a-prefix anomalies %q, want one for the second 4, at row 5; all: %v", details, found)
+	}
+	// A row the primary's log does account for still says what it holds.
+	h = newHistory(4)
+	h.copyOf(obsRestore, 5, 1, 2, 4)
+	found, _ = h.check()
+	if len(found) == 0 || !strings.Contains(found[0].Detail, "where epoch 0 committed 3 (") {
+		t.Fatalf("a copy holding 4 at row 3: %v", found)
+	}
+}
+
 func TestCheckTornCommit(t *testing.T) {
 	h := newHistory(4)
 	// Transaction 3 was sent as the app was killed, and the app's
