@@ -141,6 +141,35 @@ func TestCheckDisagree(t *testing.T) {
 	}
 }
 
+// A copy that two epochs could each hold, as far as it goes, and that
+// differs from a copy of each, is of neither: the anomaly names all three.
+func TestCheckDisagreeTwoEpochs(t *testing.T) {
+	h := &history{specs: map[uint64]model.Txn{}}
+	add := func(uid uint64, epoch int, outcome string, n int64) {
+		h.specs[uid] = model.Txn{UID: uid, Ops: []model.Op{{Kind: model.Put, Table: 0, Key: int64(uid % 3), Size: 50}}}
+		h.txns = append(h.txns, &txnRec{UID: uid, Epoch: epoch, Call: at(float64(uid)), Return: at(float64(uid) + 0.1), Outcome: outcome, N: n})
+	}
+	// Each epoch committed 1, then a transaction in doubt, then one of
+	// its own at row 3; epoch 1 began from a copy holding 1.
+	add(1, 0, committed, 1)
+	add(2, 0, inDoubt, 0)
+	add(3, 0, committed, 3)
+	add(4, 1, inDoubt, 0)
+	add(5, 1, committed, 3)
+	add(6, 0, inDoubt, 0)
+	h.copyOf(obsRestore, 10, 1, 2, 3)   // epoch 0's
+	h.copyOf(obsRestore, 10.1, 1, 4, 5) // epoch 1's
+	h.copyOf(obsRestore, 10.2, 1, 6)    // either's, and neither's
+	found, known := newChecker(h.txns, h.specs, h.acks, h.obs, map[int][]uint64{0: nil, 1: {1}}, 1, h.kills, h.snapshots, map[string]bool{}).check()
+	if len(found) != 1 || len(known) != 0 || found[0].Kind != "not-a-prefix" || !slices.Equal(found[0].Obs, []int{1, 2, 0}) {
+		t.Fatalf("anomalies %v, known %v; want one not-a-prefix of the three copies", found, known)
+	}
+	d := found[0].Detail
+	if !strings.Contains(d, "holds 6 (") || !strings.Contains(d, "at row 2, where ") || !strings.Contains(d, "holds 4 (") || !strings.Contains(d, "nor is it a copy of an earlier epoch") {
+		t.Fatalf("detail %q does not say what the copy differs from in each epoch", d)
+	}
+}
+
 func TestCheckTornCommit(t *testing.T) {
 	h := newHistory(4)
 	// Transaction 3 was sent as the app was killed, and the app's

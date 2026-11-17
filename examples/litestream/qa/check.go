@@ -215,9 +215,16 @@ func (c *checker) addPrefix(a prefixcheck.Anomaly[uint64]) {
 			// nothing says which.
 			other := c.obs[a.Copies[1]]
 			theirs := other.Report.TxLog[a.At-1]
-			c.add(anomaly{Kind: "not-a-prefix", Obs: []int{other.ID, o.ID}, Txns: []uint64{theirs, uid},
-				Detail: fmt.Sprintf("%s holds %s at row %d, where %s holds %s: epoch %d committed one transaction there at most, and its log accounts for neither",
-					c.what(o), c.describe(uid), a.At, c.what(other), c.describe(theirs), a.Branch)})
+			obs := []int{other.ID, o.ID}
+			detail := fmt.Sprintf("%s holds %s at row %d, where %s holds %s: epoch %d committed one transaction there at most, and its log accounts for neither",
+				c.what(o), c.describe(uid), a.At, c.what(other), c.describe(theirs), a.Branch)
+			// A copy an earlier epoch could hold as well is of none of
+			// them only if it differs from a copy of each: the rest.
+			for _, id := range a.Copies[2:] {
+				detail += fmt.Sprintf("; nor is it a copy of an earlier epoch, differing as it does from %s", c.what(c.obs[id]))
+				obs = append(obs, id)
+			}
+			c.add(anomaly{Kind: "not-a-prefix", Obs: obs, Txns: []uint64{theirs, uid}, Detail: detail})
 			return
 		}
 		detail := fmt.Sprintf("%s holds %d transactions, which no primary committed in that order: at row %d it holds %s, ",
