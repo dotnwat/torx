@@ -26,7 +26,14 @@
 // began; each knows its entries at the positions the job learned them.
 // An entry whose outcome is in doubt -- its commit's answer lost, the
 // primary gone -- may stand at any one position a branch does not know,
-// on its own branch or a later one.
+// on its own branch or a later one, unless the branch knows it at
+// another.
+//
+// What stands at a position a branch does not know, the copies say, and
+// those that only that branch could hold must say the same: two that
+// differ there are not both prefixes of what it committed. Which of them
+// is not, the check cannot tell, so it reports the two together, once
+// for the position, as not-a-prefix.
 //
 // A copy already known to be wrong for a reason of the caller's -- an
 // issue found before, allowed so a run finds others -- is checked on its
@@ -78,7 +85,8 @@ type Copy[ID comparable] struct {
 	Latest bool
 	// Group, if set, names copies that must never go back: each holds
 	// every copy of the group done before it began. A follower's reads,
-	// say.
+	// say. A copy that names the group "latest" without being Latest is
+	// held to the copies of the latest state, and not to the acks.
 	Group string
 	// Known, if set, is why the copy is already known to be wrong. It is
 	// checked on its own, its anomalies carry Known, and no other copy is
@@ -97,12 +105,15 @@ const (
 type Anomaly[ID comparable] struct {
 	Kind string
 	// Copies are the copies concerned, by ID: the copy, and for
-	// went-back, the earlier copy it does not hold.
+	// went-back, the earlier copy it does not hold. A not-a-prefix with
+	// two is of two copies that differ where their branch knows neither's
+	// entry: the copy, and the one that held another entry there first.
 	Copies []int
 	// Known is the Known of a copy concerned, if any.
 	Known string
 	// Branch and At are, for not-a-prefix, the branch the copy follows
-	// longest and the first position where it does not.
+	// longest and the first position where it does not; for one of two
+	// copies, the branch both follow and the position they differ at.
 	Branch, At int
 	// Missing are, for lost-acked and went-back, the entries the copy
 	// lacks.
@@ -118,12 +129,15 @@ type checker[ID comparable] struct {
 	h      History[ID]
 	byID   map[int]*Copy[ID]
 	branch map[int]int // copy -> the branch it is a prefix of, -1 if none
-	out    []Anomaly[ID]
+	// known is, by branch, where the branch knows each of its entries,
+	// made when first asked for.
+	known []map[ID]int
+	out   []Anomaly[ID]
 }
 
 // Check checks h and returns what its copies contradict.
 func Check[ID comparable](h History[ID]) []Anomaly[ID] {
-	c := &checker[ID]{h: h, byID: map[int]*Copy[ID]{}, branch: map[int]int{}}
+	c := &checker[ID]{h: h, byID: map[int]*Copy[ID]{}, branch: map[int]int{}, known: make([]map[ID]int, len(h.Branches))}
 	for i := range h.Copies {
 		c.byID[h.Copies[i].ID] = &h.Copies[i]
 	}
@@ -144,38 +158,63 @@ func (c *checker[ID]) add(a Anomaly[ID]) {
 }
 
 // Consistent returns the first position, from 1, at which seq does not
-// follow branch b: where b knows another entry; where b does not know the
-// position and the entry there is not one in doubt on b or an earlier
-// branch; or where seq holds for the second time an entry in doubt, which
-// was committed once if at all. It returns 0 if seq follows b throughout.
+// follow branch b: where b knows another entry, or where b does not know
+// the position and the entry there cannot stand at it -- it is not one in
+// doubt on b or an earlier branch, b knows it at another position, or seq
+// holds it already, and it was committed once if at all. It returns 0 if
+// seq follows b throughout.
 func (h History[ID]) Consistent(seq []ID, b int) int {
-	// Only an entry in doubt can stand where b does not know what does, so
-	// only those can pass twice: any other stands where b knows it, or
-	// nowhere.
+	var known map[ID]int
+	leaves, _ := h.follow(seq, b, func() map[ID]int {
+		if known == nil {
+			known = h.positions(b)
+		}
+		return known
+	})
+	return leaves
+}
+
+// positions is where branch b knows each of its entries: entry ->
+// position.
+func (h History[ID]) positions(b int) map[ID]int {
+	at := make(map[ID]int, len(h.Branches[b]))
+	for pos, id := range h.Branches[b] {
+		at[id] = pos
+	}
+	return at
+}
+
+// follow is Consistent: it returns the first position at which seq leaves
+// branch b, or 0, and the positions before it at which seq holds an entry
+// in doubt where b knows of none. known returns b's positions; it is
+// asked only once seq holds an entry in doubt at such a position, which
+// most never do.
+func (h History[ID]) follow(seq []ID, b int, known func() map[ID]int) (leaves int, doubts []int) {
+	// The entries in doubt seq holds where b knows of none. No other can
+	// be held twice: an entry stands where b knows it, which is one
+	// position, or at one of these.
 	var held map[ID]bool
 	for i, id := range seq {
 		pos := i + 1
-		db, doubt := h.Doubt[id]
-		if doubt {
-			if held[id] {
-				return pos
-			}
-			if held == nil {
-				held = map[ID]bool{}
-			}
-			held[id] = true
-		}
 		if want, ok := h.Branches[b][pos]; ok {
 			if want != id {
-				return pos
+				return pos, doubts
 			}
 			continue
 		}
-		if !doubt || db > b {
-			return pos
+		if db, ok := h.Doubt[id]; !ok || db > b {
+			return pos, doubts
 		}
+		if _, elsewhere := known()[id]; elsewhere || held[id] {
+			return pos, doubts
+		}
+		if held == nil {
+			held = map[ID]bool{}
+		}
+		held[id] = true
+		doubts = append(doubts, pos)
 	}
-	return 0
+	return 0, doubts
 }
 
 // BranchOf is the latest branch seq is a prefix of, or -1.
@@ -188,34 +227,114 @@ func (h History[ID]) BranchOf(seq []ID) int {
 	return -1
 }
 
+// follow is History.follow, with the branch's positions kept from one
+// call to the next.
+func (c *checker[ID]) follow(seq []ID, b int) (leaves int, doubts []int) {
+	return c.h.follow(seq, b, func() map[ID]int { return c.knownOn(b) })
+}
+
+func (c *checker[ID]) knownOn(b int) map[ID]int {
+	if c.known[b] == nil {
+		c.known[b] = c.h.positions(b)
+	}
+	return c.known[b]
+}
+
+// claim is the entry a copy holds at a position its branch knows no entry
+// for: what the branch is taken to have committed there.
+type claim[ID comparable] struct {
+	id   ID
+	copy int
+	// disputed says a copy that held another entry there was reported.
+	disputed bool
+}
+
 func (c *checker[ID]) prefixes() {
+	// claims are, by branch and position, the first claim made there.
+	claims := make([]map[int]*claim[ID], len(c.h.Branches))
 	for _, cp := range c.h.Copies {
-		b := c.h.BranchOf(cp.Seq)
-		c.branch[cp.ID] = b
-		if b >= 0 {
-			continue
-		}
-		// Name the branch it follows longest, and where it leaves it.
-		best, at := 0, 0
-		for x := range c.h.Branches {
-			if n := c.h.Consistent(cp.Seq, x); n > at {
-				best, at = x, n
+		// The latest branch the copy follows is its branch; whether it
+		// follows another says whether it must agree with that branch's
+		// other copies.
+		b, only := -1, true
+		var doubts []int
+		for x := range slices.Backward(c.h.Branches) {
+			leaves, d := c.follow(cp.Seq, x)
+			switch {
+			case leaves != 0:
+			case b < 0:
+				b, doubts = x, d
+			default:
+				only = false
 			}
 		}
-		id := cp.Seq[at-1]
-		want, known := c.h.Branches[best][at]
-		text := fmt.Sprintf("copy %d holds %d entries, which no branch committed in that order: at position %d it holds %v, ",
-			cp.ID, len(cp.Seq), at, id)
-		switch first := slices.Index(cp.Seq, id) + 1; {
-		case known && want != id:
-			text += fmt.Sprintf("where branch %d committed %v", best, want)
-		case first < at:
-			text += fmt.Sprintf("which it holds at position %d too", first)
-		default:
-			text += fmt.Sprintf("where branch %d knows of nothing that could be there", best)
+		c.branch[cp.ID] = b
+		if b < 0 {
+			c.notAPrefix(cp)
+			continue
 		}
-		c.add(Anomaly[ID]{Kind: NotAPrefix, Copies: []int{cp.ID}, Branch: best, At: at, Text: text})
+		// A copy that could be of another branch may differ from this
+		// one's copies and be right, and one known to be wrong is compared
+		// to no other.
+		if !only || cp.Known != "" {
+			continue
+		}
+		if claims[b] == nil {
+			claims[b] = map[int]*claim[ID]{}
+		}
+		// Where the copy first holds another entry than was claimed.
+		differs := 0
+		for _, pos := range doubts {
+			if was, ok := claims[b][pos]; ok && was.id != cp.Seq[pos-1] {
+				differs = pos
+				break
+			}
+		}
+		if differs == 0 {
+			for _, pos := range doubts {
+				if _, ok := claims[b][pos]; !ok {
+					claims[b][pos] = &claim[ID]{id: cp.Seq[pos-1], copy: cp.ID}
+				}
+			}
+			continue
+		}
+		// One of the two is not a prefix. It claims nothing further, and
+		// the difference is reported once, however many copies share it.
+		if was := claims[b][differs]; !was.disputed {
+			was.disputed = true
+			c.add(Anomaly[ID]{Kind: NotAPrefix, Copies: []int{cp.ID, was.copy}, Branch: b, At: differs,
+				Text: fmt.Sprintf("copy %d holds %v at position %d, where copy %d holds %v: branch %d, the only branch either follows, committed one entry there at most, and knows of neither",
+					cp.ID, cp.Seq[differs-1], differs, was.copy, was.id, b)})
+		}
 	}
+}
+
+// notAPrefix reports a copy no branch committed: the branch it follows
+// longest, and where it leaves it.
+func (c *checker[ID]) notAPrefix(cp Copy[ID]) {
+	best, at := 0, 0
+	for x := range c.h.Branches {
+		if n, _ := c.follow(cp.Seq, x); n > at {
+			best, at = x, n
+		}
+	}
+	id := cp.Seq[at-1]
+	want, known := c.h.Branches[best][at]
+	text := fmt.Sprintf("copy %d holds %d entries, which no branch committed in that order: at position %d it holds %v, ",
+		cp.ID, len(cp.Seq), at, id)
+	first := slices.Index(cp.Seq, id) + 1
+	elsewhere, placed := c.knownOn(best)[id]
+	switch {
+	case known:
+		text += fmt.Sprintf("where branch %d committed %v", best, want)
+	case first < at:
+		text += fmt.Sprintf("which it holds at position %d too", first)
+	case placed:
+		text += fmt.Sprintf("which branch %d committed at position %d", best, elsewhere)
+	default:
+		text += fmt.Sprintf("where branch %d knows of nothing that could be there", best)
+	}
+	c.add(Anomaly[ID]{Kind: NotAPrefix, Copies: []int{cp.ID}, Branch: best, At: at, Text: text})
 }
 
 func (c *checker[ID]) acks() {
@@ -229,8 +348,10 @@ func (c *checker[ID]) acks() {
 			if a.Prefix == 0 || !a.Return.Before(cp.Call) {
 				continue
 			}
-			if len(cp.Seq) >= a.Prefix && c.h.Consistent(cp.Seq[:a.Prefix], a.Branch) == 0 {
-				continue
+			if len(cp.Seq) >= a.Prefix {
+				if leaves, _ := c.follow(cp.Seq[:a.Prefix], a.Branch); leaves == 0 {
+					continue
+				}
 			}
 			if worst == nil || a.Prefix > worst.Prefix || (a.Prefix == worst.Prefix && a.Return.After(worst.Return)) {
 				worst = a
@@ -273,7 +394,9 @@ func (c *checker[ID]) groups() {
 		if cp.Latest {
 			groups["latest"] = append(groups["latest"], cp)
 		}
-		if cp.Group != "" && cp.Group != "latest" {
+		// A copy may name the group "latest" itself; Latest has put it
+		// there already if it is both.
+		if cp.Group != "" && (cp.Group != "latest" || !cp.Latest) {
 			groups[cp.Group] = append(groups[cp.Group], cp)
 		}
 	}

@@ -124,6 +124,102 @@ func TestDoubtTwice(t *testing.T) {
 	}
 }
 
+// An entry in doubt stands where a branch knows it, if the branch does:
+// not at a position the branch has no entry for, before it or after.
+func TestDoubtKnownElsewhere(t *testing.T) {
+	h := History[string]{
+		Branches: []map[int]string{{1: "a", 3: "x", 5: "c"}},
+		Doubt:    map[string]int{"x": 0, "y": 0},
+		Copies: []Copy[string]{
+			{ID: 0, Seq: []string{"a", "y", "x"}},      // x where the branch knows it
+			{ID: 1, Seq: []string{"a", "x"}},           // before
+			{ID: 2, Seq: []string{"a", "y", "x", "x"}}, // and again after
+		},
+	}
+	as := Check(h)
+	if !slices.Equal(kinds(as), []string{NotAPrefix, NotAPrefix}) {
+		t.Fatalf("anomalies: %v", as)
+	}
+	if as[0].Copies[0] != 1 || as[0].At != 2 || !strings.HasSuffix(as[0].Text, "at position 2 it holds x, which branch 0 committed at position 3") {
+		t.Fatalf("x before the position the branch knows it at: %+v", as[0])
+	}
+	if as[1].Copies[0] != 2 || as[1].At != 4 || !strings.HasSuffix(as[1].Text, "at position 4 it holds x, which it holds at position 3 too") {
+		t.Fatalf("x again after it: %+v", as[1])
+	}
+	// The branch that knows x elsewhere is not the copy's: an earlier one
+	// that has x in doubt is.
+	h = History[string]{
+		Branches: []map[int]string{{1: "a"}, {1: "a", 3: "x"}},
+		Doubt:    map[string]int{"x": 0},
+	}
+	if b := h.BranchOf([]string{"a", "x"}); b != 0 {
+		t.Fatalf("BranchOf = %d, want 0: branch 1 has x at 3", b)
+	}
+	if b := h.BranchOf([]string{"a", "q", "x"}); b != -1 {
+		t.Fatalf("BranchOf = %d, want none: q is no entry of either", b)
+	}
+}
+
+// Where a branch knows no entry for a position, its copies say what
+// stands there, and say the same: two that differ are not both prefixes
+// of what it committed, whether or not they are compared as a group.
+func TestDoubtDisagree(t *testing.T) {
+	h := History[string]{
+		Branches: []map[int]string{{1: "a", 4: "d"}},
+		Doubt:    map[string]int{"x": 0, "y": 0, "z": 0},
+		Copies: []Copy[string]{
+			{ID: 0, Seq: []string{"a", "x"}, Call: at(1), Return: at(3), Latest: true},
+			{ID: 1, Seq: []string{"a", "y"}, Call: at(2), Return: at(4), Latest: true}, // overlapped copy 0
+			{ID: 2, Seq: []string{"a", "y", "z"}},                                      // the same difference
+			{ID: 3, Seq: []string{"a", "x", "y", "d"}},
+			{ID: 4, Seq: []string{"a", "x", "z", "d"}}, // another
+			{ID: 5, Seq: []string{"a"}},
+		},
+	}
+	as := Check(h)
+	if !slices.Equal(kinds(as), []string{NotAPrefix, NotAPrefix}) {
+		t.Fatalf("anomalies: %v", as)
+	}
+	if !slices.Equal(as[0].Copies, []int{1, 0}) || as[0].Branch != 0 || as[0].At != 2 {
+		t.Fatalf("copies 0 and 1: %+v", as[0])
+	}
+	if !slices.Equal(as[1].Copies, []int{4, 3}) || as[1].At != 3 {
+		t.Fatalf("copies 3 and 4: %+v", as[1])
+	}
+	if want := "copy 1 holds y at position 2, where copy 0 holds x"; !strings.HasPrefix(as[0].Text, want) {
+		t.Fatalf("text %q does not begin %q", as[0].Text, want)
+	}
+
+	// A copy that another branch could hold may differ and be right: x
+	// was the old primary's, y the new one's, at the position after the
+	// one they share.
+	h = History[string]{
+		Branches: []map[int]string{{1: "a"}, {1: "a"}},
+		Doubt:    map[string]int{"x": 0, "y": 1},
+		Copies: []Copy[string]{
+			{ID: 0, Seq: []string{"a", "x"}},
+			{ID: 1, Seq: []string{"a", "y"}},
+		},
+	}
+	if as := Check(h); len(as) != 0 {
+		t.Fatalf("copies of two branches: %v", as)
+	}
+
+	// A copy known to be wrong is compared to no other, and claims nothing.
+	h = History[string]{
+		Branches: []map[int]string{{1: "a"}},
+		Doubt:    map[string]int{"x": 0, "y": 0},
+		Copies: []Copy[string]{
+			{ID: 0, Seq: []string{"a", "x"}, Known: "an issue"},
+			{ID: 1, Seq: []string{"a", "y"}},
+			{ID: 2, Seq: []string{"a", "y"}, Known: "an issue"},
+		},
+	}
+	if as := Check(h); len(as) != 0 {
+		t.Fatalf("copies known to be wrong: %v", as)
+	}
+}
+
 func TestBranches(t *testing.T) {
 	// The primary committed a..d; a failover restored a, b and carried on
 	// with x, y.
@@ -234,6 +330,28 @@ func TestWentBackDiverged(t *testing.T) {
 	as = Check(h)
 	if !slices.Equal(kinds(as), []string{WentBack}) || !slices.Equal(as[0].Copies, []int{2, 1}) {
 		t.Fatalf("copies of one length: %v", as)
+	}
+}
+
+// The group "latest" can be named: a copy that names it is held to the
+// copies of the latest state though not to the acks, and one that is
+// Latest as well is in it once.
+func TestWentBackNamedLatest(t *testing.T) {
+	h := History[string]{
+		Branches: []map[int]string{seq("a", "b", "c")},
+		Acks:     []Ack{{Branch: 0, Prefix: 2, Return: at(0.5)}},
+		Copies: []Copy[string]{
+			{ID: 0, Seq: []string{"a", "b", "c"}, Call: at(1), Return: at(2), Latest: true, Group: "latest"},
+			{ID: 1, Seq: []string{"a"}, Call: at(3), Return: at(4), Group: "latest"},                    // went back; the ack does not bind it
+			{ID: 2, Seq: []string{"a", "b"}, Call: at(5), Return: at(6), Latest: true, Group: "latest"}, // went back, once
+		},
+	}
+	as := Check(h)
+	if !slices.Equal(kinds(as), []string{WentBack, WentBack}) {
+		t.Fatalf("anomalies: %v", as)
+	}
+	if !slices.Equal(as[0].Copies, []int{1, 0}) || !slices.Equal(as[1].Copies, []int{2, 0}) {
+		t.Fatalf("copies: %+v", as)
 	}
 }
 
