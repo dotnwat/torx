@@ -165,7 +165,7 @@ func (h History[ID]) Consistent(seq []ID, b int) int {
 
 // BranchOf is the latest branch seq is a prefix of, or -1.
 func (h History[ID]) BranchOf(seq []ID) int {
-	for b := len(h.Branches) - 1; b >= 0; b-- {
+	for b := range slices.Backward(h.Branches) {
 		if h.Consistent(seq, b) == 0 {
 			return b
 		}
