@@ -47,8 +47,9 @@ var ErrNotRunning = errors.New("torx: process not running")
 // ProcExit, with the end of what it logged, and reported to OnExit: a
 // server that died of a panic, an assertion, or a fatal error is a finding
 // even if nothing the job checked noticed. A process whose kill could not
-// be carried out -- by Crash, by Terminate, or after it exited or its node
-// lost track of it -- may still be running, and its slot refuses a Restart.
+// be carried out -- by Crash, by Terminate, of a launch called off as its
+// context ended, or after it exited or its node lost track of it -- may
+// still be running, and its slot refuses a Restart.
 type Procs struct {
 	svc *ServiceBase
 
@@ -98,6 +99,9 @@ type procSlot struct {
 	// has returned, or what the launch left has been killed and its exit
 	// recorded. It is closed then. The slot does not start again before.
 	settling chan struct{}
+	// closing is set once StopNode has taken the slot, to stop what it
+	// holds and forget it: it does not start again.
+	closing bool
 	// unstopped is the error of a kill that could not be carried out: the
 	// process may still run.
 	unstopped error
@@ -134,11 +138,14 @@ func (p *Procs) Launch(ctx context.Context, name string, n *Node, cmd Cmd) error
 		return fmt.Errorf("torx: process %s exists", name)
 	}
 	s := &procSlot{name: name, node: n, cmd: cmd}
-	if err := p.startLocked(ctx, s); err != nil {
-		return err
+	err := p.startLocked(ctx, s)
+	// A launch that failed leaves no slot, unless it left a process it
+	// could not kill: that one may still run, so the name stays taken, and
+	// StopNode has its error to return.
+	if err == nil || s.unstopped != nil {
+		p.slots[name] = s
 	}
-	p.slots[name] = s
-	return nil
+	return err
 }
 
 // Restart starts process name again, with the command it was last
@@ -183,6 +190,8 @@ func (p *Procs) lockStopped(ctx context.Context, name string) (*procSlot, error)
 		switch {
 		case s == nil:
 			err = fmt.Errorf("torx: no process %s", name)
+		case s.closing:
+			err = fmt.Errorf("torx: process %s is being stopped with its node", name)
 		case s.settling != nil:
 			settling := s.settling
 			p.mu.Unlock()
@@ -211,8 +220,14 @@ func (p *Procs) startLocked(ctx context.Context, s *procSlot) error {
 	stop := context.AfterFunc(ctx, cancel)
 	tp, err := p.svc.StartCapturedAs(life, s.node, s.name, s.cmd)
 	if !stop() && err == nil {
-		_ = tp.Close()
+		// ctx ended as the launch went through, so the launch is called
+		// off and its process killed. One that cannot be killed may still
+		// run, as after any kill that failed.
 		err = context.Cause(ctx)
+		if cerr := tp.Close(); cerr != nil {
+			s.unstopped = fmt.Errorf("torx: calling off the launch of %s: %w", s.name, cerr)
+			err = errors.Join(err, s.unstopped)
+		}
 	}
 	if err != nil {
 		cancel()
@@ -311,6 +326,11 @@ func (p *Procs) Crash(ctx context.Context, name string) error {
 // process exited within the grace period; one that had to be killed is
 // not an error. Until Terminate returns the process may still be running,
 // and its slot does not start again.
+//
+// An error says the stop did not go as asked -- ctx ended within the grace
+// period, the signal could not be sent, the node lost track of the process
+// -- and the process was killed all the same, unless the kill is what
+// failed: only then may it still run, and its slot refuses a Restart.
 func (p *Procs) Terminate(ctx context.Context, name string, policy StopPolicy) (clean bool, err error) {
 	p.mu.Lock()
 	s, tp, err := p.running(name)
@@ -324,11 +344,14 @@ func (p *Procs) Terminate(ctx context.Context, name string, policy StopPolicy) (
 	if paused {
 		_ = tp.Signal(ctx, syscall.SIGCONT)
 	}
-	_, err = Stop(ctx, tp, policy)
+	// Stop ends with the kill whatever went before, and its error does not
+	// say which of them failed, so the close is noted on its way through.
+	stopping := &closeNoter{Process: tp}
+	_, err = Stop(ctx, stopping, policy)
 	timedOut := errors.Is(err, ErrShutdownTimeout)
 	var unstopped error
-	if err != nil && !timedOut {
-		unstopped = fmt.Errorf("torx: stopping %s: %w", name, err)
+	if stopping.err != nil {
+		unstopped = fmt.Errorf("torx: stopping %s: %w", name, stopping.err)
 	}
 	p.mu.Lock()
 	s.settleLocked(unstopped)
@@ -337,6 +360,18 @@ func (p *Procs) Terminate(ctx context.Context, name string, policy StopPolicy) (
 		return false, nil
 	}
 	return err == nil, err
+}
+
+// closeNoter is a Process that notes the error of its Close: whether the
+// kill could be carried out.
+type closeNoter struct {
+	Process
+	err error
+}
+
+func (c *closeNoter) Close() error {
+	c.err = c.Process.Close()
+	return c.err
 }
 
 // Pause stops process name with SIGSTOP: a process that goes silent
@@ -473,13 +508,19 @@ func (p *Procs) tail(ctx context.Context, n *Node, name string) ([]byte, error) 
 
 // StopNode stops every process on n as policy says, and forgets them: what
 // a service's StopNode calls. A process already on its way out is waited
-// for. It returns the errors of the stops, and of any earlier kill that
-// could not be carried out.
+// for, and none of them starts again once StopNode is called: a Restart or
+// Relaunch of one is refused, whether it was waiting for the process to be
+// gone or comes from an OnExit told that it is. It returns the errors of
+// the stops, and of any earlier kill that could not be carried out.
 func (p *Procs) StopNode(ctx context.Context, n *Node, policy StopPolicy) error {
 	p.mu.Lock()
 	var mine []*procSlot
 	for _, s := range p.slots {
 		if s.node == n {
+			// Closed to restarts before anything is stopped: one that got
+			// in while a stop or an exit was waited for would run on in a
+			// slot about to be forgotten.
+			s.closing = true
 			mine = append(mine, s)
 		}
 	}
