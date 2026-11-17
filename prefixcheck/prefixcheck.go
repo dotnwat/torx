@@ -85,7 +85,8 @@ type Copy[ID comparable] struct {
 	Latest bool
 	// Group, if set, names copies that must never go back: each holds
 	// every copy of the group done before it began. A follower's reads,
-	// say.
+	// say. A copy that names the group "latest" without being Latest is
+	// held to the copies of the latest state, and not to the acks.
 	Group string
 	// Known, if set, is why the copy is already known to be wrong. It is
 	// checked on its own, its anomalies carry Known, and no other copy is
@@ -393,7 +394,9 @@ func (c *checker[ID]) groups() {
 		if cp.Latest {
 			groups["latest"] = append(groups["latest"], cp)
 		}
-		if cp.Group != "" && cp.Group != "latest" {
+		// A copy may name the group "latest" itself; Latest has put it
+		// there already if it is both.
+		if cp.Group != "" && (cp.Group != "latest" || !cp.Latest) {
 			groups[cp.Group] = append(groups[cp.Group], cp)
 		}
 	}

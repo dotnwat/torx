@@ -333,6 +333,28 @@ func TestWentBackDiverged(t *testing.T) {
 	}
 }
 
+// The group "latest" can be named: a copy that names it is held to the
+// copies of the latest state though not to the acks, and one that is
+// Latest as well is in it once.
+func TestWentBackNamedLatest(t *testing.T) {
+	h := History[string]{
+		Branches: []map[int]string{seq("a", "b", "c")},
+		Acks:     []Ack{{Branch: 0, Prefix: 2, Return: at(0.5)}},
+		Copies: []Copy[string]{
+			{ID: 0, Seq: []string{"a", "b", "c"}, Call: at(1), Return: at(2), Latest: true, Group: "latest"},
+			{ID: 1, Seq: []string{"a"}, Call: at(3), Return: at(4), Group: "latest"},                    // went back; the ack does not bind it
+			{ID: 2, Seq: []string{"a", "b"}, Call: at(5), Return: at(6), Latest: true, Group: "latest"}, // went back, once
+		},
+	}
+	as := Check(h)
+	if !slices.Equal(kinds(as), []string{WentBack, WentBack}) {
+		t.Fatalf("anomalies: %v", as)
+	}
+	if !slices.Equal(as[0].Copies, []int{1, 0}) || !slices.Equal(as[1].Copies, []int{2, 0}) {
+		t.Fatalf("copies: %+v", as)
+	}
+}
+
 func TestKnown(t *testing.T) {
 	// Copy 1 holds x, a known issue: it is reported with the reason, and
 	// copy 2, which holds less, is not compared to it.
