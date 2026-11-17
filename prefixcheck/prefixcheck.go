@@ -25,8 +25,8 @@
 // them is not on it. Branches are numbered from 0, in the order they
 // began; each knows its entries at the positions the job learned them.
 // An entry whose outcome is in doubt -- its commit's answer lost, the
-// primary gone -- may stand at any position a branch does not know, on
-// its own branch or a later one.
+// primary gone -- may stand at any one position a branch does not know,
+// on its own branch or a later one.
 //
 // A copy already known to be wrong for a reason of the caller's -- an
 // issue found before, allowed so a run finds others -- is checked on its
@@ -144,19 +144,34 @@ func (c *checker[ID]) add(a Anomaly[ID]) {
 }
 
 // Consistent returns the first position, from 1, at which seq does not
-// follow branch b: where b knows another entry, or b does not know the
+// follow branch b: where b knows another entry; where b does not know the
 // position and the entry there is not one in doubt on b or an earlier
-// branch. It returns 0 if seq follows b throughout.
+// branch; or where seq holds for the second time an entry in doubt, which
+// was committed once if at all. It returns 0 if seq follows b throughout.
 func (h History[ID]) Consistent(seq []ID, b int) int {
+	// Only an entry in doubt can stand where b does not know what does, so
+	// only those can pass twice: any other stands where b knows it, or
+	// nowhere.
+	var held map[ID]bool
 	for i, id := range seq {
 		pos := i + 1
+		db, doubt := h.Doubt[id]
+		if doubt {
+			if held[id] {
+				return pos
+			}
+			if held == nil {
+				held = map[ID]bool{}
+			}
+			held[id] = true
+		}
 		if want, ok := h.Branches[b][pos]; ok {
 			if want != id {
 				return pos
 			}
 			continue
 		}
-		if db, ok := h.Doubt[id]; !ok || db > b {
+		if !doubt || db > b {
 			return pos
 		}
 	}
@@ -187,13 +202,17 @@ func (c *checker[ID]) prefixes() {
 				best, at = x, n
 			}
 		}
+		id := cp.Seq[at-1]
 		want, known := c.h.Branches[best][at]
-		text := fmt.Sprintf("copy %d holds %d entries, which no branch committed in that order: at position %d it holds %v, where branch %d ",
-			cp.ID, len(cp.Seq), at, cp.Seq[at-1], best)
-		if known {
-			text += fmt.Sprintf("committed %v", want)
-		} else {
-			text += "knows of nothing that could be there"
+		text := fmt.Sprintf("copy %d holds %d entries, which no branch committed in that order: at position %d it holds %v, ",
+			cp.ID, len(cp.Seq), at, id)
+		switch first := slices.Index(cp.Seq, id) + 1; {
+		case known && want != id:
+			text += fmt.Sprintf("where branch %d committed %v", best, want)
+		case first < at:
+			text += fmt.Sprintf("which it holds at position %d too", first)
+		default:
+			text += fmt.Sprintf("where branch %d knows of nothing that could be there", best)
 		}
 		c.add(Anomaly[ID]{Kind: NotAPrefix, Copies: []int{cp.ID}, Branch: best, At: at, Text: text})
 	}
@@ -263,33 +282,55 @@ func (c *checker[ID]) groups() {
 		slices.SortStableFunc(cps, func(a, b *Copy[ID]) int { return a.Call.Compare(b.Call) })
 		done := slices.Clone(cps)
 		slices.SortStableFunc(done, func(a, b *Copy[ID]) int { return a.Return.Compare(b.Return) })
-		var longest *Copy[ID]
+		// ahead are the copies done so far that no other of them holds:
+		// one, the longest, while those done agree, and one for each way
+		// they went once two that overlapped each hold what the other does
+		// not. A copy that holds these holds every copy done.
+		var ahead []*Copy[ID]
 		i := 0
 		for _, cp := range cps {
-			for i < len(done) && done[i].Return.Before(cp.Call) {
-				if longest == nil || len(done[i].Seq) > len(longest.Seq) {
-					longest = done[i]
+			for ; i < len(done) && done[i].Return.Before(cp.Call); i++ {
+				ahead = furthest(ahead, done[i])
+			}
+			var have map[ID]bool
+			for _, prev := range ahead {
+				if isPrefix(prev.Seq, cp.Seq) {
+					continue
 				}
-				i++
-			}
-			if longest == nil || isPrefix(longest.Seq, cp.Seq) {
-				continue
-			}
-			have := map[ID]bool{}
-			for _, id := range cp.Seq {
-				have[id] = true
-			}
-			var missing []ID
-			for _, id := range longest.Seq {
-				if !have[id] {
-					missing = append(missing, id)
+				if have == nil {
+					have = map[ID]bool{}
+					for _, id := range cp.Seq {
+						have[id] = true
+					}
 				}
+				var missing []ID
+				for _, id := range prev.Seq {
+					if !have[id] {
+						missing = append(missing, id)
+					}
+				}
+				text := fmt.Sprintf("copy %d of group %s holds %d entries, though copy %d, done before it began, held %d",
+					cp.ID, name, len(cp.Seq), prev.ID, len(prev.Seq))
+				if len(missing) > 0 {
+					text += fmt.Sprintf("; it lacks %d of them, the first %v", len(missing), missing[0])
+				}
+				c.add(Anomaly[ID]{Kind: WentBack, Copies: []int{cp.ID, prev.ID}, Missing: missing, Text: text})
 			}
-			c.add(Anomaly[ID]{Kind: WentBack, Copies: []int{cp.ID, longest.ID}, Missing: missing,
-				Text: fmt.Sprintf("copy %d of group %s holds %d entries, though copy %d, done before it began, held %d",
-					cp.ID, name, len(cp.Seq), longest.ID, len(longest.Seq))})
 		}
 	}
+}
+
+// furthest adds cp, a copy now done, to ahead, the copies done before it
+// that no other of them holds: it takes the place of those it holds, and
+// is left out if one of them holds it.
+func furthest[ID comparable](ahead []*Copy[ID], cp *Copy[ID]) []*Copy[ID] {
+	for _, a := range ahead {
+		if isPrefix(cp.Seq, a.Seq) {
+			return ahead
+		}
+	}
+	ahead = slices.DeleteFunc(ahead, func(a *Copy[ID]) bool { return isPrefix(a.Seq, cp.Seq) })
+	return append(ahead, cp)
 }
 
 func isPrefix[ID comparable](a, b []ID) bool {

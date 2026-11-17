@@ -2,6 +2,7 @@ package prefixcheck
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -86,6 +87,43 @@ func TestDoubt(t *testing.T) {
 	}
 }
 
+// An entry in doubt was committed once if at all: a copy that holds it
+// twice applied it twice, wherever the branch has room for it.
+func TestDoubtTwice(t *testing.T) {
+	h := History[string]{
+		Branches: []map[int]string{{1: "a"}},
+		Doubt:    map[string]int{"x": 0, "y": 0},
+		Copies: []Copy[string]{
+			{ID: 0, Seq: []string{"a", "x", "y"}},
+			{ID: 1, Seq: []string{"a", "x", "x"}},
+			{ID: 2, Seq: []string{"a", "x", "y", "x"}},
+		},
+	}
+	as := Check(h)
+	if !slices.Equal(kinds(as), []string{NotAPrefix, NotAPrefix}) {
+		t.Fatalf("anomalies: %v", as)
+	}
+	if as[0].Copies[0] != 1 || as[0].At != 3 || as[1].Copies[0] != 2 || as[1].At != 4 {
+		t.Fatalf("copies and positions: %+v", as)
+	}
+	if want := "at position 3 it holds x, which it holds at position 2 too"; !strings.Contains(as[0].Text, want) {
+		t.Fatalf("text %q does not say %q", as[0].Text, want)
+	}
+	// Twice, the second time where a later branch learned its position:
+	// in doubt on the branch it was sent to, known on the one that kept it.
+	h = History[string]{
+		Branches: []map[int]string{{1: "a"}, {1: "a", 3: "x"}},
+		Doubt:    map[string]int{"x": 0},
+		Copies: []Copy[string]{
+			{ID: 0, Seq: []string{"a", "x", "x"}},
+			{ID: 1, Seq: []string{"a", "x"}},
+		},
+	}
+	if as := Check(h); !slices.Equal(kinds(as), []string{NotAPrefix}) || as[0].Copies[0] != 0 {
+		t.Fatalf("an entry held where it is in doubt and where it is known: %v", as)
+	}
+}
+
 func TestBranches(t *testing.T) {
 	// The primary committed a..d; a failover restored a, b and carried on
 	// with x, y.
@@ -149,6 +187,53 @@ func TestWentBack(t *testing.T) {
 	}
 	if !slices.Equal(as[1].Copies, []int{2, 0}) || !slices.Equal(as[1].Missing, []string{"b"}) {
 		t.Fatalf("latest: %+v", as[1])
+	}
+}
+
+// Copies that overlapped may each hold what the other does not -- one of
+// the old primary, one of the new -- and a copy begun after both is held
+// to both, not to the longer.
+func TestWentBackDiverged(t *testing.T) {
+	h := History[string]{
+		Branches: []map[int]string{seq("a", "b", "c"), seq("a", "x", "y", "z")},
+		Copies: []Copy[string]{
+			{ID: 0, Seq: []string{"a", "b", "c"}, Call: at(1), Return: at(3), Latest: true},
+			{ID: 1, Seq: []string{"a", "x"}, Call: at(2), Return: at(4), Latest: true},
+			{ID: 2, Seq: []string{"a", "b", "c"}, Call: at(5), Return: at(6), Latest: true}, // lost x
+			{ID: 3, Seq: []string{"a", "x", "y"}, Call: at(7), Return: at(8), Latest: true}, // lost b, c
+			{ID: 4, Seq: []string{"a"}, Call: at(9), Return: at(10), Latest: true},          // lost both ways
+		},
+	}
+	as := Check(h)
+	if !slices.Equal(kinds(as), []string{WentBack, WentBack, WentBack, WentBack}) {
+		t.Fatalf("anomalies: %v", as)
+	}
+	type lost struct {
+		copies  []int
+		missing []string
+	}
+	for i, want := range []lost{
+		{[]int{2, 1}, []string{"x"}},
+		{[]int{3, 0}, []string{"b", "c"}},
+		{[]int{4, 0}, []string{"b", "c"}},
+		{[]int{4, 3}, []string{"x", "y"}}, // copy 3 took copy 1's place
+	} {
+		if !slices.Equal(as[i].Copies, want.copies) || !slices.Equal(as[i].Missing, want.missing) {
+			t.Fatalf("anomaly %d: %+v, want %+v", i, as[i], want)
+		}
+	}
+	// As long as each other: neither stands for both.
+	h = History[string]{
+		Branches: []map[int]string{seq("a", "b"), seq("a", "x")},
+		Copies: []Copy[string]{
+			{ID: 0, Seq: []string{"a", "b"}, Call: at(1), Return: at(3), Latest: true},
+			{ID: 1, Seq: []string{"a", "x"}, Call: at(2), Return: at(4), Latest: true},
+			{ID: 2, Seq: []string{"a", "b"}, Call: at(5), Return: at(6), Latest: true},
+		},
+	}
+	as = Check(h)
+	if !slices.Equal(kinds(as), []string{WentBack}) || !slices.Equal(as[0].Copies, []int{2, 1}) {
+		t.Fatalf("copies of one length: %v", as)
 	}
 }
 
