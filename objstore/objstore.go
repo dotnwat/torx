@@ -219,6 +219,16 @@ func (s *Server) enter() bool {
 	return true
 }
 
+// isClosed reports whether the store has closed.
+func (s *Server) isClosed() bool {
+	select {
+	case <-s.done:
+		return true
+	default:
+		return false
+	}
+}
+
 // wait waits out a fault's delay, and reports whether it did: not if gone
 // -- the client giving up -- or the store's closing came first.
 func (s *Server) wait(d time.Duration, gone <-chan struct{}) bool {
@@ -428,8 +438,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			select {
 			case <-lifted:
 				// The partition healed: serve the request, if its client
-				// is still there.
-				if r.Context().Err() == nil {
+				// is still there and the store still open. Either may
+				// have gone first, and the select, with more than one to
+				// take, takes any.
+				if r.Context().Err() == nil && !s.isClosed() {
 					break
 				}
 				ev.Status = -1
