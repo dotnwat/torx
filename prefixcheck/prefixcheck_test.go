@@ -220,6 +220,49 @@ func TestDoubtDisagree(t *testing.T) {
 	}
 }
 
+// A copy more than one branch could hold is of one of them: it may differ
+// from the copies of one branch and be of the other, and may not differ
+// from the copies of each.
+func TestDoubtDisagreeSeveral(t *testing.T) {
+	h := History[string]{
+		Branches: []map[int]string{{1: "a", 3: "b"}, {1: "a", 3: "c"}},
+		Doubt:    map[string]int{"x": 0, "y": 1, "z": 0},
+		Copies: []Copy[string]{
+			{ID: 0, Seq: []string{"a", "z"}}, // of either branch, as far as it goes: of neither
+			{ID: 1, Seq: []string{"a", "x", "b"}},
+			{ID: 2, Seq: []string{"a", "y", "c"}},
+			{ID: 3, Seq: []string{"a", "x"}}, // of branch 0
+			{ID: 4, Seq: []string{"a"}},      // of either
+			{ID: 5, Seq: []string{"a", "z"}}, // as copy 0, and said once
+		},
+	}
+	as := Check(h)
+	if !slices.Equal(kinds(as), []string{NotAPrefix}) {
+		t.Fatalf("anomalies: %v", as)
+	}
+	// The copy, then the copy it differs from on each branch, latest first.
+	if a := as[0]; !slices.Equal(a.Copies, []int{0, 2, 1}) || a.Branch != 1 || a.At != 2 {
+		t.Fatalf("copy 0: %+v", a)
+	}
+	for _, want := range []string{"copy 0 holds z at position 2 of branch 1, where copy 2 holds y", "z at position 2 of branch 0, where copy 1 holds x"} {
+		if !strings.Contains(as[0].Text, want) {
+			t.Fatalf("text %q does not say %q", as[0].Text, want)
+		}
+	}
+	// It claims nothing: nothing says position 2 holds z, so a copy only
+	// branch 0 could hold is held to x, and one of those that holds z is
+	// the one that differs.
+	h.Copies = []Copy[string]{
+		{ID: 0, Seq: []string{"a", "z"}},
+		{ID: 1, Seq: []string{"a", "x", "b"}},
+		{ID: 2, Seq: []string{"a", "z", "b"}},
+	}
+	as = Check(h)
+	if !slices.Equal(kinds(as), []string{NotAPrefix}) || !slices.Equal(as[0].Copies, []int{2, 1}) {
+		t.Fatalf("a copy of branch 0 that differs from another: %v", as)
+	}
+}
+
 func TestBranches(t *testing.T) {
 	// The primary committed a..d; a failover restored a, b and carried on
 	// with x, y.
