@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -209,7 +210,7 @@ func (s *Service) WaitApp(ctx context.Context, name string, timeout time.Duratio
 	url := s.AppURL(name) + "/health"
 	return torx.WaitUntil(ctx, func(ctx context.Context) (bool, error) {
 		if !s.Running(name) {
-			return false, s.notRunning(name)
+			return false, s.notRunning(ctx, name)
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
@@ -224,14 +225,33 @@ func (s *Service) WaitApp(ctx context.Context, name string, timeout time.Duratio
 	}, 50*time.Millisecond)
 }
 
-// notRunning says why process name is not running: how it exited, if it
-// did on its own.
-func (s *Service) notRunning(name string) error {
-	exits := s.Exits()
-	for i := len(exits) - 1; i >= 0; i-- {
-		if e := exits[i]; e.Name == name {
-			return fmt.Errorf("%s exited with status %d:\n%s", name, e.Code, e.Tail)
-		}
+// exitGrace is how long notRunning waits for the record of an exit. A
+// process stops counting as running the moment it exits, and its exit is
+// recorded once the end of its log has been read: a moment later, a
+// command's round trip to its node.
+const exitGrace = 2 * time.Second
+
+// notRunning says why process name is not running: how its last launch
+// exited, if it did on its own. An exit of a launch before the last says
+// nothing of this one, which was crashed or stopped if it left no record
+// of its own.
+func (s *Service) notRunning(ctx context.Context, name string) error {
+	var exit *torx.ProcExit
+	if launch := s.Launches(name); launch > 0 {
+		ctx, cancel := context.WithTimeout(ctx, exitGrace)
+		defer cancel()
+		_ = torx.WaitUntil(ctx, func(context.Context) (bool, error) {
+			for _, e := range slices.Backward(s.Exits()) {
+				if e.Name == name && e.Launch == launch {
+					exit = &e
+					return true, nil
+				}
+			}
+			return false, nil
+		}, 10*time.Millisecond)
+	}
+	if exit != nil {
+		return fmt.Errorf("%s exited with status %d:\n%s", name, exit.Code, exit.Tail)
 	}
 	return fmt.Errorf("%s: %w", name, torx.ErrNotRunning)
 }
