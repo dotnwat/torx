@@ -607,6 +607,21 @@ missed. `listappend.Forbidden(level)` says
 which kinds an isolation level -- serializable, snapshot isolation, read
 committed -- forbids.
 
+The [`prefixcheck`](prefixcheck/) package checks copies of a primary's
+history -- the backups, replicas, and restores of a database, a follower's
+copy of a leader's log -- against what the primary committed and what it
+acknowledged as copied. `prefixcheck.Check` reports a copy that is not a
+prefix of a sequence the primary committed (a state the primary never
+had), a copy of the latest state that lacks an entry a sync acknowledged
+before the copy was begun, and a copy that holds less than one of its
+group done before it began: restores of the latest state, or one
+follower's reads, going back in time. A failover starts a branch of
+history from the copy the new primary was restored from; an entry whose
+commit is in doubt may stand wherever a branch does not know what was
+committed. A copy already known to be wrong for a reason of the caller's
+is reported with it and compared to nothing else, so a known issue hides
+no other.
+
 **A store the job serves.** Some systems keep their data in an object
 store. The [`objstore`](objstore/) package is one a job runs in its worker:
 an in-memory server of the part of S3's HTTP API that object-store clients
