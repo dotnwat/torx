@@ -384,7 +384,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		req.match = req.key
 	}
-	f := s.draw(req)
+	f, lifted := s.draw(req)
 	if f != nil {
 		ev.Fault = f.Name + ":" + string(f.Action)
 		if s.opts.Logf != nil {
@@ -424,6 +424,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ev.Status = -1
 			hangUp(w)
 			return
+		case Block:
+			select {
+			case <-lifted:
+				// The partition healed: serve the request, if its client
+				// is still there.
+				if r.Context().Err() == nil {
+					break
+				}
+				ev.Status = -1
+				hangUp(w)
+				return
+			case <-r.Context().Done():
+				ev.Status = -1
+				hangUp(w)
+				return
+			case <-s.done:
+				ev.Status = -1
+				hangUp(w)
+				return
+			}
 		}
 	}
 

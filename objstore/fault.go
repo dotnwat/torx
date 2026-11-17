@@ -31,6 +31,14 @@ const (
 	// Hang holds the request until its client gives up; it never takes
 	// effect. A client cut off from the store sees every request hang.
 	Hang Action = "hang"
+	// Block holds the request until its rule is removed, and then serves
+	// it -- or until its client gives up or the store closes, when it
+	// never takes effect: a client cut off from the store by a partition
+	// that heals, whose requests go through late, as TCP's retransmissions
+	// deliver them once the network is back. A client that waits as long
+	// as the partition lasts -- one with no timeout, or a long one -- hears
+	// the answer; under Hang it would wait forever.
+	Block Action = "block"
 	// FailAfter lets the request take effect, then answers with the
 	// rule's Status (500 if unset).
 	FailAfter Action = "fail-after"
@@ -77,6 +85,9 @@ func (r *Rule) status() int {
 type rule struct {
 	id int
 	Rule
+	// lifted is closed when the rule is removed: the requests a Block
+	// holds go through.
+	lifted chan struct{}
 }
 
 // AddRule adds a rule, after every rule there is, and returns its ID, to
@@ -85,22 +96,31 @@ func (s *Server) AddRule(r Rule) int {
 	s.rulesMu.Lock()
 	defer s.rulesMu.Unlock()
 	s.ruleSeq++
-	s.rules = append(s.rules, &rule{id: s.ruleSeq, Rule: r})
+	s.rules = append(s.rules, &rule{id: s.ruleSeq, Rule: r, lifted: make(chan struct{})})
 	return s.ruleSeq
 }
 
 // RemoveRule removes the rule with ID id, if there is one. Requests it is
-// already holding carry on as it said.
+// already holding carry on as it said; those a Block holds are served.
 func (s *Server) RemoveRule(id int) {
 	s.rulesMu.Lock()
 	defer s.rulesMu.Unlock()
-	s.rules = slices.DeleteFunc(s.rules, func(r *rule) bool { return r.id == id })
+	s.rules = slices.DeleteFunc(s.rules, func(r *rule) bool {
+		if r.id == id {
+			close(r.lifted)
+			return true
+		}
+		return false
+	})
 }
 
-// ClearRules removes every rule.
+// ClearRules removes every rule, as RemoveRule does.
 func (s *Server) ClearRules() {
 	s.rulesMu.Lock()
 	defer s.rulesMu.Unlock()
+	for _, r := range s.rules {
+		close(r.lifted)
+	}
 	s.rules = nil
 }
 
@@ -115,8 +135,9 @@ func (s *Server) Rules() []Rule {
 	return out
 }
 
-// draw returns the fault a request gets, if any.
-func (s *Server) draw(req request) *Rule {
+// draw returns the fault a request gets, if any, and a channel closed
+// when its rule is removed.
+func (s *Server) draw(req request) (*Rule, <-chan struct{}) {
 	s.rulesMu.Lock()
 	defer s.rulesMu.Unlock()
 	for _, r := range s.rules {
@@ -132,9 +153,9 @@ func (s *Server) draw(req request) *Rule {
 			}
 		}
 		rr := r.Rule
-		return &rr
+		return &rr, r.lifted
 	}
-	return nil
+	return nil, nil
 }
 
 func (r *rule) matches(req request) bool {

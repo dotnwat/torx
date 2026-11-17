@@ -618,7 +618,9 @@ bridge, or the interface facing a remote node. `AddRule` injects faults into
 the requests of the clients (told apart by the access key they sign with),
 operations, and key prefixes a rule names, with a probability: a failure or a
 reset before the request takes effect or after, a delay the client may give
-up on, a stall that lands after it did, a hang. `History` returns every
+up on, a stall that lands after it did, a hang, and a block -- a partition
+that heals: requests held until the rule is removed, and then served to the
+clients still waiting for them. `History` returns every
 request with the fault it got and what it did, and `WriteTar` archives the
 objects; both are final once `Close` returns, which waits out the requests
 in flight. [`objstore/cmd/objstore`](objstore/cmd/objstore/) serves one on its
