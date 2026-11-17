@@ -636,3 +636,29 @@ func TestProcsStopCutShort(t *testing.T) {
 		t.Fatalf("StopNode after a kill that could not be carried out: %v", err)
 	}
 }
+
+// StopNode says once that a kill of its own failed, and of which process:
+// not the stop's error and then the slot's, which is the same one.
+func TestProcsStopNodeKillFailedOnce(t *testing.T) {
+	ctx := context.Background()
+	p, n, b := newLossyProcs(t)
+	for _, name := range []string{"a", "b"} {
+		if err := p.Launch(ctx, name, n, sleeper(name)); err != nil {
+			t.Fatal(err)
+		}
+		waitForLog(t, p.svc.CapturePath(n, name), name+" up")
+		b.last().unkillable.Store(true)
+	}
+	err := p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second})
+	if !errors.Is(err, ErrBackend) {
+		t.Fatalf("StopNode whose kills could not be carried out: %v", err)
+	}
+	for _, name := range []string{"a", "b"} {
+		if got := strings.Count(err.Error(), "stopping "+name+": "); got != 1 {
+			t.Fatalf("StopNode names %s's failed kill %d times, want once:\n%v", name, got, err)
+		}
+	}
+	if got := strings.Count(err.Error(), "the kill could not be carried out"); got != 2 {
+		t.Fatalf("StopNode reports %d failed kills of two:\n%v", got, err)
+	}
+}

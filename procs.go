@@ -527,8 +527,9 @@ func (p *Procs) StopNode(ctx context.Context, n *Node, policy StopPolicy) error 
 	p.mu.Unlock()
 	var errs []error
 	for _, s := range mine {
-		if _, err := p.Terminate(ctx, s.name, policy); err != nil && !errors.Is(err, ErrNotRunning) {
-			errs = append(errs, err)
+		_, err := p.Terminate(ctx, s.name, policy)
+		if errors.Is(err, ErrNotRunning) {
+			err = nil
 		}
 		// A launch may be settling still -- in the grace period of a
 		// Terminate begun elsewhere, or having exited -- and its kill may
@@ -544,11 +545,18 @@ func (p *Procs) StopNode(ctx context.Context, n *Node, policy StopPolicy) error 
 			}
 		}
 		p.mu.Lock()
-		if s.unstopped != nil && !slices.ContainsFunc(errs, func(e error) bool { return errors.Is(e, s.unstopped) }) {
-			errs = append(errs, s.unstopped)
-		}
+		unstopped := s.unstopped
 		delete(p.slots, s.name)
 		p.mu.Unlock()
+		// A kill that failed is said once: the slot keeps it with the
+		// process's name, and when it was this stop's kill, the stop's own
+		// error is the same one without.
+		switch {
+		case unstopped != nil:
+			errs = append(errs, unstopped)
+		case err != nil:
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
 }
