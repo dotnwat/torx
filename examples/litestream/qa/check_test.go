@@ -121,6 +121,26 @@ func TestCheckHeldTwice(t *testing.T) {
 	}
 }
 
+// Two copies that hold different transactions in doubt at one row are not
+// both what the primary had, though each alone could be: the anomaly is
+// of the two, and says so.
+func TestCheckDisagree(t *testing.T) {
+	h := newHistory(4)
+	h.txns[2].Outcome, h.txns[2].N = inDoubt, 0
+	h.txns[3].Outcome, h.txns[3].N = inDoubt, 0
+	// Restores that overlapped, so neither went back from the other.
+	h.copyOf(obsRestore, 5, 1, 2, 3)
+	h.copyOf(obsRestore, 5.2, 1, 2, 4)
+	found, known := h.check()
+	if len(found) != 1 || len(known) != 0 || found[0].Kind != "not-a-prefix" || !slices.Equal(found[0].Obs, []int{0, 1}) {
+		t.Fatalf("anomalies %v, known %v; want one not-a-prefix of the two copies", found, known)
+	}
+	d := found[0].Detail
+	if !strings.Contains(d, "holds 4 (") || !strings.Contains(d, "at row 3, where ") || !strings.Contains(d, "holds 3 (") || !strings.Contains(d, "accounts for neither") {
+		t.Fatalf("detail %q does not say what each copy holds at row 3", d)
+	}
+}
+
 func TestCheckTornCommit(t *testing.T) {
 	h := newHistory(4)
 	// Transaction 3 was sent as the app was killed, and the app's

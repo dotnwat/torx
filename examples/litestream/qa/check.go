@@ -209,6 +209,17 @@ func (c *checker) addPrefix(a prefixcheck.Anomaly[uint64]) {
 	switch a.Kind {
 	case prefixcheck.NotAPrefix:
 		uid := L[a.At-1]
+		if len(a.Copies) > 1 {
+			// Two copies that differ at a row the epoch's log does not
+			// account for: one of them is not what the primary had, and
+			// nothing says which.
+			other := c.obs[a.Copies[1]]
+			theirs := other.Report.TxLog[a.At-1]
+			c.add(anomaly{Kind: "not-a-prefix", Obs: []int{other.ID, o.ID}, Txns: []uint64{theirs, uid},
+				Detail: fmt.Sprintf("%s holds %s at row %d, where %s holds %s: epoch %d committed one transaction there at most, and its log accounts for neither",
+					c.what(o), c.describe(uid), a.At, c.what(other), c.describe(theirs), a.Branch)})
+			return
+		}
 		detail := fmt.Sprintf("%s holds %d transactions, which no primary committed in that order: at row %d it holds %s, ",
 			c.what(o), len(L), a.At, c.describe(uid))
 		want, known := c.orders[a.Branch][a.At]
