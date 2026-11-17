@@ -5,6 +5,8 @@ package torx
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -207,5 +209,275 @@ func TestProcsUnknown(t *testing.T) {
 	}
 	if p.Running("x") || p.Node("x") != nil || p.Launches("x") != 0 {
 		t.Fatal("an unknown process has state")
+	}
+}
+
+// lossyBackend is a LocalBackend whose node can drop out of reach of a
+// process's handle -- the process runs on, and the handle can neither see
+// it exit nor kill it, as an ssh session whose connection dropped cannot
+// -- and whose tail can be held up.
+type lossyBackend struct {
+	Backend
+	// tailGate, if not nil, holds every tail until it is closed.
+	tailGate chan struct{}
+
+	mu    sync.Mutex
+	procs []*lossyProc
+}
+
+func (b *lossyBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
+	// A process out of reach is not killed through its context either.
+	tp, err := b.Backend.Stream(context.WithoutCancel(ctx), cmd)
+	if err != nil {
+		return nil, err
+	}
+	lp := &lossyProc{Process: tp, lost: make(chan struct{})}
+	b.mu.Lock()
+	b.procs = append(b.procs, lp)
+	b.mu.Unlock()
+	return lp, nil
+}
+
+func (b *lossyBackend) Exec(ctx context.Context, cmd Cmd) (ExecResult, error) {
+	if cmd.Path == "tail" && b.tailGate != nil {
+		<-b.tailGate
+	}
+	return b.Backend.Exec(ctx, cmd)
+}
+
+// last is the process launched last.
+func (b *lossyBackend) last() *lossyProc {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.procs[len(b.procs)-1]
+}
+
+type lossyProc struct {
+	Process
+	lost chan struct{} // closed once the node is out of reach
+}
+
+func (p *lossyProc) isLost() bool {
+	select {
+	case <-p.lost:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *lossyProc) alive() bool {
+	return syscall.Kill(p.Process.(*procStream).cmd.Process.Pid, 0) == nil
+}
+
+func (p *lossyProc) Wait(ctx context.Context) (int, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-p.lost:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	code, err := p.Process.Wait(ctx)
+	if p.isLost() {
+		return -1, Wrap(ErrBackend, "lossy: wait", errors.New("the session ended without reporting the command's exit"))
+	}
+	return code, err
+}
+
+func (p *lossyProc) Close() error {
+	if p.isLost() {
+		return Wrap(ErrBackend, "lossy: kill", errors.New("the node is out of reach"))
+	}
+	return p.Process.Close()
+}
+
+func newLossyProcs(t *testing.T) (*Procs, *Node, *lossyBackend) {
+	t.Helper()
+	b := &lossyBackend{Backend: LocalBackend{}}
+	n := NewNode(NodeConfig{
+		Name:    "n0",
+		Backend: b,
+		Scratch: MakeScratch(t.TempDir(), "n0"),
+		Ports:   NewPortAllocator(""),
+	})
+	svc := NewServiceBase("svc", Homogeneous(1, NodeSpec{}), nil)
+	svc.SetCapturePolicy(CaptureRotate)
+	if err := n.Mkdir(context.Background(), n.ServiceScratch("svc").Root); err != nil {
+		t.Fatal(err)
+	}
+	// What a test left out of reach is killed for real.
+	t.Cleanup(func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		for _, lp := range b.procs {
+			_ = lp.Process.Close()
+		}
+	})
+	return NewProcs(svc), n, b
+}
+
+// A process its node lost track of and could not kill may still run: the
+// slot does not start another beside it, and StopNode does not call the
+// node stopped.
+func TestProcsLostProcess(t *testing.T) {
+	ctx := context.Background()
+	p, n, b := newLossyProcs(t)
+	if err := p.Launch(ctx, "a", n, sleeper("a")); err != nil {
+		t.Fatal(err)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "a"), "a up")
+	lp := b.last()
+	close(lp.lost)
+	waitFor(t, "the exit", func() bool { return len(p.Exits()) == 1 })
+	if e := p.Exits()[0]; e.Code != -1 || e.Err == "" || e.Tail != "a up" {
+		t.Fatalf("exit = %+v, want a wait that failed", e)
+	}
+	if p.Running("a") {
+		t.Fatal("running, as far as Procs can tell, after the node lost it")
+	}
+	if !lp.alive() {
+		t.Fatal("the process did not outlive the handle that lost it")
+	}
+	err := p.Restart(ctx, "a")
+	if !errors.Is(err, ErrBackend) || !strings.Contains(err.Error(), "may still run") {
+		t.Fatalf("Restart over a process that may still run: %v", err)
+	}
+	if err := p.Relaunch(ctx, "a", sleeper("b")); !errors.Is(err, ErrBackend) {
+		t.Fatalf("Relaunch over a process that may still run: %v", err)
+	}
+	if got := p.Launches("a"); got != 1 {
+		t.Fatalf("%d launches, want the one", got)
+	}
+	err = p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second})
+	if !errors.Is(err, ErrBackend) {
+		t.Fatalf("StopNode after a kill that could not be carried out: %v", err)
+	}
+	if len(p.Names()) != 0 {
+		t.Fatalf("StopNode left %v", p.Names())
+	}
+}
+
+// A process being stopped runs until the stop is done with it: a Restart
+// within its grace period waits, and starts nothing beside it.
+func TestProcsRestartWaitsForStop(t *testing.T) {
+	ctx := context.Background()
+	p, n, b := newLossyProcs(t)
+	// It acts on SIGTERM only once the test lets it, so the test, not the
+	// clock, says how long it is within its grace period.
+	release := filepath.Join(t.TempDir(), "release")
+	slow := Command("sh", "-c", `trap 'while [ ! -e "$0" ]; do sleep 0.02; done; exit 0' TERM; echo slow up; while :; do sleep 0.05; done`, release)
+	if err := p.Launch(ctx, "a", n, slow); err != nil {
+		t.Fatal(err)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "a"), "slow up")
+	old := b.last()
+	stopped := make(chan error, 1)
+	go func() {
+		clean, err := p.Terminate(ctx, "a", StopPolicy{Signal: syscall.SIGTERM, Grace: time.Minute})
+		if err == nil && !clean {
+			err = errors.New("the process was killed, not stopped")
+		}
+		stopped <- err
+	}()
+	waitFor(t, "the stop to begin", func() bool { return !p.Running("a") })
+
+	short, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	err := p.Restart(short, "a")
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Restart within the grace period: %v, want it to wait its context out", err)
+	}
+	if !old.alive() || p.Launches("a") != 1 {
+		t.Fatalf("within the grace period: alive %v, launches %d", old.alive(), p.Launches("a"))
+	}
+
+	relaunched := make(chan error, 1)
+	go func() { relaunched <- p.Relaunch(ctx, "a", sleeper("b")) }()
+	select {
+	case err := <-relaunched:
+		t.Fatalf("Relaunch returned %v within the grace period", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-relaunched; err != nil {
+		t.Fatal(err)
+	}
+	if old.alive() {
+		t.Fatal("Relaunch started a process beside the one still being stopped")
+	}
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "a"), "b up")
+	if !p.Running("a") || p.Launches("a") != 2 {
+		t.Fatalf("after the relaunch: running %v, launches %d", p.Running("a"), p.Launches("a"))
+	}
+	if err := p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The record of an exit holds the log of the launch that exited, however
+// soon a supervisor starts the next: the slot is not free until the log
+// has been read.
+func TestProcsExitRecordedBeforeRestart(t *testing.T) {
+	ctx := context.Background()
+	p, n, b := newLossyProcs(t)
+	b.tailGate = make(chan struct{})
+	if err := p.Launch(ctx, "a", n, Command("sh", "-c", "echo original dying; exit 3")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the exit", func() bool { return !p.Running("a") })
+	relaunched := make(chan error, 1)
+	go func() { relaunched <- p.Relaunch(ctx, "a", sleeper("replacement")) }()
+	select {
+	case err := <-relaunched:
+		t.Fatalf("Relaunch returned %v before the exit was recorded", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(b.tailGate)
+	if err := <-relaunched; err != nil {
+		t.Fatal(err)
+	}
+	exits := p.Exits()
+	if len(exits) != 1 || exits[0].Launch != 1 || exits[0].Code != 3 || exits[0].Tail != "original dying" {
+		t.Fatalf("exits = %+v, want the first launch's, with its own log", exits)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "a"), "replacement up")
+	if err := p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// StopNode waits for a process already on its way out, and reports the
+// kill of it that failed.
+func TestProcsStopNodeWaitsForExit(t *testing.T) {
+	ctx := context.Background()
+	p, n, b := newLossyProcs(t)
+	b.tailGate = make(chan struct{})
+	if err := p.Launch(ctx, "a", n, sleeper("a")); err != nil {
+		t.Fatal(err)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "a"), "a up")
+	close(b.last().lost)
+	waitFor(t, "the exit", func() bool { return !p.Running("a") })
+	stopped := make(chan error, 1)
+	go func() { stopped <- p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}) }()
+	select {
+	case err := <-stopped:
+		t.Fatalf("StopNode returned %v while the exit was being recorded", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(b.tailGate)
+	if err := <-stopped; !errors.Is(err, ErrBackend) {
+		t.Fatalf("StopNode over an exit whose kill could not be carried out: %v", err)
+	}
+	if len(p.Exits()) != 1 || len(p.Names()) != 0 {
+		t.Fatalf("exits %v, names %v", p.Exits(), p.Names())
 	}
 }

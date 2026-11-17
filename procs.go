@@ -31,6 +31,12 @@ var ErrNotRunning = errors.New("torx: process not running")
 // node, through StartCapturedAs, so the service's CapturePolicy says what
 // becomes of a previous launch's log; CaptureRotate keeps every one.
 //
+// A slot holds one process at a time. A process on its way out -- one
+// Terminate is still waiting on, one whose exit is still being recorded --
+// is not running, but the slot is not free either: Restart and Relaunch
+// wait until it is settled, so the next launch never runs beside the last,
+// nor takes its log before the record of its exit has read it.
+//
 // A process outlives the context it was launched or restarted with: it
 // runs until Procs crashes or stops it, or it exits, so a supervisor may
 // restart one under a context that ends long before the job does. The
@@ -41,7 +47,8 @@ var ErrNotRunning = errors.New("torx: process not running")
 // ProcExit, with the end of what it logged, and reported to OnExit: a
 // server that died of a panic, an assertion, or a fatal error is a finding
 // even if nothing the job checked noticed. A process whose kill could not
-// be carried out may still be running, and its slot refuses a Restart.
+// be carried out -- by Crash, by Terminate, or after it exited or its node
+// lost track of it -- may still be running, and its slot refuses a Restart.
 type Procs struct {
 	svc *ServiceBase
 
@@ -86,9 +93,31 @@ type procSlot struct {
 	proc     Process // nil while not running
 	paused   bool
 	launches int
+	// settling is set from when a launch is taken out of the slot to be
+	// stopped, or because it exited, until that is done with: the stop
+	// has returned, or what the launch left has been killed and its exit
+	// recorded. It is closed then. The slot does not start again before.
+	settling chan struct{}
 	// unstopped is the error of a kill that could not be carried out: the
 	// process may still run.
 	unstopped error
+}
+
+// takeLocked takes the slot's process out of it, for the caller to finish
+// with outside the lock, and holds the slot until settleLocked.
+func (s *procSlot) takeLocked() {
+	s.proc, s.paused = nil, false
+	s.settling = make(chan struct{})
+}
+
+// settleLocked frees the slot takeLocked held. unstopped, if not nil, is
+// the error of a kill that could not be carried out.
+func (s *procSlot) settleLocked(unstopped error) {
+	if unstopped != nil {
+		s.unstopped = unstopped
+	}
+	close(s.settling)
+	s.settling = nil
 }
 
 // NewProcs keeps processes for svc, whose StartCapturedAs launches them.
@@ -113,26 +142,25 @@ func (p *Procs) Launch(ctx context.Context, name string, n *Node, cmd Cmd) error
 }
 
 // Restart starts process name again, with the command it was last
-// launched with. It must not be running.
+// launched with. It must not be running; one on its way out is waited
+// for, as long as ctx allows.
 func (p *Procs) Restart(ctx context.Context, name string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	s, err := p.stoppedLocked(name)
+	s, err := p.lockStopped(ctx, name)
 	if err != nil {
 		return err
 	}
+	defer p.mu.Unlock()
 	return p.startLocked(ctx, s)
 }
 
 // Relaunch starts process name again, on the same node, with cmd. It must
-// not be running.
+// not be running; one on its way out is waited for, as long as ctx allows.
 func (p *Procs) Relaunch(ctx context.Context, name string, cmd Cmd) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	s, err := p.stoppedLocked(name)
+	s, err := p.lockStopped(ctx, name)
 	if err != nil {
 		return err
 	}
+	defer p.mu.Unlock()
 	old := s.cmd
 	s.cmd = cmd
 	if err := p.startLocked(ctx, s); err != nil {
@@ -142,17 +170,38 @@ func (p *Procs) Relaunch(ctx context.Context, name string, cmd Cmd) error {
 	return nil
 }
 
-func (p *Procs) stoppedLocked(name string) (*procSlot, error) {
-	s := p.slots[name]
-	switch {
-	case s == nil:
-		return nil, fmt.Errorf("torx: no process %s", name)
-	case s.unstopped != nil:
-		return nil, fmt.Errorf("torx: %s cannot start over a process that may still run: %w", name, s.unstopped)
-	case s.proc != nil:
-		return nil, fmt.Errorf("torx: process %s is running", name)
+// lockStopped returns process name's slot once it can start again, with
+// p.mu held. It waits for a launch that is still settling: one started
+// over it would run beside a process still in its grace period, or beside
+// whatever a kill yet to fail has left, and would move the log aside
+// before the record of the exit has read it.
+func (p *Procs) lockStopped(ctx context.Context, name string) (*procSlot, error) {
+	for {
+		p.mu.Lock()
+		s := p.slots[name]
+		var err error
+		switch {
+		case s == nil:
+			err = fmt.Errorf("torx: no process %s", name)
+		case s.settling != nil:
+			settling := s.settling
+			p.mu.Unlock()
+			select {
+			case <-settling:
+				continue
+			case <-ctx.Done():
+				return nil, fmt.Errorf("torx: process %s is still being stopped: %w", name, context.Cause(ctx))
+			}
+		case s.unstopped != nil:
+			err = fmt.Errorf("torx: %s cannot start over a process that may still run: %w", name, s.unstopped)
+		case s.proc != nil:
+			err = fmt.Errorf("torx: process %s is running", name)
+		default:
+			return s, nil
+		}
+		p.mu.Unlock()
+		return nil, err
 	}
-	return s, nil
 }
 
 func (p *Procs) startLocked(ctx context.Context, s *procSlot) error {
@@ -185,9 +234,17 @@ func (p *Procs) watch(s *procSlot, tp Process, launch int, release context.Cance
 		p.mu.Unlock()
 		return // stopped or crashed through Procs
 	}
-	s.proc, s.paused = nil, false
+	// The slot is held until the launch is settled. The close kills what
+	// the process left, or the process itself if the wait only lost track
+	// of it, and a kill that fails leaves something the next launch must
+	// not run beside. The log is the launch's own only until the next one
+	// moves it aside or truncates it.
+	s.takeLocked()
 	p.mu.Unlock()
-	_ = tp.Close()
+	var unstopped error
+	if err := tp.Close(); err != nil {
+		unstopped = fmt.Errorf("torx: cleaning up after %s: %w", s.name, err)
+	}
 
 	e := ProcExit{Name: s.name, Node: s.node.Name(), Code: code, Time: time.Now(), Launch: launch}
 	if werr != nil {
@@ -201,6 +258,7 @@ func (p *Procs) watch(s *procSlot, tp Process, launch int, release context.Cance
 	p.mu.Lock()
 	p.exits = append(p.exits, e)
 	onExit := p.OnExit
+	s.settleLocked(unstopped)
 	p.mu.Unlock()
 	if onExit != nil {
 		onExit(e)
@@ -251,7 +309,8 @@ func (p *Procs) Crash(ctx context.Context, name string) error {
 // Terminate stops process name as policy says (Stop): a paused process is
 // resumed first, so it can act on the signal. It reports whether the
 // process exited within the grace period; one that had to be killed is
-// not an error.
+// not an error. Until Terminate returns the process may still be running,
+// and its slot does not start again.
 func (p *Procs) Terminate(ctx context.Context, name string, policy StopPolicy) (clean bool, err error) {
 	p.mu.Lock()
 	s, tp, err := p.running(name)
@@ -260,22 +319,24 @@ func (p *Procs) Terminate(ctx context.Context, name string, policy StopPolicy) (
 		return false, err
 	}
 	paused := s.paused
-	s.proc, s.paused = nil, false
+	s.takeLocked()
 	p.mu.Unlock()
 	if paused {
 		_ = tp.Signal(ctx, syscall.SIGCONT)
 	}
 	_, err = Stop(ctx, tp, policy)
-	if errors.Is(err, ErrShutdownTimeout) {
+	timedOut := errors.Is(err, ErrShutdownTimeout)
+	var unstopped error
+	if err != nil && !timedOut {
+		unstopped = fmt.Errorf("torx: stopping %s: %w", name, err)
+	}
+	p.mu.Lock()
+	s.settleLocked(unstopped)
+	p.mu.Unlock()
+	if timedOut {
 		return false, nil
 	}
-	if err != nil {
-		p.mu.Lock()
-		s.unstopped = fmt.Errorf("torx: stopping %s: %w", name, err)
-		p.mu.Unlock()
-		return false, err
-	}
-	return true, nil
+	return err == nil, err
 }
 
 // Pause stops process name with SIGSTOP: a process that goes silent
@@ -411,8 +472,9 @@ func (p *Procs) tail(ctx context.Context, n *Node, name string) ([]byte, error) 
 }
 
 // StopNode stops every process on n as policy says, and forgets them: what
-// a service's StopNode calls. It returns the errors of the stops, and of
-// any earlier kill that could not be carried out.
+// a service's StopNode calls. A process already on its way out is waited
+// for. It returns the errors of the stops, and of any earlier kill that
+// could not be carried out.
 func (p *Procs) StopNode(ctx context.Context, n *Node, policy StopPolicy) error {
 	p.mu.Lock()
 	var mine []*procSlot
@@ -426,6 +488,19 @@ func (p *Procs) StopNode(ctx context.Context, n *Node, policy StopPolicy) error 
 	for _, s := range mine {
 		if _, err := p.Terminate(ctx, s.name, policy); err != nil && !errors.Is(err, ErrNotRunning) {
 			errs = append(errs, err)
+		}
+		// A launch may be settling still -- in the grace period of a
+		// Terminate begun elsewhere, or having exited -- and its kill may
+		// yet fail: the node is not stopped, nor its errors in, before.
+		p.mu.Lock()
+		settling := s.settling
+		p.mu.Unlock()
+		if settling != nil {
+			select {
+			case <-settling:
+			case <-ctx.Done():
+				errs = append(errs, fmt.Errorf("torx: process %s is still being stopped: %w", s.name, context.Cause(ctx)))
+			}
 		}
 		p.mu.Lock()
 		if s.unstopped != nil && !slices.ContainsFunc(errs, func(e error) bool { return errors.Is(e, s.unstopped) }) {
