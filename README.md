@@ -232,6 +232,21 @@ Guidelines that keep a service portable across the local and ssh backends:
   that hangs leaves the evidence of why. `Signal` also pauses and resumes a
   process (`SIGSTOP`, `SIGCONT`), the fault that makes a node go silent
   without dying.
+- **Keep a job's processes by name with `torx.Procs`.** A chaos test
+  crashes one process, pauses another, stops a third the way an operator
+  would, and starts each again later -- and at the end needs to know which
+  exited on their own. `torx.NewProcs(s.ServiceBase)` keeps them in named
+  slots: `Launch(ctx, name, n, cmd)` starts one through `StartCapturedAs`,
+  `Crash` kills it outright, `Terminate(ctx, name, policy)` stops it as
+  `torx.Stop` does (resuming it first if paused), `Pause` and `Resume`
+  `SIGSTOP` and `SIGCONT` it, and `Restart` and `Relaunch` start the slot
+  again with its last command or another. A process that exits without
+  `Procs` having stopped it is recorded -- `Exits()`, and `OnExit` as it
+  happens -- with the end of its log: a panic or a fatal error is a
+  finding even when nothing the job checked noticed. A process outlives
+  the context it was launched under, so a supervisor may restart one under
+  a context that ends long before the job; the service's `StopNode` calls
+  `Procs.StopNode` to stop what is left at teardown.
 - **One-shot commands** (a load generator that runs and exits) use
   `n.Exec(ctx, cmd)` instead of `StartCaptured`; it runs to completion and
   returns the captured `ExecResult` (exit code, stdout, stderr).
