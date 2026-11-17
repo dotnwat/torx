@@ -113,14 +113,26 @@ var faultWeights = map[string]int{
 	"failover":         2, // lose the primary; restore the replica on the standby and run there
 }
 
+// offByDefault are faults "all" leaves out; a run names them to inject
+// them ("all,disk-full"). A full disk stops Litestream's syncs while its
+// snapshots go on, and a snapshot then can read pages the app
+// checkpointed past Litestream's position: the replica restores to a
+// database SQLite cannot read (README.md). Left in, it would hide the
+// rest.
+var offByDefault = map[string]bool{"disk-full": true}
+
 func parseFaults(spec string) []string {
 	parts := strings.Split(spec, ",")
 	if parts[0] != "all" {
 		return parts
 	}
-	faults := slices.Sorted(maps.Keys(faultWeights))
+	faults := slices.DeleteFunc(slices.Sorted(maps.Keys(faultWeights)), func(f string) bool { return offByDefault[f] })
 	for _, p := range parts[1:] {
-		faults = slices.DeleteFunc(faults, func(f string) bool { return "-"+f == p })
+		if name, ok := strings.CutPrefix(p, "-"); ok {
+			faults = slices.DeleteFunc(faults, func(f string) bool { return f == name })
+		} else if !slices.Contains(faults, p) {
+			faults = append(faults, p)
+		}
 	}
 	return faults
 }
@@ -362,8 +374,11 @@ func (j *chaosJob) Setup(ctx context.Context, jc *torx.JobContext) error {
 	// Where a node can mount -- a -netns node -- the database's directory,
 	// which the WAL and Litestream's LTX files share with it, is a disk
 	// the disk-full fault fills.
-	j.disk = true
+	j.disk = slices.Contains(j.faults, "disk-full")
 	for _, n := range ns {
+		if !j.disk {
+			break
+		}
 		if err := diskfault.Check(ctx, n, j.dir(n)); err != nil {
 			jc.Log("info", "no disk faults: "+err.Error())
 			j.disk = false

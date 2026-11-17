@@ -117,6 +117,7 @@ The faults (`faults`, `all`):
 | `store-partition` | Litestream is cut off from the store until the partition heals, when its requests go through |
 | `restore-errors` | the restores' and the follower's store requests fail or are delayed |
 | `failover` | lose the primary; restore the replica on the standby, and run the app and Litestream there |
+| `disk-full` | the primary's disk -- the database's, its WAL's, and Litestream's LTX files' -- fills up; with `-netns`. Off by default: name it (`"faults": "all,disk-full"`) |
 
 Once every fault is healed, the job brings everything back, has the replica
 catch up with a last `sync -wait`, and reads the primary's database, a
@@ -168,10 +169,15 @@ keeps hitting one can find others:
 - **`follow-regress`**: what is wrong with a follower's copy read after one
   of its polls failed in that life.
 
+The `disk-full` fault is off by default for a fourth finding, below: a full
+disk stops Litestream's syncs but not its snapshots, and one then can be
+corrupt, which corrupts every restore after it.
+
 ## The findings
 
-Each has a job that reproduces it deterministically, on one primary with
-Litestream's own checkpoints held off:
+Each of the first three has a job that reproduces it deterministically, on
+one primary with Litestream's own checkpoints held off; each of the four
+has a test, in Litestream's own style, in the issue that tracks it.
 
 - **`litestream.restart-gap`**: Litestream is killed after syncing part of
   the WAL; the app commits more, checkpoints, and writes a few frames into
@@ -192,3 +198,13 @@ Litestream's own checkpoints held off:
   the failure; its next poll applies them again over the newer pages, and
   its copy goes back -- to a state the primary never had, if that poll
   fails too.
+- **A stale snapshot** (`disk-full`): Litestream's read transaction keeps
+  the app from checkpointing past what Litestream has synced only once it
+  has synced to where the transaction began. Litestream restarted after the
+  app wrote while it was down opens the transaction at the WAL's end, past
+  frames it has yet to sync, and until its first sync succeeds -- which,
+  while its disk is full, it cannot, as it stages each LTX file there --
+  the app may checkpoint those frames into the database file. A snapshot
+  then, at Litestream's position, reads those pages from the file beside
+  the WAL's older ones: the replica restores to a database SQLite cannot
+  read, at that TXID and at every later one, until the next snapshot.
