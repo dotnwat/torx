@@ -514,15 +514,22 @@ func TestBlock(t *testing.T) {
 	}
 
 	// A client that gives up while held leaves no effect, even once the
-	// rule is lifted.
+	// rule is lifted. The store learns the client is gone only when it sees
+	// the connection close, as a server would; lift the rule after it has.
 	slow := *c
 	slow.http = &http.Client{Timeout: 200 * time.Millisecond}
 	id = s.AddRule(Rule{Name: "b3", Prob: 1, Action: Block, Ops: []Op{OpPut}})
 	if _, _, err := slow.do("PUT", "/b/k3", []byte("x")); err == nil {
 		t.Fatal("block: the client heard an answer while the rule held")
 	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !slices.ContainsFunc(s.History(), func(e Event) bool { return e.Key == "k3" }) {
+		if time.Now().After(deadline) {
+			t.Fatal("block: the store never let go of a request whose client gave up")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	s.RemoveRule(id)
-	time.Sleep(100 * time.Millisecond)
 	if _, _, ok := s.Get("b", "k3"); ok {
 		t.Fatal("block: the put of a client that gave up took effect")
 	}
