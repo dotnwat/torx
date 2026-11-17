@@ -35,6 +35,14 @@
 // is not, the check cannot tell, so it reports the two together, once
 // for the position, as not-a-prefix.
 //
+// A copy more than one branch could hold says nothing itself, since which
+// branch it is of is not known, but is held to what the others say: one
+// that differs from them on every branch it could be of is of none, and
+// is reported with the copies it differs from. Such copies are not held
+// to one another, and that is a limit of the check: three that differ at
+// a position two branches do not know cannot all be prefixes, and pass.
+// To tell would take trying each copy on each of its branches.
+//
 // A copy already known to be wrong for a reason of the caller's -- an
 // issue found before, allowed so a run finds others -- is checked on its
 // own and its anomalies carry the reason, but no other copy is compared
@@ -46,6 +54,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -106,14 +115,17 @@ type Anomaly[ID comparable] struct {
 	Kind string
 	// Copies are the copies concerned, by ID: the copy, and for
 	// went-back, the earlier copy it does not hold. A not-a-prefix with
-	// two is of two copies that differ where their branch knows neither's
-	// entry: the copy, and the one that held another entry there first.
+	// more than one is of copies that differ where their branch knows
+	// neither's entry: the copy, and the one that held another entry
+	// there first -- one for each branch the copy follows, if it follows
+	// several, the latest branch's first.
 	Copies []int
 	// Known is the Known of a copy concerned, if any.
 	Known string
 	// Branch and At are, for not-a-prefix, the branch the copy follows
-	// longest and the first position where it does not; for one of two
-	// copies, the branch both follow and the position they differ at.
+	// longest and the first position where it does not; for one of
+	// copies that differ, the copy's branch -- the latest it follows --
+	// and the position it differs at from that branch's copy.
 	Branch, At int
 	// Missing are, for lost-acked and went-back, the entries the copy
 	// lacks.
@@ -249,49 +261,75 @@ type claim[ID comparable] struct {
 	disputed bool
 }
 
+// place is a branch a copy follows, and the positions at which the copy
+// holds an entry in doubt where the branch knows of none.
+type place struct {
+	branch int
+	doubts []int
+}
+
+// undecided is a copy more than one branch could hold, and the branches,
+// the latest first.
+type undecided[ID comparable] struct {
+	cp     *Copy[ID]
+	places []place
+}
+
+// difference is an entry a copy holds where its branch's copies hold
+// another.
+type difference[ID comparable] struct {
+	branch, at int
+	id         ID
+}
+
 func (c *checker[ID]) prefixes() {
 	// claims are, by branch and position, the first claim made there.
 	claims := make([]map[int]*claim[ID], len(c.h.Branches))
-	for _, cp := range c.h.Copies {
-		// The latest branch the copy follows is its branch; whether it
-		// follows another says whether it must agree with that branch's
-		// other copies.
-		b, only := -1, true
-		var doubts []int
+	// differs is where on a branch a copy first holds another entry than
+	// was claimed, and the claim; 0 if nowhere.
+	differs := func(cp *Copy[ID], pl place) (int, *claim[ID]) {
+		for _, pos := range pl.doubts {
+			if was, ok := claims[pl.branch][pos]; ok && was.id != cp.Seq[pos-1] {
+				return pos, was
+			}
+		}
+		return 0, nil
+	}
+	var several []undecided[ID]
+	for i := range c.h.Copies {
+		cp := &c.h.Copies[i]
+		// The branches the copy follows, the latest first: that one is
+		// its branch.
+		var places []place
 		for x := range slices.Backward(c.h.Branches) {
-			leaves, d := c.follow(cp.Seq, x)
-			switch {
-			case leaves != 0:
-			case b < 0:
-				b, doubts = x, d
-			default:
-				only = false
+			if leaves, doubts := c.follow(cp.Seq, x); leaves == 0 {
+				places = append(places, place{x, doubts})
 			}
 		}
+		if len(places) == 0 {
+			c.branch[cp.ID] = -1
+			c.notAPrefix(*cp)
+			continue
+		}
+		b := places[0].branch
 		c.branch[cp.ID] = b
-		if b < 0 {
-			c.notAPrefix(cp)
+		switch {
+		case cp.Known != "":
+			// Known to be wrong, and compared to no other.
+			continue
+		case len(places) > 1:
+			// It may differ from the copies of one of its branches and
+			// be of another: it claims nothing, and is held, below, to
+			// what the others have.
+			several = append(several, undecided[ID]{cp, places})
 			continue
 		}
-		// A copy that could be of another branch may differ from this
-		// one's copies and be right, and one known to be wrong is compared
-		// to no other.
-		if !only || cp.Known != "" {
-			continue
-		}
-		if claims[b] == nil {
-			claims[b] = map[int]*claim[ID]{}
-		}
-		// Where the copy first holds another entry than was claimed.
-		differs := 0
-		for _, pos := range doubts {
-			if was, ok := claims[b][pos]; ok && was.id != cp.Seq[pos-1] {
-				differs = pos
-				break
+		pos, was := differs(cp, places[0])
+		if pos == 0 {
+			if claims[b] == nil {
+				claims[b] = map[int]*claim[ID]{}
 			}
-		}
-		if differs == 0 {
-			for _, pos := range doubts {
+			for _, pos := range places[0].doubts {
 				if _, ok := claims[b][pos]; !ok {
 					claims[b][pos] = &claim[ID]{id: cp.Seq[pos-1], copy: cp.ID}
 				}
@@ -300,12 +338,45 @@ func (c *checker[ID]) prefixes() {
 		}
 		// One of the two is not a prefix. It claims nothing further, and
 		// the difference is reported once, however many copies share it.
-		if was := claims[b][differs]; !was.disputed {
+		if !was.disputed {
 			was.disputed = true
-			c.add(Anomaly[ID]{Kind: NotAPrefix, Copies: []int{cp.ID, was.copy}, Branch: b, At: differs,
+			c.add(Anomaly[ID]{Kind: NotAPrefix, Copies: []int{cp.ID, was.copy}, Branch: b, At: pos,
 				Text: fmt.Sprintf("copy %d holds %v at position %d, where copy %d holds %v: branch %d, the only branch either follows, committed one entry there at most, and knows of neither",
-					cp.ID, cp.Seq[differs-1], differs, was.copy, was.id, b)})
+					cp.ID, cp.Seq[pos-1], pos, was.copy, was.id, b)})
 		}
+	}
+
+	// A copy more than one branch could hold is of one of them, and holds
+	// what that one's copies do. One that differs from the copies of every
+	// branch it follows is of none of them.
+	told := map[difference[ID]]bool{}
+	for _, u := range several {
+		copies, at := []int{u.cp.ID}, 0
+		var parts []string
+		for i, pl := range u.places {
+			pos, was := differs(u.cp, pl)
+			if pos == 0 {
+				copies = nil // it could be of this one
+				break
+			}
+			if i == 0 {
+				at = pos
+			}
+			copies = append(copies, was.copy)
+			parts = append(parts, fmt.Sprintf("%v at position %d of branch %d, where copy %d holds %v",
+				u.cp.Seq[pos-1], pos, pl.branch, was.copy, was.id))
+		}
+		if copies == nil {
+			continue
+		}
+		d := difference[ID]{u.places[0].branch, at, u.cp.Seq[at-1]}
+		if told[d] {
+			continue
+		}
+		told[d] = true
+		c.add(Anomaly[ID]{Kind: NotAPrefix, Copies: copies, Branch: d.branch, At: at,
+			Text: fmt.Sprintf("copy %d holds %s: it follows no other branch, and each committed one entry at most where it knows of none",
+				u.cp.ID, strings.Join(parts, ", and "))})
 	}
 }
 
