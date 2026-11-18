@@ -12,6 +12,8 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -458,6 +460,139 @@ func TestFaults(t *testing.T) {
 	got := strings.Join(sortedBySeq(s, nil), "\n")
 	if got != strings.Join(want, "\n") {
 		t.Fatalf("faulted requests:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+	}
+}
+
+// TestBlock: a Block holds requests until its rule is removed -- a
+// partition that heals -- and then serves them; a client that gives up
+// first leaves no effect, and Close cuts off what is still held.
+func TestBlock(t *testing.T) {
+	s, c := newStore(t, Options{})
+
+	// Held until the rule is removed, then served: the client, still
+	// waiting, hears the answer.
+	id := s.AddRule(Rule{Name: "b", Prob: 1, Action: Block, Ops: []Op{OpPut}})
+	type answer struct {
+		status int
+		err    error
+	}
+	put := func(key, body string) <-chan answer {
+		ch := make(chan answer, 1)
+		go func() {
+			resp, _, err := c.do("PUT", "/b/"+key, []byte(body))
+			a := answer{err: err}
+			if resp != nil {
+				a.status = resp.StatusCode
+			}
+			ch <- a
+		}()
+		return ch
+	}
+	held := put("k1", "late")
+	time.Sleep(200 * time.Millisecond)
+	if _, _, ok := s.Get("b", "k1"); ok {
+		t.Fatal("block: a held put took effect")
+	}
+	select {
+	case a := <-held:
+		t.Fatalf("block: the client heard an answer while the rule held: %+v", a)
+	default:
+	}
+	s.RemoveRule(id)
+	if a := <-held; a.err != nil || a.status != 200 {
+		t.Fatalf("block: once lifted, the put answered %+v", a)
+	}
+	if data, _, _ := s.Get("b", "k1"); string(data) != "late" {
+		t.Fatalf("block: k1 holds %q", data)
+	}
+
+	// ClearRules lifts it too.
+	s.AddRule(Rule{Name: "b2", Prob: 1, Action: Block, Ops: []Op{OpPut}})
+	held = put("k2", "cleared")
+	time.Sleep(100 * time.Millisecond)
+	s.ClearRules()
+	if a := <-held; a.err != nil || a.status != 200 {
+		t.Fatalf("block: once cleared, the put answered %+v", a)
+	}
+
+	// A client that gives up while held leaves no effect, even once the
+	// rule is lifted. The store learns the client is gone only when it sees
+	// the connection close, as a server would; lift the rule after it has.
+	slow := *c
+	slow.http = &http.Client{Timeout: 200 * time.Millisecond}
+	id = s.AddRule(Rule{Name: "b3", Prob: 1, Action: Block, Ops: []Op{OpPut}})
+	if _, _, err := slow.do("PUT", "/b/k3", []byte("x")); err == nil {
+		t.Fatal("block: the client heard an answer while the rule held")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !slices.ContainsFunc(s.History(), func(e Event) bool { return e.Key == "k3" }) {
+		if time.Now().After(deadline) {
+			t.Fatal("block: the store never let go of a request whose client gave up")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	s.RemoveRule(id)
+	if _, _, ok := s.Get("b", "k3"); ok {
+		t.Fatal("block: the put of a client that gave up took effect")
+	}
+
+	// Close cuts off a held request without its effect.
+	s.AddRule(Rule{Name: "b4", Prob: 1, Action: Block, Ops: []Op{OpPut}})
+	held = put("k4", "x")
+	time.Sleep(100 * time.Millisecond)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if a := <-held; a.err == nil && a.status == 200 {
+		t.Fatal("block: a held put was served by a closing store")
+	}
+	if _, _, ok := s.Get("b", "k4"); ok {
+		t.Fatal("block: a held put took effect as the store closed")
+	}
+
+	want := []string{
+		"b:block:put:k1:true:200",
+		"b2:block:put:k2:true:200",
+		"b3:block:put:k3:false:-1",
+		"b4:block:put:k4:false:-1",
+	}
+	if got := strings.Join(sortedBySeq(s, nil), "\n"); got != strings.Join(want, "\n") {
+		t.Fatalf("faulted requests:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+	}
+}
+
+// A request a Block holds may come to wait with the store closed and its
+// rule lifted both, and has no effect then: the store closed first. Logf
+// is told of the fault before the request waits, so it is where the test
+// closes the store and then lifts the rule. The request picks among what
+// it has to wait for at random, hence the rounds.
+func TestBlockClosedBeforeLifted(t *testing.T) {
+	for range 100 {
+		var store atomic.Pointer[Server]
+		var once sync.Once
+		closed := make(chan struct{})
+		s, c := newStore(t, Options{Logf: func(string, ...any) {
+			once.Do(func() {
+				s := store.Load()
+				// Close returns once the request is done with, so it is
+				// not waited for here; the store is closed when done is.
+				go func() {
+					_ = s.Close()
+					close(closed)
+				}()
+				<-s.done
+				s.ClearRules()
+			})
+		}})
+		store.Store(s)
+		s.AddRule(Rule{Name: "b", Prob: 1, Action: Block, Ops: []Op{OpPut}})
+		if resp, _, err := c.do("PUT", "/b/k", []byte("x")); err == nil && resp.StatusCode == 200 {
+			t.Fatal("block: a held put was served by a store that had closed")
+		}
+		<-closed
+		if _, _, ok := s.Get("b", "k"); ok {
+			t.Fatal("block: a held put took effect though the store closed before its rule lifted")
+		}
 	}
 }
 

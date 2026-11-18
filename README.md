@@ -232,6 +232,21 @@ Guidelines that keep a service portable across the local and ssh backends:
   that hangs leaves the evidence of why. `Signal` also pauses and resumes a
   process (`SIGSTOP`, `SIGCONT`), the fault that makes a node go silent
   without dying.
+- **Keep a job's processes by name with `torx.Procs`.** A chaos test
+  crashes one process, pauses another, stops a third the way an operator
+  would, and starts each again later -- and at the end needs to know which
+  exited on their own. `torx.NewProcs(s.ServiceBase)` keeps them in named
+  slots: `Launch(ctx, name, n, cmd)` starts one through `StartCapturedAs`,
+  `Crash` kills it outright, `Terminate(ctx, name, policy)` stops it as
+  `torx.Stop` does (resuming it first if paused), `Pause` and `Resume`
+  `SIGSTOP` and `SIGCONT` it, and `Restart` and `Relaunch` start the slot
+  again with its last command or another. A process that exits without
+  `Procs` having stopped it is recorded -- `Exits()`, and `OnExit` as it
+  happens -- with the end of its log: a panic or a fatal error is a
+  finding even when nothing the job checked noticed. A process outlives
+  the context it was launched under, so a supervisor may restart one under
+  a context that ends long before the job; the service's `StopNode` calls
+  `Procs.StopNode` to stop what is left at teardown.
 - **One-shot commands** (a load generator that runs and exits) use
   `n.Exec(ctx, cmd)` instead of `StartCaptured`; it runs to completion and
   returns the captured `ExecResult` (exit code, stdout, stderr).
@@ -592,6 +607,21 @@ missed. `listappend.Forbidden(level)` says
 which kinds an isolation level -- serializable, snapshot isolation, read
 committed -- forbids.
 
+The [`prefixcheck`](prefixcheck/) package checks copies of a primary's
+history -- the backups, replicas, and restores of a database, a follower's
+copy of a leader's log -- against what the primary committed and what it
+acknowledged as copied. `prefixcheck.Check` reports a copy that is not a
+prefix of a sequence the primary committed (a state the primary never
+had), a copy of the latest state that lacks an entry a sync acknowledged
+before the copy was begun, and a copy that holds less than one of its
+group done before it began: restores of the latest state, or one
+follower's reads, going back in time. A failover starts a branch of
+history from the copy the new primary was restored from; an entry whose
+commit is in doubt may stand wherever a branch does not know what was
+committed. A copy already known to be wrong for a reason of the caller's
+is reported with it and compared to nothing else, so a known issue hides
+no other.
+
 **A store the job serves.** Some systems keep their data in an object
 store. The [`objstore`](objstore/) package is one a job runs in its worker:
 an in-memory server of the part of S3's HTTP API that object-store clients
@@ -603,7 +633,9 @@ bridge, or the interface facing a remote node. `AddRule` injects faults into
 the requests of the clients (told apart by the access key they sign with),
 operations, and key prefixes a rule names, with a probability: a failure or a
 reset before the request takes effect or after, a delay the client may give
-up on, a stall that lands after it did, a hang. `History` returns every
+up on, a stall that lands after it did, a hang, and a block -- a partition
+that heals: requests held until the rule is removed, and then served to the
+clients still waiting for them. `History` returns every
 request with the fault it got and what it did, and `WriteTar` archives the
 objects; both are final once `Close` returns, which waits out the requests
 in flight. [`objstore/cmd/objstore`](objstore/cmd/objstore/) serves one on its
