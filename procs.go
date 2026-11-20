@@ -105,6 +105,9 @@ type procSlot struct {
 	// Terminate wait for an in-flight Pause before sending SIGCONT) without
 	// holding p.mu across signal I/O.
 	pausing chan struct{}
+	// taken is created when a launch enters the slot and closed in takeLocked
+	// when it leaves, waking callers queued on pausing immediately.
+	taken chan struct{}
 	// closing is set once StopNode has taken the slot, to stop what it
 	// holds and forget it: it does not start again.
 	closing bool
@@ -117,6 +120,10 @@ type procSlot struct {
 // with outside the lock, and holds the slot until settleLocked.
 func (s *procSlot) takeLocked() {
 	s.proc, s.paused, s.pausing = nil, false, nil
+	if s.taken != nil {
+		close(s.taken)
+		s.taken = nil
+	}
 	s.settling = make(chan struct{})
 }
 
@@ -310,7 +317,7 @@ func (p *Procs) startSlot(ctx context.Context, s *procSlot, cmd Cmd, isNew bool)
 	s.cmd = cmd
 	s.launches++
 	launch := s.launches
-	s.proc, s.paused = tp, false
+	s.proc, s.paused, s.taken = tp, false, make(chan struct{})
 	s.settleLocked(nil)
 	p.mu.Unlock()
 	go p.watch(s, tp, launch, life.release)
@@ -486,9 +493,10 @@ func (p *Procs) setPaused(ctx context.Context, name string, paused bool) error {
 		sig = syscall.SIGSTOP
 	}
 	var (
-		s    *procSlot
-		tp   Process
-		done chan struct{}
+		s      *procSlot
+		tp     Process
+		target Process
+		done   chan struct{}
 	)
 	for {
 		p.mu.Lock()
@@ -498,12 +506,20 @@ func (p *Procs) setPaused(ctx context.Context, name string, paused bool) error {
 			p.mu.Unlock()
 			return err
 		}
+		if target == nil {
+			target = tp
+		} else if tp != target {
+			p.mu.Unlock()
+			return fmt.Errorf("torx: %s: %w", name, ErrNotRunning)
+		}
 		if s.pausing != nil {
-			wait := s.pausing
+			wait, taken := s.pausing, s.taken
 			p.mu.Unlock()
 			select {
 			case <-wait:
 				continue
+			case <-taken:
+				return fmt.Errorf("torx: %s: %w", name, ErrNotRunning)
 			case <-ctx.Done():
 				return fmt.Errorf("torx: %v to %s: %w", sig, name, context.Cause(ctx))
 			}

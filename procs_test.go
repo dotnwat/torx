@@ -1032,3 +1032,67 @@ func TestProcsTerminateWaitsForInFlightPause(t *testing.T) {
 	}
 	waitForLog(t, p.svc.CapturePath(n, "a"), "a got TERM")
 }
+
+// TestProcsCrashWakesQueuedPauseResume verifies that when one Pause is still
+// blocked in backend signaling, Crash wakes queued Pause/Resume callers
+// immediately with ErrNotRunning instead of leaving them blocked on the old
+// signal channel.
+func TestProcsCrashWakesQueuedPauseResume(t *testing.T) {
+	ctx := context.Background()
+	p, n, b := newLossyProcs(t)
+	if err := p.Launch(ctx, "a", n, sleeper("a")); err != nil {
+		t.Fatal(err)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "a"), "a up")
+	lp := b.last()
+
+	sigGate := make(chan struct{})
+	sigEntered := make(chan struct{}, 1)
+	lp.signalGate = sigGate
+	lp.signalEntered = sigEntered
+
+	// First Pause blocks inside Signal.
+	p1 := make(chan error, 1)
+	go func() { p1 <- p.Pause(ctx, "a") }()
+	<-sigEntered
+
+	// Queue a Pause and a Resume behind p1 with unbounded contexts.
+	p2 := make(chan error, 1)
+	go func() { p2 <- p.Pause(ctx, "a") }()
+	r1 := make(chan error, 1)
+	go func() { r1 <- p.Resume(ctx, "a") }()
+	time.Sleep(50 * time.Millisecond)
+
+	// Crash while p1 is still blocked in Signal.
+	if err := p.Crash(ctx, "a"); err != nil {
+		t.Fatalf("Crash: %v", err)
+	}
+
+	// Both queued callers must wake promptly with ErrNotRunning while sigGate
+	// is still closed.
+	for name, ch := range map[string]chan error{"p2": p2, "r1": r1} {
+		select {
+		case err := <-ch:
+			if !errors.Is(err, ErrNotRunning) {
+				t.Fatalf("%s = %v, want ErrNotRunning", name, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s remained blocked after Crash", name)
+		}
+	}
+
+	// A restarted process on the same slot can be paused without waiting on p1.
+	if err := p.Restart(ctx, "a"); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "a"), "a up")
+	if err := p.Pause(ctx, "a"); err != nil {
+		t.Fatalf("Pause on restarted process: %v", err)
+	}
+
+	close(sigGate)
+	<-p1
+	if err := p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+}
