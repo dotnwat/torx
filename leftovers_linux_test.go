@@ -181,4 +181,31 @@ func TestKillTaggedWith(t *testing.T) {
 			t.Errorf("killed = %d, want 1", killed)
 		}
 	})
+
+	t.Run("rescans after ESRCH to catch forked child", func(t *testing.T) {
+		procDir := t.TempDir()
+		writeProc(procDir, 100, workerTagEnv+"="+tag+"\x00")
+		var killedChild bool
+		killed, err := killTaggedWith(procDir, tag, 1, func(pid int) error {
+			switch pid {
+			case 100:
+				// Parent forked child 101 after ReadDir and exited before kill.
+				_ = os.RemoveAll(filepath.Join(procDir, "100"))
+				writeProc(procDir, 101, workerTagEnv+"="+tag+"\x00")
+				return syscall.ESRCH
+			case 101:
+				killedChild = true
+				_ = os.RemoveAll(filepath.Join(procDir, "101"))
+				return nil
+			default:
+				return syscall.ESRCH
+			}
+		}, time.Second, time.Millisecond)
+		if err != nil {
+			t.Fatalf("killTaggedWith: %v", err)
+		}
+		if !killedChild || killed != 1 {
+			t.Errorf("killedChild=%v killed=%d, want true and 1", killedChild, killed)
+		}
+	})
 }

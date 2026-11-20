@@ -99,6 +99,11 @@ type procSlot struct {
 	// has returned, or what the launch left has been killed and its exit
 	// recorded. It is closed then. The slot does not start again before.
 	settling chan struct{}
+	// pausing is non-nil while a Pause or Resume signal is in flight for this
+	// slot, and closed once that call finishes (or the slot is taken). It
+	// serializes concurrent Pause/Resume calls on the same slot without
+	// holding p.mu across signal I/O.
+	pausing chan struct{}
 	// closing is set once StopNode has taken the slot, to stop what it
 	// holds and forget it: it does not start again.
 	closing bool
@@ -111,6 +116,10 @@ type procSlot struct {
 // with outside the lock, and holds the slot until settleLocked.
 func (s *procSlot) takeLocked() {
 	s.proc, s.paused = nil, false
+	if s.pausing != nil {
+		close(s.pausing)
+		s.pausing = nil
+	}
 	s.settling = make(chan struct{})
 }
 
@@ -414,10 +423,10 @@ func (p *Procs) Terminate(ctx context.Context, name string, policy StopPolicy) (
 		p.mu.Unlock()
 		return false, err
 	}
-	paused := s.paused
+	needCont := s.paused || s.pausing != nil
 	s.takeLocked()
 	p.mu.Unlock()
-	if paused {
+	if needCont {
 		_ = tp.Signal(ctx, syscall.SIGCONT)
 	}
 	// Stop ends with the kill whatever went before, and its error does not
@@ -463,29 +472,55 @@ func (p *Procs) Resume(ctx context.Context, name string) error {
 }
 
 func (p *Procs) setPaused(ctx context.Context, name string, paused bool) error {
-	p.mu.Lock()
-	s, tp, err := p.running(name)
-	if err != nil {
-		p.mu.Unlock()
-		return err
-	}
-	if s.paused == paused {
-		p.mu.Unlock()
-		return nil
-	}
-	p.mu.Unlock()
 	sig := syscall.SIGCONT
 	if paused {
 		sig = syscall.SIGSTOP
 	}
-	if err := tp.Signal(ctx, sig); err != nil {
-		return fmt.Errorf("torx: %v to %s: %w", sig, name, err)
+	var (
+		s    *procSlot
+		tp   Process
+		done chan struct{}
+	)
+	for {
+		p.mu.Lock()
+		var err error
+		s, tp, err = p.running(name)
+		if err != nil {
+			p.mu.Unlock()
+			return err
+		}
+		if s.pausing != nil {
+			wait := s.pausing
+			p.mu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return fmt.Errorf("torx: %v to %s: %w", sig, name, context.Cause(ctx))
+			}
+		}
+		if s.paused == paused {
+			p.mu.Unlock()
+			return nil
+		}
+		done = make(chan struct{})
+		s.pausing = done
+		p.mu.Unlock()
+		break
 	}
+	err := tp.Signal(ctx, sig)
 	p.mu.Lock()
-	if s.proc == tp {
+	if err == nil && s.proc == tp {
 		s.paused = paused
 	}
+	if s.pausing == done {
+		close(done)
+		s.pausing = nil
+	}
 	p.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("torx: %v to %s: %w", sig, name, err)
+	}
 	return nil
 }
 

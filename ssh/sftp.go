@@ -8,7 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path"
+	"strings"
 
 	"github.com/pkg/sftp"
 
@@ -245,7 +245,14 @@ func sftpRemoveAll(sc *sftp.Client, p string) error {
 		if name == "." || name == ".." {
 			continue
 		}
-		if err := sftpRemoveAll(sc, path.Join(p, name)); err != nil {
+		// Append without path.Join/path.Clean so a caller path containing
+		// symlinks and ".." (e.g. /a/link/../target) keeps resolving children
+		// in the same directory ReadDir just listed.
+		child := p + "/" + name
+		if strings.HasSuffix(p, "/") {
+			child = p + name
+		}
+		if err := sftpRemoveAll(sc, child); err != nil {
 			return err
 		}
 	}

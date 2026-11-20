@@ -130,3 +130,46 @@ func TestBlockDeviceRelativeDir(t *testing.T) {
 		t.Errorf("blockDevice(\".\") = (%q, %v), want (%q, %v) matching %q", gotDev, gotErr, wantDev, wantErr, wd)
 	}
 }
+
+func TestCanonicalPathSymlinkParent(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := filepath.Join(root, "a")
+	b := filepath.Join(root, "b")
+	bSub := filepath.Join(b, "sub")
+	for _, d := range []string{a, bSub} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(a, "link")
+	if err := os.Symlink(bSub, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// Absolute path with symlink followed by "..": must resolve link before "..".
+	got, err := canonicalPath(link + "/..")
+	if err != nil || got != b {
+		t.Fatalf("canonicalPath(%q) = (%q, %v), want (%q, nil)", link+"/..", got, err, b)
+	}
+
+	// Relative path with symlink followed by "..".
+	t.Chdir(a)
+	got, err = canonicalPath("link/..")
+	if err != nil || got != b {
+		t.Fatalf("canonicalPath(\"link/..\") = (%q, %v), want (%q, nil)", got, err, b)
+	}
+	got, err = canonicalPath(".")
+	if err != nil || got != a {
+		t.Fatalf("canonicalPath(\".\") = (%q, %v), want (%q, nil)", got, err, a)
+	}
+
+	// Relative ".." from a cwd reached via a symlink.
+	t.Chdir(link)
+	got, err = canonicalPath("..")
+	if err != nil || got != b {
+		t.Fatalf("canonicalPath(\"..\") from symlink cwd = (%q, %v), want (%q, nil)", got, err, b)
+	}
+}

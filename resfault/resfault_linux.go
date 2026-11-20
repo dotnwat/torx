@@ -18,11 +18,7 @@ import (
 // parent whole disk via sysfs, because Linux cgroup v2 io.max rejects
 // partitions.
 func blockDevice(dir string) (string, error) {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return "", err
-	}
-	path, err := filepath.EvalSymlinks(abs)
+	path, err := canonicalPath(dir)
 	if err != nil {
 		return "", err
 	}
@@ -45,6 +41,32 @@ func blockDevice(dir string) (string, error) {
 		dev = fmt.Sprintf("%d:%d", unixMajor(st.Rdev), unixMinor(st.Rdev))
 	}
 	return wholeDisk("/sys", dev), nil
+}
+
+// canonicalPath returns the absolute, symlink-resolved path of dir without
+// lexically collapsing ".." before symlinks are resolved (which filepath.Abs
+// would do via filepath.Clean).
+func canonicalPath(dir string) (string, error) {
+	if dir == "" {
+		return "", os.ErrNotExist
+	}
+	target := dir
+	if !filepath.IsAbs(target) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		wd, err = filepath.EvalSymlinks(wd)
+		if err != nil {
+			return "", err
+		}
+		if wd == "/" {
+			target = "/" + target
+		} else {
+			target = wd + "/" + target
+		}
+	}
+	return filepath.EvalSymlinks(target)
 }
 
 // wholeDisk resolves dev ("major:minor") to its parent whole-disk device when

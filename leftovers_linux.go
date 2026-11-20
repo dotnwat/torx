@@ -64,7 +64,12 @@ func killTaggedWith(procDir, tag string, self int, kill func(int) error, timeout
 			if err := kill(pid); err == nil {
 				killed[pid] = struct{}{}
 				pending++
-			} else if !errors.Is(err, syscall.ESRCH) {
+			} else if errors.Is(err, syscall.ESRCH) {
+				// The process was present in this /proc snapshot and exited
+				// before SIGKILL reached it; rescan in case it forked a child
+				// after ReadDir.
+				pending++
+			} else {
 				failed[pid] = err
 			}
 		}

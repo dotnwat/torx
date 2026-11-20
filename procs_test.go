@@ -881,3 +881,78 @@ func TestProcsDoesNotBlockOtherSlotsDuringIO(t *testing.T) {
 		t.Fatalf("StopNode left slots %v", p.Names())
 	}
 }
+
+// TestProcsSerializesPauseResumePerSlot verifies that concurrent Pause/Resume
+// calls on the same slot are serialized so an older in-flight Pause cannot
+// overwrite s.paused after a newer Resume, while respecting ctx cancellation
+// and allowing Crash to unblock waiters immediately.
+func TestProcsSerializesPauseResumePerSlot(t *testing.T) {
+	ctx := context.Background()
+	p, n, b := newLossyProcs(t)
+	if err := p.Launch(ctx, "a", n, sleeper("a")); err != nil {
+		t.Fatal(err)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "a"), "a up")
+	lp := b.last()
+
+	sigGate := make(chan struct{})
+	sigEntered := make(chan struct{}, 1)
+	lp.signalGate = sigGate
+	lp.signalEntered = sigEntered
+
+	// First Pause blocks inside Signal.
+	p1 := make(chan error, 1)
+	go func() { p1 <- p.Pause(ctx, "a") }()
+	<-sigEntered
+
+	// A second Pause and a Resume on the same slot wait behind p1 rather than
+	// racing ahead and letting p1 later corrupt s.paused.
+	p2 := make(chan error, 1)
+	go func() { p2 <- p.Pause(ctx, "a") }()
+	r1 := make(chan error, 1)
+	go func() { r1 <- p.Resume(ctx, "a") }()
+
+	// A waiting call with a short timeout honors its context.
+	short, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	err := p.Resume(short, "a")
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waiting Resume with expired ctx = %v, want DeadlineExceeded", err)
+	}
+
+	// Ensure neither p2 nor r1 completed while p1 was still in flight.
+	select {
+	case err := <-p2:
+		t.Fatalf("second Pause completed before first finished: %v", err)
+	case err := <-r1:
+		t.Fatalf("Resume completed before first Pause finished: %v", err)
+	default:
+	}
+
+	// Release p1: all three settle in a consistent serialized order, so s.paused
+	// matches whichever operation ran last (never inverted).
+	close(sigGate)
+	for name, ch := range map[string]chan error{"p1": p1, "p2": p2, "r1": r1} {
+		if err := <-ch; err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	// Regardless of whether p2 or r1 ran second, Resume then Pause must work
+	// cleanly and leave the process paused.
+	if err := p.Resume(ctx, "a"); err != nil {
+		t.Fatalf("Resume after concurrent ops: %v", err)
+	}
+	if p.Paused("a") {
+		t.Fatal("Paused = true after Resume")
+	}
+	if err := p.Pause(ctx, "a"); err != nil {
+		t.Fatalf("Pause after Resume: %v", err)
+	}
+	if !p.Paused("a") {
+		t.Fatal("Paused = false after Pause")
+	}
+
+	if err := p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+}

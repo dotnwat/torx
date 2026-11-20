@@ -211,6 +211,47 @@ func TestRmRemovesDanglingSymlink(t *testing.T) {
 	}
 }
 
+// TestRmWithSymlinkParentTraversal checks that Rm on a path containing a
+// symlink followed by ".." deletes entries in the directory the symlink
+// actually points to, not in the lexically-cleaned parent path.
+func TestRmWithSymlinkParentTraversal(t *testing.T) {
+	b := dialBackend(t)
+	ctx := context.Background()
+	root := t.TempDir()
+
+	aTarget := filepath.Join(root, "a", "target")
+	bSub := filepath.Join(root, "b", "sub")
+	bTarget := filepath.Join(root, "b", "target")
+	for _, d := range []string{aTarget, bSub, bTarget} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keep := filepath.Join(aTarget, "keep.txt")
+	if err := os.WriteFile(keep, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(bTarget, "remove.txt")
+	if err := os.WriteFile(victim, []byte("remove"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "a", "link")
+	if err := os.Symlink(bSub, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build /root/a/link/../target without lexical cleaning.
+	if err := b.Rm(ctx, link+"/../target"); err != nil {
+		t.Fatalf("Rm(link/../target): %v", err)
+	}
+	if _, err := os.Lstat(bTarget); !os.IsNotExist(err) {
+		t.Errorf("b/target still exists after Rm: %v", err)
+	}
+	if got, err := os.ReadFile(keep); err != nil || string(got) != "keep" {
+		t.Fatalf("unrelated a/target/keep.txt damaged by Rm: %q, %v", got, err)
+	}
+}
+
 func TestSignalArg(t *testing.T) {
 	cases := []struct {
 		sig  syscall.Signal
