@@ -2,7 +2,11 @@
 
 package resfault
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestMountOf(t *testing.T) {
 	table := `22 1 0:21 / /proc rw - proc proc rw
@@ -63,5 +67,66 @@ func TestDeviceNumbers(t *testing.T) {
 		if unixMajor(tc.dev) != tc.major || unixMinor(tc.dev) != tc.minor {
 			t.Errorf("dev %#x: %d:%d, want %d:%d", tc.dev, unixMajor(tc.dev), unixMinor(tc.dev), tc.major, tc.minor)
 		}
+	}
+}
+
+func TestWholeDisk(t *testing.T) {
+	sys := t.TempDir()
+	// NVMe controller char device (238:0) -> whole disk nvme0n1 (259:0) -> partition nvme0n1p2 (259:2).
+	ctrlDir := filepath.Join(sys, "devices", "pci0", "nvme", "nvme0")
+	diskDir := filepath.Join(ctrlDir, "nvme0n1")
+	partDir := filepath.Join(diskDir, "nvme0n1p2")
+	dmDir := filepath.Join(sys, "devices", "virtual", "block", "dm-0")
+	blockDir := filepath.Join(sys, "dev", "block")
+	for _, d := range []string{partDir, dmDir, blockDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, content := range map[string]string{
+		filepath.Join(ctrlDir, "dev"):       "238:0\n",
+		filepath.Join(diskDir, "dev"):       "259:0\n",
+		filepath.Join(partDir, "dev"):       "259:2\n",
+		filepath.Join(partDir, "partition"): "2\n",
+		filepath.Join(dmDir, "dev"):         "252:0\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, target := range map[string]string{
+		"259:0": diskDir,
+		"259:2": partDir,
+		"252:0": dmDir,
+	} {
+		if err := os.Symlink(target, filepath.Join(blockDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cases := []struct {
+		dev, want string
+	}{
+		{"259:2", "259:0"}, // partition maps to parent whole disk
+		{"259:0", "259:0"}, // whole NVMe disk must NOT walk up to controller char dev 238:0
+		{"252:0", "252:0"}, // virtual dm device stays itself
+		{"99:9", "99:9"},   // missing sysfs entry falls back to input
+	}
+	for _, tc := range cases {
+		if got := wholeDisk(sys, tc.dev); got != tc.want {
+			t.Errorf("wholeDisk(%q) = %q, want %q", tc.dev, got, tc.want)
+		}
+	}
+}
+
+func TestBlockDeviceRelativeDir(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDev, wantErr := blockDevice(wd)
+	gotDev, gotErr := blockDevice(".")
+	if (gotErr != nil) != (wantErr != nil) || gotDev != wantDev {
+		t.Errorf("blockDevice(\".\") = (%q, %v), want (%q, %v) matching %q", gotDev, gotErr, wantDev, wantErr, wd)
 	}
 }

@@ -11,12 +11,18 @@ import (
 	"syscall"
 )
 
-// blockDevice returns the "major:minor" of the block device holding dir.
-// The filesystem mounted there names it, unless it names a device of its own
-// with no disk behind it -- btrfs, overlayfs -- in which case the mount's
-// source is looked at for the disk it is.
+// blockDevice returns the "major:minor" of the whole-disk block device holding
+// dir. The filesystem mounted there names it, unless it names a device of its
+// own with no disk behind it -- btrfs, overlayfs -- in which case the mount's
+// source is looked at for the disk it is. A partition device is resolved to its
+// parent whole disk via sysfs, because Linux cgroup v2 io.max rejects
+// partitions.
 func blockDevice(dir string) (string, error) {
-	path, err := filepath.EvalSymlinks(dir)
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	path, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		return "", err
 	}
@@ -28,14 +34,38 @@ func blockDevice(dir string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("no mount holds %s", dir)
 	}
+	var dev string
 	if !strings.HasPrefix(m.dev, "0:") {
-		return m.dev, nil
+		dev = m.dev
+	} else {
+		var st syscall.Stat_t
+		if err := syscall.Stat(m.source, &st); err != nil || st.Mode&syscall.S_IFMT != syscall.S_IFBLK {
+			return "", fmt.Errorf("%s is on %s (%s), which is not a block device", dir, m.source, m.fstype)
+		}
+		dev = fmt.Sprintf("%d:%d", unixMajor(st.Rdev), unixMinor(st.Rdev))
 	}
-	var st syscall.Stat_t
-	if err := syscall.Stat(m.source, &st); err != nil || st.Mode&syscall.S_IFMT != syscall.S_IFBLK {
-		return "", fmt.Errorf("%s is on %s (%s), which is not a block device", dir, m.source, m.fstype)
+	return wholeDisk("/sys", dev), nil
+}
+
+// wholeDisk resolves dev ("major:minor") to its parent whole-disk device when
+// sysfs marks dev as a partition. Non-partition devices (whole disks, dm/LVM,
+// loop) are returned unchanged.
+func wholeDisk(sysRoot, dev string) string {
+	resolved, err := filepath.EvalSymlinks(filepath.Join(sysRoot, "dev", "block", dev))
+	if err != nil {
+		return dev
 	}
-	return fmt.Sprintf("%d:%d", unixMajor(st.Rdev), unixMinor(st.Rdev)), nil
+	if _, err := os.Stat(filepath.Join(resolved, "partition")); err != nil {
+		return dev
+	}
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(resolved), "dev"))
+	if err != nil {
+		return dev
+	}
+	if parent := strings.TrimSpace(string(b)); parent != "" {
+		return parent
+	}
+	return dev
 }
 
 type mount struct{ point, dev, fstype, source string }
