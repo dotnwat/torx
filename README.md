@@ -398,6 +398,10 @@ its job is cancelled (a timeout, an interrupt) runs out is sent `SIGQUIT`,
 and killed shortly after, so a job stuck where cancellation cannot reach it
 leaves the stack of every goroutine there, to say where.
 
+What the driver itself has to say of a job ends the job's trace, as events
+of the component `driver`: that it failed the job for its worker, or that it
+killed processes the worker left running (Linux).
+
 Useful flags: `-nodes N` (local pool size), `-parallel N` (concurrent jobs),
 `-results <file>` (newline-delimited JSON results), `-results-dir <dir>` (the
 per-run tree; empty to disable), `-run-dir <dir>` (below), `-params <file>`

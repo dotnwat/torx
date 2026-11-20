@@ -352,6 +352,21 @@ func savedResult(t *testing.T, runDir, variant string) JobResult {
 	return res
 }
 
+// traceOf reads the two files of the trace of the variant in runDir.
+func traceOf(t *testing.T, runDir, variant string) (events, human string) {
+	t.Helper()
+	dir := filepath.Join(runDir, variantDirName(variant))
+	e, err := os.ReadFile(filepath.Join(dir, eventsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := os.ReadFile(filepath.Join(dir, testLogFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(e), string(h)
+}
+
 func init() {
 	Register("wtest.inherit", func() Job { return &wInheritJob{} })
 }

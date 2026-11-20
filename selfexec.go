@@ -26,6 +26,10 @@ const workerGracePeriod = 10 * time.Second
 // process it starts, with a tag of the launch's own.
 const workerTagEnv = "TORX_WORKER_TAG"
 
+// driverComponent is the component of the events the driver itself emits
+// of a job, as "worker" is of the worker's own.
+const driverComponent = "driver"
+
 // eventDrainGrace bounds how long Launch keeps draining the worker's event pipe
 // after the worker has exited. The drain normally ends at EOF the instant the
 // worker's write end closes; this grace only bites if a stray inherited copy of
@@ -64,6 +68,11 @@ var _ WorkerLauncher = SelfExecLauncher{}
 
 // Launch spawns a worker, sends it the assignment, forwards its events to sink,
 // and returns the job's result.
+//
+// What the driver has to say of the job -- that it failed it, or that it
+// killed processes the worker left running -- it emits to sink as events of
+// the component "driver", and, when the run persists results, appends to
+// the variant's trace.
 func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSink) (JobResult, error) {
 	path := l.Path
 	if path == "" {
@@ -202,33 +211,50 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	_ = eventR.Close()
 	r := <-waitCh
 	waitErr := r.err
-	if r.killed > 0 || r.killErr != nil {
-		msg := fmt.Sprintf("driver: killed %d processes the worker left running", r.killed)
-		if r.killErr != nil {
-			msg += ": " + r.killErr.Error()
-		}
-		sink.Emit(Event{Kind: EventLog, Time: time.Now(), Source: variantID(a.JobID, a.Params), Component: "driver", Level: "warn", Message: msg})
+	id := variantID(a.JobID, a.Params)
+
+	// What the driver itself has to say of the job goes where the worker's
+	// events did, and, the worker being gone, after them in the trace.
+	var said []Event
+	say := func(level, msg string) {
+		e := Event{Kind: EventLog, Time: time.Now(), Source: id, Component: driverComponent, Level: level, Message: msg}
+		sink.Emit(e)
+		said = append(said, e)
 	}
 
+	// amended is whether the result is no longer the one the worker wrote.
+	amended := false
 	if !haveResult {
 		// The worker died before reporting a result, so its teardown never
 		// completed: mark the node dirty so the driver quarantines it. waitErr is
 		// nil when the worker exited zero without ever sending a result.
-		err := errors.New("driver: worker produced no result")
+		err := errors.New("worker produced no result")
 		if waitErr != nil {
-			err = fmt.Errorf("driver: worker produced no result: %w", waitErr)
+			err = fmt.Errorf("worker produced no result: %w", waitErr)
 		}
-		result = failResult(variantID(a.JobID, a.Params), a.Params, err)
+		say("error", err.Error())
+		result = failResult(id, a.Params, fmt.Errorf("driver: %w", err))
 		result.Dirty = true
+		amended = true
 	}
+	if r.killed > 0 || r.killErr != nil {
+		msg := fmt.Sprintf("killed %d processes the worker left running", r.killed)
+		if r.killErr != nil {
+			msg += ": " + r.killErr.Error()
+		}
+		say("warn", msg)
+	}
+
 	// The worker's output not kept is a slice of the results tree not
-	// persisted, which the result says, as it says of its own files.
+	// persisted, which the result says, as it says of its own files; so is
+	// what the driver said, when the trace cannot take it.
 	note := func(err error) {
 		msg := "driver: " + err.Error()
 		if result.PersistErr != "" {
 			msg = result.PersistErr + "; " + msg
 		}
 		result.PersistErr = msg
+		amended = true
 	}
 	if outErr == nil {
 		if err := out.failure(); err != nil {
@@ -238,10 +264,15 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	if outErr != nil {
 		note(outErr)
 	}
+	if dir != "" && len(said) > 0 {
+		if err := appendTrace(dir, said); err != nil {
+			note(err)
+		}
+	}
 	// The worker wrote result.json before the driver had anything to add
 	// to it, and a worker that died wrote none: write the result as it
 	// stands, so that the variant's directory says what the run does.
-	if dir != "" && (outErr != nil || !haveResult) {
+	if dir != "" && amended {
 		if err := writeResultJSON(dir, result); err != nil {
 			note(err)
 		}

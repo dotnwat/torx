@@ -55,15 +55,17 @@ func alive(pid int) bool {
 
 // TestSelfExecLauncherKillsLeftovers: whatever a worker leaves running --
 // orphaned by a worker that exits, or by one killed outright -- is gone
-// once Launch returns, and the driver says so.
+// once Launch returns, and the driver says so: to the sink, and in the
+// job's trace, after what the worker wrote there.
 func TestSelfExecLauncherKillsLeftovers(t *testing.T) {
 	for _, die := range []bool{false, true} {
 		t.Run("die="+strconv.FormatBool(die), func(t *testing.T) {
 			pidfile := filepath.Join(t.TempDir(), "pid")
+			runDir := t.TempDir()
 			var sink InMemoryEventSink
 			launcher := SelfExecLauncher{Env: []string{"TORX_TEST_WORKER=1"}}
-			res, err := launcher.Launch(context.Background(),
-				Assignment{JobID: "wtest.leftover", Params: Params{"pidfile": pidfile, "die": die}}, &sink)
+			a := Assignment{JobID: "wtest.leftover", Params: Params{"pidfile": pidfile, "die": die}, Session: SessionConfig{ResultsDir: runDir}}
+			res, err := launcher.Launch(context.Background(), a, &sink)
 			if err != nil {
 				t.Fatalf("Launch: %v", err)
 			}
@@ -91,6 +93,27 @@ func TestSelfExecLauncherKillsLeftovers(t *testing.T) {
 			}
 			if !said {
 				t.Errorf("the driver did not say it killed the leftover; events %+v", sink.Events())
+			}
+			if res.PersistErr != "" {
+				t.Errorf("PersistErr = %q", res.PersistErr)
+			}
+			// A worker killed outright wrote no verdict; the driver's own
+			// comes first of what it adds.
+			want := []string{"bound 0 node(s)", "killed 1 processes the worker left running"}
+			if die {
+				want = []string{"bound 0 node(s)", "worker produced no result: signal: killed", "killed 1 processes the worker left running"}
+			}
+			events, human := traceOf(t, runDir, variantID(a.JobID, a.Params))
+			for name, trace := range map[string]string{eventsFile: events, testLogFile: human} {
+				rest := trace
+				for _, w := range want {
+					i := strings.Index(rest, w)
+					if i < 0 {
+						t.Errorf("%s does not say %q, in its turn:\n%s", name, w, trace)
+						break
+					}
+					rest = rest[i+len(w):]
+				}
 			}
 		})
 	}
