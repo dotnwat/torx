@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -180,6 +181,16 @@ func driverMain(args []string) int {
 		return 2
 	}
 
+	// The driver's warnings go to standard error by a duplicate of it, so
+	// that a console that is gone costs the warnings, which the trace has,
+	// and not the run.
+	console, err := dupConsole(os.Stderr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "torx:", err)
+		return 2
+	}
+	defer func() { _ = console.Close() }()
+
 	reporters := []Reporter{ConsoleReporter{W: os.Stdout}}
 	var resultsFile *os.File
 	if *resultsPath != "" {
@@ -201,7 +212,8 @@ func driverMain(args []string) int {
 	defer stop()
 
 	res := Run(ctx, pool, SelfExecLauncher{}, requests,
-		RunOptions{MaxParallel: *parallel, Reporters: reporters, ResultsDir: *resultsDir, RunDir: *runDir, Seed: seed})
+		RunOptions{MaxParallel: *parallel, Reporters: reporters, ResultsDir: *resultsDir, RunDir: *runDir, Seed: seed,
+			Sink: driverWarnings{w: console}})
 	ok := res.Ok()
 	if resultsFile != nil {
 		// The reporter has written every result by now; a close that fails is
@@ -215,6 +227,19 @@ func driverMain(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// driverWarnings prints the driver's own warnings of a job to w as they
+// come: that it killed processes a worker left running, say, which no result
+// carries. What the driver fails a job for is in the job's result, which the
+// reporters print, and what the job itself logs is in its trace. Each
+// warning is one write, so jobs running at once do not mix theirs on a file.
+type driverWarnings struct{ w io.Writer }
+
+func (d driverWarnings) Emit(e Event) {
+	if e.Kind == EventLog && e.Component == driverComponent && e.Level == "warn" {
+		_, _ = fmt.Fprintf(d.w, "torx: warning: %s: %s\n", e.Source, e.Message)
+	}
 }
 
 // selectPool builds the pool a run executes against: from a manifest file when

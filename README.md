@@ -400,7 +400,8 @@ leaves the stack of every goroutine there, to say where.
 
 What the driver itself has to say of a job ends the job's trace, as events
 of the component `driver`: that it failed the job for its worker, or that it
-killed processes the worker left running (Linux).
+killed processes the worker left running (Linux). The second is a warning no
+result carries, and is printed on standard error as well.
 
 Useful flags: `-nodes N` (local pool size), `-parallel N` (concurrent jobs),
 `-results <file>` (newline-delimited JSON results), `-results-dir <dir>` (the
