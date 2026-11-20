@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -84,6 +86,170 @@ func TestSelfExecLauncherJobFailure(t *testing.T) {
 	}
 	if res.Status != StatusFail {
 		t.Errorf("status = %v, want FAIL", res.Status)
+	}
+}
+
+// runThen is a launcher whose worker runs the job as any worker does and
+// then, its result reported, goes on to script: the worker is a shell that
+// runs the real one first. The shell holds the event pipe as well, so the
+// driver reads the result and still waits for the shell.
+func runThen(script string, args ...string) SelfExecLauncher {
+	return SelfExecLauncher{
+		Path: "/bin/sh",
+		Args: append([]string{"-c", `"$0" worker; ` + script, os.Args[0]}, args...),
+	}
+}
+
+// A worker that reports its result and then does not exit cleanly has not
+// run a job that passed, whatever it reported: the exit is all the driver
+// hears of a data race found, or of a panic in a goroutine the job left.
+// Its teardown ran, so its node is not dirty; and what the job itself
+// failed of is kept.
+func TestSelfExecLauncherFailsAnUncleanExit(t *testing.T) {
+	for _, tc := range []struct {
+		name, job, script string
+		want              []string // in the error
+		log               bool     // whether the worker leaves a worker.log to point to
+	}{
+		{"after a pass", "wtest.stderr", "exit 66", []string{"reported PASS", "exit status 66"}, true},
+		{"after a failure", "wtest.fail", "exit 66", []string{"boom", "reported FAIL", "exit status 66"}, false},
+		{"killed", "wtest.pass", "kill -KILL $$", []string{"reported PASS", "signal: killed"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runDir := t.TempDir()
+			var sink InMemoryEventSink
+			res, err := runThen(tc.script).Launch(context.Background(),
+				Assignment{JobID: tc.job, Session: SessionConfig{ResultsDir: runDir}}, &sink)
+			if err != nil {
+				t.Fatalf("Launch: %v", err)
+			}
+			if res.Status != StatusFail || res.Error == nil || res.Dirty || res.PersistErr != "" {
+				t.Fatalf("result = %+v (error %+v), want a failure that is neither dirty nor unpersisted", res, res.Error)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(res.Error.Message, want) {
+					t.Errorf("error = %q, want it to say %q", res.Error.Message, want)
+				}
+			}
+			if strings.Contains(res.Error.Message, workerLogFile) != tc.log {
+				t.Errorf("error = %q; that it points to %s should be %v", res.Error.Message, workerLogFile, tc.log)
+			}
+			// The result.json the worker wrote said otherwise.
+			if saved := savedResult(t, runDir, tc.job); saved.Status != StatusFail || saved.Error == nil || saved.Error.Message != res.Error.Message {
+				t.Errorf("result.json = %+v (error %+v), want the driver's result", saved, saved.Error)
+			}
+			// The driver says so where the worker's events went, and after
+			// them in the trace, which ended with the worker's verdict.
+			said := ""
+			for _, e := range sink.Events() {
+				if e.Component == driverComponent && e.Level == "error" {
+					said = e.Message
+				}
+			}
+			if !strings.Contains(said, "did not exit cleanly") || !strings.Contains(res.Error.Message, said) {
+				t.Errorf("the driver said %q of a result with the error %q", said, res.Error.Message)
+			}
+			events, human := traceOf(t, runDir, tc.job)
+			for name, trace := range map[string]string{eventsFile: events, testLogFile: human} {
+				// The verdict is "finished" as an event's kind, and FINISHED in the log.
+				if finished := strings.Index(strings.ToLower(trace), "finished"); finished < 0 || !strings.Contains(trace[finished:], "did not exit cleanly") {
+					t.Errorf("%s does not end with what the driver said:\n%s", name, trace)
+				}
+			}
+		})
+	}
+}
+
+// An exit the driver brought about is not held against a result the worker
+// had already reported: a cancellation that arrives as the job finishes
+// finds a worker that has passed, and signals it all the same.
+func TestSelfExecLauncherStoppedAfterItsResult(t *testing.T) {
+	reported := filepath.Join(t.TempDir(), "reported")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var sink InMemoryEventSink
+	var res JobResult
+	var err error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		res, err = runThen(`: > "$1"; sleep 60`, reported).Launch(ctx, Assignment{JobID: "wtest.pass"}, &sink)
+	}()
+	waitForFile(t, reported)
+	cancel()
+	<-done
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if res.Status != StatusPass || res.Error != nil || res.Dirty {
+		t.Errorf("result = %+v (error %+v), want the pass the worker reported", res, res.Error)
+	}
+	for _, e := range sink.Events() {
+		if e.Component == driverComponent {
+			t.Errorf("the driver said %q of a worker it stopped itself", e.Message)
+		}
+	}
+}
+
+func init() {
+	Register("wtest.racy", func() Job { return &wRacyJob{} })
+}
+
+// wRacyJob has a data race and nothing else wrong with it: Run returns nil.
+type wRacyJob struct{ JobBase }
+
+func (*wRacyJob) Declare(*JobContext) {}
+func (*wRacyJob) Run(context.Context, *JobContext) error {
+	var counter int
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			for range 1000 {
+				counter++ // unsynchronized, on purpose
+			}
+		})
+	}
+	wg.Wait()
+	_ = counter
+	return nil
+}
+
+// A suite built with -race fails a job that has a data race, and the run
+// with it. The race detector reports when the worker exits, after the job
+// has passed and said so, and has it exit 66: the driver hears of the race
+// in that alone.
+func TestDriverFailsADataRace(t *testing.T) {
+	if !raceEnabled {
+		t.Skip("the worker is this binary, which finds a data race only when built with -race")
+	}
+	dir := t.TempDir()
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(),
+		"TORX_TEST_DRIVER=1",
+		"TORX_TEST_DRIVER_ARGS=-results-dir "+filepath.Join(dir, "results")+" wtest.racy",
+		// The detector's defaults, whatever the environment asks of it: to
+		// go on past a race, and to exit 66 for it at the end.
+		"GORACE=",
+	)
+	out, err := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "WARNING: DATA RACE") {
+		t.Fatalf("the worker reported no data race, so the test shows nothing: %v\n%s", err, out)
+	}
+	if ee, ok := errors.AsType[*exec.ExitError](err); !ok || ee.ExitCode() != 1 {
+		t.Errorf("driver: %v, want exit status 1", err)
+	}
+	if !strings.Contains(string(out), "FAIL   wtest.racy") {
+		t.Errorf("the console does not report the job as failed:\n%s", out)
+	}
+	runDir := filepath.Join(dir, "results", "latest")
+	saved := savedResult(t, runDir, "wtest.racy")
+	if saved.Status != StatusFail || saved.Dirty || saved.Error == nil ||
+		!strings.Contains(saved.Error.Message, "reported PASS") || !strings.Contains(saved.Error.Message, "exit status 66") ||
+		!strings.Contains(saved.Error.Message, workerLogFile) {
+		t.Errorf("result.json = %+v (error %+v), want a failure for the exit, pointing to %s", saved, saved.Error, workerLogFile)
+	}
+	if log, err := os.ReadFile(filepath.Join(runDir, "wtest.racy", workerLogFile)); err != nil || !strings.Contains(string(log), "WARNING: DATA RACE") {
+		t.Errorf("%s (%v) does not hold the race report:\n%s", workerLogFile, err, log)
 	}
 }
 

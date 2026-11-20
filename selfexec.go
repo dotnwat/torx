@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -69,6 +70,13 @@ var _ WorkerLauncher = SelfExecLauncher{}
 // Launch spawns a worker, sends it the assignment, forwards its events to sink,
 // and returns the job's result.
 //
+// The result is the worker's, amended by what only the driver can know. A
+// worker that reported no result has failed its job and left its nodes
+// dirty. A worker that reported one and then did not exit cleanly, without
+// the driver having told it to stop, has failed its job too, whatever it
+// reported: a worker built with -race that found a data race exits non-zero
+// once the job is over. Its teardown ran, so its nodes are not dirty.
+//
 // What the driver has to say of the job -- that it failed it, or that it
 // killed processes the worker left running -- it emits to sink as events of
 // the component "driver", and, when the run persists results, appends to
@@ -114,7 +122,12 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	// Own process group so cancellation reaches the whole worker tree.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	exited := make(chan struct{})
+	// stopped is whether the driver told the worker to stop. How a worker
+	// exits after that -- of the signals here, or the kill that follows -- is
+	// the driver's doing.
+	var stopped atomic.Bool
 	cmd.Cancel = func() error {
+		stopped.Store(true)
 		// Ask the worker to stop gracefully so it can run teardown; WaitDelay
 		// escalates to a kill if it does not exit in time.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
@@ -224,7 +237,9 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 
 	// amended is whether the result is no longer the one the worker wrote.
 	amended := false
-	if !haveResult {
+	exitErr, unclean := errors.AsType[*exec.ExitError](waitErr)
+	switch {
+	case !haveResult:
 		// The worker died before reporting a result, so its teardown never
 		// completed: mark the node dirty so the driver quarantines it. waitErr is
 		// nil when the worker exited zero without ever sending a result.
@@ -235,6 +250,27 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 		say("error", err.Error())
 		result = failResult(id, a.Params, fmt.Errorf("driver: %w", err))
 		result.Dirty = true
+		amended = true
+	case unclean && !stopped.Load():
+		// The worker said how the job went, and then did not exit as one
+		// whose job is over does: the race detector reports when the process
+		// ends and has it exit non-zero, and a goroutine the job left running
+		// can still panic. The result stands for the node, whose teardown
+		// ran, and not for the job. An exit after the driver told the worker
+		// to stop is the driver's doing, by its signal or the kill that
+		// follows, and is not held against a result already reported.
+		msg := fmt.Sprintf("worker reported %s and then did not exit cleanly: %v", result.Status, exitErr)
+		if out.kept() {
+			msg += "; see " + workerLogFile
+		}
+		say("error", msg)
+		if result.Status == StatusFail && result.Error != nil {
+			// Keep the job's own failure, which came first.
+			result.Error.Message += "; driver: " + msg
+		} else {
+			result.Status = StatusFail
+			result.Error = &ErrorInfo{Message: "driver: " + msg}
+		}
 		amended = true
 	}
 	if r.killed > 0 || r.killErr != nil {
@@ -432,6 +468,16 @@ func (w *workerOutput) close() {
 			_ = f.Close()
 		}
 	}
+}
+
+// kept reports whether worker.log holds anything, which a file that
+// outlasts the launch does.
+func (w *workerOutput) kept() bool {
+	if w == nil {
+		return false
+	}
+	fi, err := w.file.Stat()
+	return err == nil && fi.Size() > 0
 }
 
 // failure is why worker.log is incomplete, if it is.

@@ -398,6 +398,13 @@ its job is cancelled (a timeout, an interrupt) runs out is sent `SIGQUIT`,
 and killed shortly after, so a job stuck where cancellation cannot reach it
 leaves the stack of every goroutine there, to say where.
 
+A worker that reports its job's result and then does not exit cleanly has
+failed the job, whatever it reported, unless the driver had told it to stop.
+That is how a data race fails a job in a suite built with `-race`: the race
+detector reports when the worker ends, after the job has finished and may
+well have passed, and has the worker exit non-zero. The report is in
+`worker.log`, and the nodes are not held to be dirty, since teardown ran.
+
 What the driver itself has to say of a job ends the job's trace, as events
 of the component `driver`: that it failed the job for its worker, or that it
 killed processes the worker left running (Linux). The second is a warning no
@@ -672,6 +679,9 @@ func TestSmoke(t *testing.T) {
 	//     assert res.Ok() and inspect the collected results tree ...
 }
 ```
+
+Under `go test -race` the worker is built with the race detector as the test
+is, so a data race in a job, service, or checker fails the job it ran in.
 
 Everything else is ordinary Go unit-testable, and should be: the pure
 functions a service and job are built from, such as readiness predicates,
