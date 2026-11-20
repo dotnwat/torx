@@ -100,8 +100,9 @@ type procSlot struct {
 	// recorded. It is closed then. The slot does not start again before.
 	settling chan struct{}
 	// pausing is non-nil while a Pause or Resume signal is in flight for this
-	// slot, and closed once that call finishes (or the slot is taken). It
-	// serializes concurrent Pause/Resume calls on the same slot without
+	// slot, and closed by setPaused once its Signal call returns. It
+	// serializes concurrent Pause/Resume calls on the same slot (and lets
+	// Terminate wait for an in-flight Pause before sending SIGCONT) without
 	// holding p.mu across signal I/O.
 	pausing chan struct{}
 	// closing is set once StopNode has taken the slot, to stop what it
@@ -115,11 +116,7 @@ type procSlot struct {
 // takeLocked takes the slot's process out of it, for the caller to finish
 // with outside the lock, and holds the slot until settleLocked.
 func (s *procSlot) takeLocked() {
-	s.proc, s.paused = nil, false
-	if s.pausing != nil {
-		close(s.pausing)
-		s.pausing = nil
-	}
+	s.proc, s.paused, s.pausing = nil, false, nil
 	s.settling = make(chan struct{})
 }
 
@@ -423,10 +420,22 @@ func (p *Procs) Terminate(ctx context.Context, name string, policy StopPolicy) (
 		p.mu.Unlock()
 		return false, err
 	}
-	needCont := s.paused || s.pausing != nil
+	paused := s.paused
+	inFlight := s.pausing
 	s.takeLocked()
 	p.mu.Unlock()
-	if needCont {
+	if inFlight != nil && policy.Grace > 0 {
+		// Wait for an in-flight Pause/Resume to finish before sending SIGCONT,
+		// so a delayed SIGSTOP cannot land after SIGCONT and freeze the
+		// process during its grace period.
+		waitCtx, cancel := context.WithTimeout(ctx, policy.Grace)
+		select {
+		case <-inFlight:
+		case <-waitCtx.Done():
+		}
+		cancel()
+	}
+	if paused || inFlight != nil {
 		_ = tp.Signal(ctx, syscall.SIGCONT)
 	}
 	// Stop ends with the kill whatever went before, and its error does not
@@ -514,9 +523,9 @@ func (p *Procs) setPaused(ctx context.Context, name string, paused bool) error {
 		s.paused = paused
 	}
 	if s.pausing == done {
-		close(done)
 		s.pausing = nil
 	}
+	close(done)
 	p.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("torx: %v to %s: %w", sig, name, err)

@@ -311,6 +311,8 @@ type lossyProc struct {
 	closeEntered  chan struct{}
 	signalGate    chan struct{}
 	signalEntered chan struct{}
+	// onSignal, when non-nil, runs before Process.Signal.
+	onSignal func(ctx context.Context, sig os.Signal)
 }
 
 func (p *lossyProc) isLost() bool {
@@ -363,6 +365,9 @@ func (p *lossyProc) Close() error {
 }
 
 func (p *lossyProc) Signal(ctx context.Context, sig os.Signal) error {
+	if p.onSignal != nil {
+		p.onSignal(ctx, sig)
+	}
 	if p.signalGate != nil {
 		if p.signalEntered != nil {
 			select {
@@ -955,4 +960,75 @@ func TestProcsSerializesPauseResumePerSlot(t *testing.T) {
 	if err := p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestProcsTerminateWaitsForInFlightPause verifies that Terminate waits for an
+// in-flight Pause to finish before sending SIGCONT and SIGTERM, so SIGSTOP
+// cannot land after SIGCONT and freeze the process through its grace period.
+func TestProcsTerminateWaitsForInFlightPause(t *testing.T) {
+	ctx := context.Background()
+	p, n, b := newLossyProcs(t)
+	if err := p.Launch(ctx, "a", n, sleeper("a")); err != nil {
+		t.Fatal(err)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "a"), "a up")
+	lp := b.last()
+
+	stopEntered := make(chan struct{}, 1)
+	releaseStop := make(chan struct{})
+	var mu sync.Mutex
+	var order []os.Signal
+	lp.onSignal = func(_ context.Context, sig os.Signal) {
+		if sig == syscall.SIGSTOP {
+			stopEntered <- struct{}{}
+			<-releaseStop
+		}
+		mu.Lock()
+		order = append(order, sig)
+		mu.Unlock()
+	}
+
+	paused := make(chan error, 1)
+	go func() { paused <- p.Pause(ctx, "a") }()
+	<-stopEntered
+
+	type termRes struct {
+		clean bool
+		err   error
+	}
+	termed := make(chan termRes, 1)
+	go func() {
+		clean, err := p.Terminate(ctx, "a", StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second})
+		termed <- termRes{clean, err}
+	}()
+
+	// Wait until Terminate has taken the slot, then verify SIGCONT/SIGTERM have
+	// not been sent while SIGSTOP is still in flight.
+	waitFor(t, "Terminate to take slot", func() bool { return !p.Running("a") })
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	early := len(order)
+	mu.Unlock()
+	if early != 0 {
+		t.Fatalf("Terminate sent signals %v while Pause's SIGSTOP was still in flight", order)
+	}
+
+	// Release SIGSTOP: Pause completes, then Terminate sends SIGCONT + SIGTERM
+	// and the process handles SIGTERM cleanly.
+	close(releaseStop)
+	if err := <-paused; err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	tr := <-termed
+	if tr.err != nil || !tr.clean {
+		t.Fatalf("Terminate = (%v, %v), want clean stop", tr.clean, tr.err)
+	}
+	mu.Lock()
+	got := append([]os.Signal(nil), order...)
+	mu.Unlock()
+	want := []os.Signal{syscall.SIGSTOP, syscall.SIGCONT, syscall.SIGTERM}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("signal order = %v, want %v", got, want)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "a"), "a got TERM")
 }
