@@ -72,18 +72,43 @@ type traceSink struct {
 	err error
 }
 
-// newTraceSink opens the trace files in dir.
+// newTraceSink opens the trace files in dir, starting each over.
 func newTraceSink(dir string) (*traceSink, error) {
-	events, err := os.Create(filepath.Join(dir, eventsFile))
+	return openTraceSink(dir, os.O_TRUNC)
+}
+
+// openTraceSink opens the trace files in dir for writing, creating one that
+// is not there; how adds os.O_TRUNC or os.O_APPEND.
+func openTraceSink(dir string, how int) (*traceSink, error) {
+	open := func(name string) (*os.File, error) {
+		return os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_CREATE|how, 0o666)
+	}
+	events, err := open(eventsFile)
 	if err != nil {
 		return nil, err
 	}
-	human, err := os.Create(filepath.Join(dir, testLogFile))
+	human, err := open(testLogFile)
 	if err != nil {
 		_ = events.Close()
 		return nil, err
 	}
 	return &traceSink{events: events, human: human, enc: json.NewEncoder(events)}, nil
+}
+
+// appendTrace adds events to the end of the trace in dir. It is how the
+// driver's own events of a job reach the job's trace: the worker, which wrote
+// the trace, is gone by the time the driver has anything to say of it. A
+// worker that died before it opened a trace left none, and the events start
+// one.
+func appendTrace(dir string, events []Event) error {
+	s, err := openTraceSink(dir, os.O_APPEND)
+	if err != nil {
+		return fmt.Errorf("results: trace: %w", err)
+	}
+	for _, e := range events {
+		s.Emit(e)
+	}
+	return s.Close()
 }
 
 // Emit appends the event to both trace files, retaining the first failure.

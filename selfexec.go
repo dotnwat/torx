@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -25,6 +26,10 @@ const workerGracePeriod = 10 * time.Second
 // workerTagEnv names the environment entry that tags a worker, and every
 // process it starts, with a tag of the launch's own.
 const workerTagEnv = "TORX_WORKER_TAG"
+
+// driverComponent is the component of the events the driver itself emits
+// of a job, as "worker" is of the worker's own.
+const driverComponent = "driver"
 
 // eventDrainGrace bounds how long Launch keeps draining the worker's event pipe
 // after the worker has exited. The drain normally ends at EOF the instant the
@@ -64,6 +69,18 @@ var _ WorkerLauncher = SelfExecLauncher{}
 
 // Launch spawns a worker, sends it the assignment, forwards its events to sink,
 // and returns the job's result.
+//
+// The result is the worker's, amended by what only the driver can know. A
+// worker that reported no result has failed its job and left its nodes
+// dirty. A worker that reported one and then did not exit cleanly, without
+// the driver having told it to stop, has failed its job too, whatever it
+// reported: a worker built with -race that found a data race exits non-zero
+// once the job is over. Its teardown ran, so its nodes are not dirty.
+//
+// What the driver has to say of the job -- that it failed it, or that it
+// killed processes the worker left running -- it emits to sink as events of
+// the component "driver", and, when the run persists results, appends to
+// the variant's trace.
 func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSink) (JobResult, error) {
 	path := l.Path
 	if path == "" {
@@ -105,7 +122,12 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	// Own process group so cancellation reaches the whole worker tree.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	exited := make(chan struct{})
+	// stopped is whether the driver told the worker to stop. How a worker
+	// exits after that -- of the signals here, or the kill that follows -- is
+	// the driver's doing.
+	var stopped atomic.Bool
 	cmd.Cancel = func() error {
+		stopped.Store(true)
 		// Ask the worker to stop gracefully so it can run teardown; WaitDelay
 		// escalates to a kill if it does not exit in time.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
@@ -202,33 +224,73 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	_ = eventR.Close()
 	r := <-waitCh
 	waitErr := r.err
-	if r.killed > 0 || r.killErr != nil {
-		msg := fmt.Sprintf("driver: killed %d processes the worker left running", r.killed)
-		if r.killErr != nil {
-			msg += ": " + r.killErr.Error()
-		}
-		sink.Emit(Event{Kind: EventLog, Time: time.Now(), Source: variantID(a.JobID, a.Params), Component: "driver", Level: "warn", Message: msg})
+	id := variantID(a.JobID, a.Params)
+
+	// What the driver itself has to say of the job goes where the worker's
+	// events did, and, the worker being gone, after them in the trace.
+	var said []Event
+	say := func(level, msg string) {
+		e := Event{Kind: EventLog, Time: time.Now(), Source: id, Component: driverComponent, Level: level, Message: msg}
+		sink.Emit(e)
+		said = append(said, e)
 	}
 
-	if !haveResult {
+	// amended is whether the result is no longer the one the worker wrote.
+	amended := false
+	exitErr, unclean := errors.AsType[*exec.ExitError](waitErr)
+	switch {
+	case !haveResult:
 		// The worker died before reporting a result, so its teardown never
 		// completed: mark the node dirty so the driver quarantines it. waitErr is
 		// nil when the worker exited zero without ever sending a result.
-		err := errors.New("driver: worker produced no result")
+		err := errors.New("worker produced no result")
 		if waitErr != nil {
-			err = fmt.Errorf("driver: worker produced no result: %w", waitErr)
+			err = fmt.Errorf("worker produced no result: %w", waitErr)
 		}
-		result = failResult(variantID(a.JobID, a.Params), a.Params, err)
+		say("error", err.Error())
+		result = failResult(id, a.Params, fmt.Errorf("driver: %w", err))
 		result.Dirty = true
+		amended = true
+	case unclean && !stopped.Load():
+		// The worker said how the job went, and then did not exit as one
+		// whose job is over does: the race detector reports when the process
+		// ends and has it exit non-zero, and a goroutine the job left running
+		// can still panic. The result stands for the node, whose teardown
+		// ran, and not for the job. An exit after the driver told the worker
+		// to stop is the driver's doing, by its signal or the kill that
+		// follows, and is not held against a result already reported.
+		msg := fmt.Sprintf("worker reported %s and then did not exit cleanly: %v", result.Status, exitErr)
+		if out.kept() {
+			msg += "; see " + workerLogFile
+		}
+		say("error", msg)
+		if result.Status == StatusFail && result.Error != nil {
+			// Keep the job's own failure, which came first.
+			result.Error.Message += "; driver: " + msg
+		} else {
+			result.Status = StatusFail
+			result.Error = &ErrorInfo{Message: "driver: " + msg}
+		}
+		amended = true
 	}
+	if r.killed > 0 || r.killErr != nil {
+		msg := fmt.Sprintf("killed %d processes the worker left running", r.killed)
+		if r.killErr != nil {
+			msg += ": " + r.killErr.Error()
+		}
+		say("warn", msg)
+	}
+
 	// The worker's output not kept is a slice of the results tree not
-	// persisted, which the result says, as it says of its own files.
+	// persisted, which the result says, as it says of its own files; so is
+	// what the driver said, when the trace cannot take it.
 	note := func(err error) {
 		msg := "driver: " + err.Error()
 		if result.PersistErr != "" {
 			msg = result.PersistErr + "; " + msg
 		}
 		result.PersistErr = msg
+		amended = true
 	}
 	if outErr == nil {
 		if err := out.failure(); err != nil {
@@ -238,10 +300,15 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	if outErr != nil {
 		note(outErr)
 	}
+	if dir != "" && len(said) > 0 {
+		if err := appendTrace(dir, said); err != nil {
+			note(err)
+		}
+	}
 	// The worker wrote result.json before the driver had anything to add
 	// to it, and a worker that died wrote none: write the result as it
 	// stands, so that the variant's directory says what the run does.
-	if dir != "" && (outErr != nil || !haveResult) {
+	if dir != "" && amended {
 		if err := writeResultJSON(dir, result); err != nil {
 			note(err)
 		}
@@ -401,6 +468,16 @@ func (w *workerOutput) close() {
 			_ = f.Close()
 		}
 	}
+}
+
+// kept reports whether worker.log holds anything, which a file that
+// outlasts the launch does.
+func (w *workerOutput) kept() bool {
+	if w == nil {
+		return false
+	}
+	fi, err := w.file.Stat()
+	return err == nil && fi.Size() > 0
 }
 
 // failure is why worker.log is incomplete, if it is.
