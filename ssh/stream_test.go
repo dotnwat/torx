@@ -220,6 +220,27 @@ func TestStreamFailedDirDoesNotFallThrough(t *testing.T) {
 	}
 }
 
+// TestStreamEarlyStderrDoesNotCorruptPGID verifies that stderr emitted right
+// after process startup cannot race ahead of stdout's TORX_PGID marker and
+// break the stream handshake, while still appearing in the combined stream.
+func TestStreamEarlyStderrDoesNotCorruptPGID(t *testing.T) {
+	b := dialBackend(t)
+	for i := range 10 {
+		stream, err := b.Stream(context.Background(), torx.Command("sh", "-c", "echo early-err >&2; echo ok"))
+		if err != nil {
+			t.Fatalf("iter %d: stream: %v", i, err)
+		}
+		out, err := io.ReadAll(stream)
+		_ = stream.Close()
+		if err != nil {
+			t.Fatalf("iter %d: read: %v", i, err)
+		}
+		if !strings.Contains(string(out), "early-err") || !strings.Contains(string(out), "ok") {
+			t.Fatalf("iter %d: output = %q, want both early-err and ok", i, out)
+		}
+	}
+}
+
 // TestStreamForwardsStdin is the regression for Stream silently dropping
 // Cmd.Stdin: Exec and the LocalBackend honor it, so StartCaptured's contract
 // requires Stream to as well. cat echoes its stdin, which the wrapper feeds to

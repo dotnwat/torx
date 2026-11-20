@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1024,10 +1025,10 @@ func TestProcsTerminateWaitsForInFlightPause(t *testing.T) {
 		t.Fatalf("Terminate = (%v, %v), want clean stop", tr.clean, tr.err)
 	}
 	mu.Lock()
-	got := append([]os.Signal(nil), order...)
+	got := slices.Clone(order)
 	mu.Unlock()
 	want := []os.Signal{syscall.SIGSTOP, syscall.SIGCONT, syscall.SIGTERM}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+	if !slices.Equal(got, want) {
 		t.Fatalf("signal order = %v, want %v", got, want)
 	}
 	waitForLog(t, p.svc.CapturePath(n, "a"), "a got TERM")
@@ -1091,7 +1092,7 @@ func TestProcsCrashWakesQueuedPauseResume(t *testing.T) {
 	}
 
 	close(sigGate)
-	<-p1
+	_ = <-p1
 	if err := p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}); err != nil {
 		t.Fatal(err)
 	}

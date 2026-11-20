@@ -273,28 +273,30 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (torx.Process, error
 	if err != nil {
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream session", err)
 	}
-	pr, pw, err := os.Pipe()
+	outR, outW, err := os.Pipe()
 	if err != nil {
 		_ = ch.Close()
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream", err)
 	}
-	s := &sshStream{backend: b, ch: ch, pr: pr, exited: make(chan struct{}), done: make(chan struct{})}
+	s := &sshStream{backend: b, ch: ch, exited: make(chan struct{}), done: make(chan struct{})}
 	// Watch the session's requests from the start: the exit report is one of
 	// them, and crypto/ssh delivers them on a bounded queue that stalls the
 	// whole connection if nobody drains it.
 	go s.watchRequests(reqs)
 	if err := s.exec(cmd); err != nil {
 		_ = ch.Close()
-		_ = pw.Close()
-		_ = pr.Close()
+		_ = outW.Close()
+		_ = outR.Close()
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, err)
 	}
-	// Copy the command's output into the pipe and close the write end once
-	// both streams have ended, so the reader sees EOF. This must start before
-	// reading the marker: if the remote dies before emitting it, that close is
-	// what unblocks readPGID with EOF instead of leaving it to block forever on
-	// a marker that will never arrive.
-	go s.copyOutput(pw)
+	// Copy only stdout into outW while reading the PGID marker so early stderr
+	// from the remote command (e.g. a failed cd or startup logs) cannot race
+	// ahead of the TORX_PGID line and corrupt the handshake. This must start
+	// before readPGID so an early remote exit closes outW and unblocks with EOF.
+	go func() {
+		_, _ = io.Copy(outW, s.ch)
+		_ = outW.Close()
+	}()
 	// Read the group id off the first line before handing back the stream, so
 	// Close knows what to kill. Bound that read by ctx -- a deadline or a plain
 	// cancellation -- with a watcher that trips an immediate read deadline once ctx
@@ -302,21 +304,28 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (torx.Process, error
 	// context carries no deadline of its own, so cancelling it must still unblock
 	// this read. Clear the deadline and stop the watcher afterward so neither
 	// affects the caller's reads over the stream's lifetime.
-	stopWatch := context.AfterFunc(ctx, func() { _ = pr.SetReadDeadline(time.Unix(1, 0)) })
-	br := bufio.NewReader(pr)
+	stopWatch := context.AfterFunc(ctx, func() { _ = outR.SetReadDeadline(time.Unix(1, 0)) })
+	br := bufio.NewReader(outR)
 	pgid, err := readPGID(br)
 	stopWatch()
-	_ = pr.SetReadDeadline(time.Time{})
+	_ = outR.SetReadDeadline(time.Time{})
 	if err != nil {
 		_ = ch.Close()
-		_ = pr.Close()
+		_ = outR.Close()
 		if ctx.Err() != nil {
 			return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, ctx.Err())
 		}
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, err)
 	}
-	s.r = br
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		_ = ch.Close()
+		_ = outR.Close()
+		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream", err)
+	}
+	s.pr = pr
 	s.pgid = pgid
+	go s.copyOutput(pw, br, outR)
 	// Match the LocalBackend, whose command dies with the context that started it:
 	// once Stream returns, nothing else watches ctx, so without this a cancelled
 	// run would leave the command running on the node. The watcher and Close share
@@ -334,7 +343,6 @@ type sshStream struct {
 	backend   *backend
 	ch        cryptossh.Channel
 	pr        *os.File
-	r         *bufio.Reader
 	pgid      int
 	stopWatch func() bool
 	once      sync.Once
@@ -418,19 +426,24 @@ func exitSignal(payload []byte) os.Signal {
 	return nil
 }
 
-// copyOutput copies the command's stdout and stderr into pw, interleaved as
-// they arrive, and closes pw once both have ended -- when the node has closed
-// the channel, or the connection has dropped.
-func (s *sshStream) copyOutput(pw *os.File) {
+// copyOutput merges the remainder of the command's stdout (already buffered in
+// stdout plus outR) and its stderr into pw, interleaved as they arrive, and
+// closes pw once both have ended -- when the node has closed the channel, or
+// the connection has dropped.
+func (s *sshStream) copyOutput(pw *os.File, stdout io.Reader, outR *os.File) {
 	var wg sync.WaitGroup
-	for _, r := range []io.Reader{s.ch, s.ch.Stderr()} {
-		wg.Go(func() { _, _ = io.Copy(pw, r) })
-	}
+	wg.Go(func() {
+		_, _ = io.Copy(pw, stdout)
+		_ = outR.Close()
+	})
+	wg.Go(func() {
+		_, _ = io.Copy(pw, s.ch.Stderr())
+	})
 	wg.Wait()
 	_ = pw.Close()
 }
 
-func (s *sshStream) Read(p []byte) (int, error) { return s.r.Read(p) }
+func (s *sshStream) Read(p []byte) (int, error) { return s.pr.Read(p) }
 
 // Signal sends sig to the remote command, by the pid the wrapper reported: the
 // command was exec'd in place, so that pid is the command's own, not a shell's.
