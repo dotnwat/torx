@@ -77,7 +77,7 @@ func killTaggedWith(procDir, tag string, self int, kill func(int) error, timeout
 			return len(killed), joinKillErrors(failed, nil)
 		}
 		if !time.Now().Before(deadline) {
-			return len(killed), joinKillErrors(failed, errors.New("torx: processes the worker left keep reappearing"))
+			return len(killed), joinKillErrors(failed, errors.New("torx: processes the worker left did not exit in time"))
 		}
 		time.Sleep(interval)
 	}

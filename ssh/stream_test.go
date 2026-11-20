@@ -269,6 +269,67 @@ func TestStreamLargeEarlyStderrDoesNotDeadlock(t *testing.T) {
 	}
 }
 
+// TestStreamHandshakeFailureIncludesStderr verifies that when readPGID fails
+// before seeing a marker, any stderr captured by the separate stderr drainer is
+// surfaced in the returned error.
+func TestStreamHandshakeFailureIncludesStderr(t *testing.T) {
+	b := dialBackendWith(t, func(s *testServer) {
+		s.silentExec = true
+		s.earlyStderr = []byte("sh: exec: not found\n")
+	})
+	stream, err := b.Stream(context.Background(), torx.Command("true"))
+	if err == nil {
+		_ = stream.Close()
+		t.Fatal("Stream succeeded when remote exited before marker")
+	}
+	if !strings.Contains(err.Error(), "sh: exec: not found") {
+		t.Errorf("Stream error = %v, want it to include remote stderr", err)
+	}
+}
+
+// TestStreamCloseDoesNotKillOverReconnectedClient verifies that once the SSH
+// connection a stream started on has dropped, Signal and Close do not send
+// signals for the old pgid over a freshly reconnected client (where a restarted
+// node/container may have reused that pid).
+func TestStreamCloseDoesNotKillOverReconnectedClient(t *testing.T) {
+	s := newTestServer(t)
+	be, err := build(s.descriptor(t))
+	if err != nil {
+		t.Fatalf("build backend: %v", err)
+	}
+	b := be.(*backend)
+	t.Cleanup(b.close)
+	ctx := context.Background()
+
+	pidfile := filepath.Join(t.TempDir(), "pid")
+	script := fmt.Sprintf("trap '' HUP TERM; echo $$ > %s; while true; do sleep 1; done", pidfile)
+	stream, err := b.Stream(ctx, torx.Command("sh", "-c", script))
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	pid := waitForPid(t, pidfile)
+	t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+
+	// Drop the original connection while keeping the server up, then force a
+	// reconnect on the backend with a fresh Exec.
+	s.dropConns()
+	if _, err := b.Exec(ctx, torx.Command("true")); err != nil {
+		t.Fatalf("Exec after drop: %v", err)
+	}
+
+	// Signal and Close on the old stream must fail on its dead original client
+	// rather than sending signals over the newly dialed client.
+	if err := stream.Signal(ctx, syscall.SIGTERM); !errors.Is(err, torx.ErrBackend) {
+		t.Errorf("Signal on dropped stream = %v, want ErrBackend", err)
+	}
+	if err := stream.Close(); !errors.Is(err, torx.ErrBackend) {
+		t.Errorf("Close on dropped stream = %v, want ErrBackend", err)
+	}
+	if !processAlive(pid) {
+		t.Errorf("pid %d was killed over the reconnected client", pid)
+	}
+}
+
 // TestStreamForwardsStdin is the regression for Stream silently dropping
 // Cmd.Stdin: Exec and the LocalBackend honor it, so StartCaptured's contract
 // requires Stream to as well. cat echoes its stdin, which the wrapper feeds to

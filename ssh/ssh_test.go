@@ -172,6 +172,21 @@ func TestRmDoesNotFollowDirectorySymlink(t *testing.T) {
 		t.Fatalf("target file damaged by Rm(directLink): %q, %v", got, err)
 	}
 
+	// Direct removal of a symlink to a directory with a trailing slash.
+	trailingLink := filepath.Join(root, "trailing-link")
+	if err := os.Symlink(target, trailingLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Rm(ctx, trailingLink+"/"); err != nil {
+		t.Fatalf("Rm(trailingLink/): %v", err)
+	}
+	if _, err := os.Lstat(trailingLink); !os.IsNotExist(err) {
+		t.Errorf("trailingLink still exists after Rm: %v", err)
+	}
+	if got, err := os.ReadFile(precious); err != nil || string(got) != "keep" {
+		t.Fatalf("target file damaged by Rm(trailingLink/): %q, %v", got, err)
+	}
+
 	// Recursive removal of a tree containing a symlink to a directory.
 	tree := filepath.Join(root, "tree")
 	if err := os.MkdirAll(tree, 0o755); err != nil {
@@ -295,25 +310,21 @@ func TestReconnectsAfterConnectionDrop(t *testing.T) {
 	}
 
 	// Drop the server side of the SSH connection while leaving the listener up.
+	// Immediate Exec and SFTP calls must evict the dead client synchronously
+	// and redial without waiting for client.Wait()'s background goroutine.
 	s.dropConns()
-
-	// Wait for the client's Wait goroutine to observe the close and evict the
-	// dead client, then confirm both Exec and SFTP work again on a fresh dial.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		b.mu.Lock()
-		evicted := b.client == nil && b.sftp == nil
-		b.mu.Unlock()
-		if evicted {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 	if _, err := b.Exec(ctx, torx.Command("true")); err != nil {
-		t.Fatalf("Exec after reconnect: %v", err)
+		t.Fatalf("Exec immediately after drop: %v", err)
 	}
 	if ok, err := b.Exists(ctx, dir); err != nil || !ok {
-		t.Fatalf("Exists after reconnect = (%v, %v), want (true, nil)", ok, err)
+		t.Fatalf("Exists after Exec reconnect = (%v, %v), want (true, nil)", ok, err)
+	}
+
+	// Drop again and verify an immediate SFTP call (before any Exec) also
+	// evicts the stale cached client and reconnects transparently.
+	s.dropConns()
+	if ok, err := b.Exists(ctx, dir); err != nil || !ok {
+		t.Fatalf("Exists immediately after drop = (%v, %v), want (true, nil)", ok, err)
 	}
 }
 

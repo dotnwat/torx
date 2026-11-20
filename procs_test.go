@@ -232,6 +232,8 @@ type lossyBackend struct {
 	streamGate chan struct{}
 	// streamEntered, if not nil, is signaled when Stream blocks on streamGate.
 	streamEntered chan struct{}
+	// panicStream, when true, makes Stream panic before launching.
+	panicStream atomic.Bool
 
 	mu    sync.Mutex
 	procs []*lossyProc
@@ -245,6 +247,9 @@ func (b *lossyBackend) setStreamGate(gate, entered chan struct{}) {
 }
 
 func (b *lossyBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
+	if b.panicStream.Load() {
+		panic("injected stream panic")
+	}
 	b.mu.Lock()
 	gate, entered := b.streamGate, b.streamEntered
 	b.mu.Unlock()
@@ -817,11 +822,8 @@ func TestProcsDoesNotBlockOtherSlotsDuringIO(t *testing.T) {
 	waitForLog(t, p.svc.CapturePath(n, "fast"), "fast up")
 
 	// 2. Pause on "slow" blocks in Signal; Pause/Resume on "fast" proceed.
+	// "fast" created its proc while "slow" was parked on streamGate, so b.last() is "slow".
 	slowProc := b.last()
-	// Find which proc is slow vs fast by checking order; slow finished after fast or before.
-	// Safer: gate whichever proc Pause("slow") hits by checking both? No, fast launched
-	// while slow was parked on streamGate, so fast created its proc first, then slow
-	// created its proc second -> b.last() is slow!
 	sigGate := make(chan struct{})
 	sigEntered := make(chan struct{}, 1)
 	slowProc.signalGate = sigGate
@@ -1097,5 +1099,110 @@ func TestProcsCrashWakesQueuedPauseResume(t *testing.T) {
 	}
 	if err := p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestProcsBackendPanicDoesNotWedgeStopNode verifies that a backend panic in
+// Launch, Pause, or Crash settles the slot via defer so StopNode during panic
+// recovery/teardown finishes promptly instead of deadlocking on settling/pausing.
+func TestProcsBackendPanicDoesNotWedgeStopNode(t *testing.T) {
+	ctx := context.Background()
+	p, n, b := newLossyProcs(t)
+
+	// 1. Panic during Launch.
+	b.panicStream.Store(true)
+	var panicking any
+	func() {
+		defer func() { panicking = recover() }()
+		_ = p.Launch(ctx, "a", n, sleeper("a"))
+	}()
+	if panicking == nil {
+		t.Fatal("expected Launch to panic")
+	}
+	b.panicStream.Store(false)
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second})
+	}()
+	select {
+	case err := <-stopDone:
+		if err == nil {
+			t.Fatal("StopNode after panicked Launch = nil, want error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StopNode deadlocked after panicked Launch")
+	}
+
+	// 2. Panic during Pause clears s.pausing so Terminate/StopNode do not stall.
+	if err := p.Launch(ctx, "b", n, sleeper("b")); err != nil {
+		t.Fatal(err)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "b"), "b up")
+	lp := b.last()
+	lp.onSignal = func(_ context.Context, sig os.Signal) {
+		if sig == syscall.SIGSTOP {
+			panic("injected signal panic")
+		}
+	}
+	panicking = nil
+	func() {
+		defer func() { panicking = recover() }()
+		_ = p.Pause(ctx, "b")
+	}()
+	if panicking == nil {
+		t.Fatal("expected Pause to panic")
+	}
+	lp.onSignal = nil
+	if err := p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}); err != nil {
+		t.Fatalf("StopNode after panicked Pause: %v", err)
+	}
+}
+
+// TestProcsOverlappingStopNodeDoesNotOrphanNewSlot verifies that when two
+// StopNode calls overlap and a new slot with the same name is launched after
+// the first finishes, the second StopNode neither terminates nor deletes the
+// newly launched slot.
+func TestProcsOverlappingStopNodeDoesNotOrphanNewSlot(t *testing.T) {
+	ctx := context.Background()
+	p, n, b := newLossyProcs(t)
+	if err := p.Launch(ctx, "a", n, sleeper("a")); err != nil {
+		t.Fatal(err)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "a"), "a up")
+	first := b.last()
+
+	closeGate := make(chan struct{})
+	closeEntered := make(chan struct{}, 1)
+	first.closeGate = closeGate
+	first.closeEntered = closeEntered
+
+	// StopNode #1 enters Terminate on slot1 and blocks in Close.
+	stop1 := make(chan error, 1)
+	go func() { stop1 <- p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}) }()
+	<-closeEntered
+
+	// StopNode #2 snapshots the same slot1 while slot1 is settling, and waits on
+	// slot1.settling.
+	stop2 := make(chan error, 1)
+	go func() { stop2 <- p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}) }()
+	time.Sleep(50 * time.Millisecond)
+
+	// Release slot1's Close; both StopNodes complete. Launch a new "a" as soon as
+	// stop1 finishes, and verify it stays tracked and running after stop2 returns.
+	close(closeGate)
+	if err := <-stop1; err != nil {
+		t.Fatalf("stop1: %v", err)
+	}
+	if err := p.Launch(ctx, "a", n, sleeper("a2")); err != nil {
+		t.Fatalf("Launch after stop1: %v", err)
+	}
+	if err := <-stop2; err != nil {
+		t.Fatalf("stop2: %v", err)
+	}
+	if !p.Running("a") {
+		t.Fatal("overlapping StopNode stopped or deleted the newly launched slot")
+	}
+	if err := p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}); err != nil {
+		t.Fatalf("final StopNode: %v", err)
 	}
 }

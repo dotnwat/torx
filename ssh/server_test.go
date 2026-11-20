@@ -271,8 +271,12 @@ func (s *testServer) serveSession(ch cryptossh.Channel, reqs <-chan *cryptossh.R
 			_ = cryptossh.Unmarshal(req.Payload, &payload)
 			_ = req.Reply(true, nil)
 			if s.silentExec {
-				// Accept the exec but produce no output and close, mimicking a
-				// remote that dies before printing the pgid marker.
+				// Accept the exec, optionally emit earlyStderr, then close with
+				// no stdout -- not even the pgid marker -- mimicking a remote
+				// that dies before printing the pgid marker.
+				if len(s.earlyStderr) > 0 {
+					_, _ = ch.Stderr().Write(s.earlyStderr)
+				}
 				sendExit(ch, 1)
 				_ = ch.Close()
 				continue

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/pkg/sftp"
+	cryptossh "golang.org/x/crypto/ssh"
 
 	"github.com/dotnwat/torx"
 )
@@ -18,65 +19,75 @@ import (
 // sftpClient returns the node's SFTP client, creating it over the SSH connection
 // on first use and reusing it thereafter. Creation honors ctx: negotiating the
 // subsystem is network I/O a wedged node could stall forever.
-func (b *backend) sftpClient(ctx context.Context) (*sftp.Client, error) {
-	client, err := b.conn(ctx)
-	if err != nil {
-		return nil, err
-	}
-	b.mu.Lock()
-	if b.sftp != nil {
-		sc := b.sftp
-		b.mu.Unlock()
-		return sc, nil
-	}
-	b.mu.Unlock()
-
-	// Create the client without holding b.mu: NewClient opens a channel and
-	// negotiates the SFTP subsystem (network I/O), which must not block other
-	// operations -- including close -- on a wedged node. Bound the negotiation by
-	// ctx: on cancellation return the context error, and close any client that
-	// still finishes so it is not leaked.
-	type result struct {
-		sc  *sftp.Client
-		err error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		sc, err := sftp.NewClient(client)
-		ch <- result{sc, err}
-	}()
-	select {
-	case <-ctx.Done():
-		go func() {
-			if r := <-ch; r.sc != nil {
-				_ = r.sc.Close()
-			}
-		}()
-		return nil, torx.Wrap(torx.ErrBackend, "ssh: sftp client", ctx.Err())
-	case r := <-ch:
-		if r.err != nil {
-			return nil, torx.Wrap(torx.ErrBackend, "ssh: sftp client", r.err)
+func (b *backend) sftpClient(ctx context.Context) (*sftp.Client, *cryptossh.Client, bool, error) {
+	for attempt := range 2 {
+		client, cached, err := b.conn(ctx)
+		if err != nil {
+			return nil, nil, false, err
 		}
 		b.mu.Lock()
-		if b.client != client {
-			// The SSH connection this SFTP client was opened on was evicted or
-			// replaced while we negotiated; never cache an SFTP client from a
-			// dead connection.
-			b.mu.Unlock()
-			_ = r.sc.Close()
-			return nil, torx.Wrap(torx.ErrBackend, "ssh: sftp client", errors.New("ssh connection closed"))
-		}
-		if b.sftp != nil {
-			// Another caller created one while we negotiated; keep theirs, drop ours.
+		if b.sftp != nil && b.client == client {
 			sc := b.sftp
 			b.mu.Unlock()
-			_ = r.sc.Close()
-			return sc, nil
+			return sc, client, true, nil
 		}
-		b.sftp = r.sc
 		b.mu.Unlock()
-		return r.sc, nil
+
+		// Create the client without holding b.mu: NewClient opens a channel and
+		// negotiates the SFTP subsystem (network I/O), which must not block other
+		// operations -- including close -- on a wedged node. Bound the negotiation by
+		// ctx: on cancellation return the context error, and close any client that
+		// still finishes so it is not leaked.
+		type result struct {
+			sc  *sftp.Client
+			err error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			sc, err := sftp.NewClient(client)
+			ch <- result{sc, err}
+		}()
+		select {
+		case <-ctx.Done():
+			go func() {
+				if r := <-ch; r.sc != nil {
+					_ = r.sc.Close()
+				}
+			}()
+			return nil, nil, false, torx.Wrap(torx.ErrBackend, "ssh: sftp client", ctx.Err())
+		case r := <-ch:
+			if r.err != nil {
+				if attempt == 0 && cached && !isChannelRejection(r.err) && ctx.Err() == nil {
+					b.evict(client)
+					continue
+				}
+				return nil, nil, false, torx.Wrap(torx.ErrBackend, "ssh: sftp client", r.err)
+			}
+			b.mu.Lock()
+			if b.client != client {
+				// The SSH connection this SFTP client was opened on was evicted or
+				// replaced while we negotiated; never cache an SFTP client from a
+				// dead connection.
+				b.mu.Unlock()
+				_ = r.sc.Close()
+				if attempt == 0 && ctx.Err() == nil {
+					continue
+				}
+				return nil, nil, false, torx.Wrap(torx.ErrBackend, "ssh: sftp client", errors.New("ssh connection closed"))
+			}
+			if b.sftp != nil {
+				// Another caller created one while we negotiated; keep theirs, drop ours.
+				sc := b.sftp
+				b.mu.Unlock()
+				_ = r.sc.Close()
+				return sc, client, true, nil
+			}
+			b.sftp = r.sc
+			b.mu.Unlock()
+			return r.sc, client, false, nil
+		}
 	}
+	return nil, nil, false, torx.Wrap(torx.ErrBackend, "ssh: sftp client", errors.New("ssh connection closed"))
 }
 
 // sftpDo runs fn against the node's SFTP client and makes it cancellable.
@@ -86,15 +97,23 @@ func (b *backend) sftpClient(ctx context.Context) (*sftp.Client, error) {
 // later operation -- notably teardown, which runs on a context detached from the
 // cancellation -- re-establishes a fresh one over the still-open SSH connection.
 func (b *backend) sftpDo(ctx context.Context, op string, fn func(*sftp.Client) error) error {
-	sc, err := b.sftpClient(ctx)
-	if err != nil {
-		return err
-	}
-	stop := context.AfterFunc(ctx, func() { b.closeSFTP(sc) })
-	defer stop()
-	if err := fn(sc); err != nil {
+	for attempt := range 2 {
+		sc, client, cached, err := b.sftpClient(ctx)
+		if err != nil {
+			return err
+		}
+		stop := context.AfterFunc(ctx, func() { b.closeSFTP(sc) })
+		err = fn(sc)
+		stop()
+		if err == nil {
+			return nil
+		}
 		if ctx.Err() != nil {
 			return torx.Wrap(torx.ErrBackend, "ssh: "+op, ctx.Err())
+		}
+		if attempt == 0 && cached && (errors.Is(err, sftp.ErrSSHFxConnectionLost) || errors.Is(err, io.EOF)) {
+			b.evict(client)
+			continue
 		}
 		return torx.Wrap(torx.ErrBackend, "ssh: "+op, err)
 	}
@@ -214,6 +233,12 @@ func (b *backend) Mkdir(ctx context.Context, path string) error {
 // to a directory is unlinked without deleting the target directory's contents,
 // and a dangling symlink is removed rather than treated as absent.
 func (b *backend) Rm(ctx context.Context, p string) error {
+	// Strip trailing slashes (preserving bare "/") so Lstat on a directory
+	// symlink with a trailing slash inspects the symlink itself instead of
+	// following it into the target directory, matching os.RemoveAll / LocalBackend.Rm.
+	for len(p) > 1 && strings.HasSuffix(p, "/") {
+		p = p[:len(p)-1]
+	}
 	return b.sftpDo(ctx, "rm", func(sc *sftp.Client) error {
 		return sftpRemoveAll(sc, p)
 	})

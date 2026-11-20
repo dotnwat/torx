@@ -92,21 +92,23 @@ type backend struct {
 
 var _ torx.Backend = (*backend)(nil)
 
-// conn returns the node's SSH client, dialing on first use. The dial and
-// handshake happen without holding b.mu -- both do network I/O and must not
-// block unrelated operations, including close/teardown, on a wedged node.
-func (b *backend) conn(ctx context.Context) (*cryptossh.Client, error) {
+// conn returns the node's SSH client, dialing on first use. cached reports
+// whether the returned client came from the cache (and may therefore have gone
+// stale before client.Wait() ran evict). The dial and handshake happen without
+// holding b.mu -- both do network I/O and must not block unrelated operations,
+// including close/teardown, on a wedged node.
+func (b *backend) conn(ctx context.Context) (*cryptossh.Client, bool, error) {
 	b.mu.Lock()
 	if b.client != nil {
 		c := b.client
 		b.mu.Unlock()
-		return c, nil
+		return c, true, nil
 	}
 	b.mu.Unlock()
 
 	client, err := b.dial(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	b.mu.Lock()
@@ -114,14 +116,22 @@ func (b *backend) conn(ctx context.Context) (*cryptossh.Client, error) {
 	if b.client != nil {
 		// Another caller connected while we dialed; keep theirs and drop ours.
 		_ = client.Close()
-		return b.client, nil
+		return b.client, true, nil
 	}
 	b.client = client
 	go func() {
 		_ = client.Wait()
 		b.evict(client)
 	}()
-	return client, nil
+	return client, false, nil
+}
+
+// isChannelRejection reports whether err is a peer-sent channel open rejection
+// (such as MaxSessions) over an otherwise live SSH connection, as opposed to a
+// dead transport that should be evicted and redialed.
+func isChannelRejection(err error) bool {
+	_, ok := errors.AsType[*cryptossh.OpenChannelError](err)
+	return ok
 }
 
 // evict drops client (and any SFTP client layered over it) from the cache once
@@ -196,14 +206,40 @@ func (b *backend) close() {
 // output. A non-zero remote exit is reported in ExecResult.ExitCode, matching
 // the Backend contract; only a transport failure returns an error.
 func (b *backend) Exec(ctx context.Context, cmd torx.Cmd) (torx.ExecResult, error) {
-	client, err := b.conn(ctx)
+	client, cached, err := b.conn(ctx)
 	if err != nil {
 		return torx.ExecResult{}, err
 	}
 	sess, err := client.NewSession()
+	if err != nil && cached && !isChannelRejection(err) && ctx.Err() == nil {
+		// The cached client died before client.Wait() reached evict; evict
+		// synchronously and retry once on a fresh dial.
+		b.evict(client)
+		client, _, err = b.conn(ctx)
+		if err != nil {
+			return torx.ExecResult{}, err
+		}
+		sess, err = client.NewSession()
+	}
 	if err != nil {
 		return torx.ExecResult{}, torx.Wrap(torx.ErrBackend, "ssh: session", err)
 	}
+	return execSession(ctx, sess, cmd)
+}
+
+// execOn runs cmd over a fresh session on a specific SSH client without
+// falling back to a reconnected client. Used by sshStream for Signal and
+// killGroup so a stale pgid from a dropped connection is never sent over a new
+// connection (where a restarted node/container may have reused that pid).
+func execOn(ctx context.Context, client *cryptossh.Client, cmd torx.Cmd) (torx.ExecResult, error) {
+	sess, err := client.NewSession()
+	if err != nil {
+		return torx.ExecResult{}, torx.Wrap(torx.ErrBackend, "ssh: session", err)
+	}
+	return execSession(ctx, sess, cmd)
+}
+
+func execSession(ctx context.Context, sess *cryptossh.Session, cmd torx.Cmd) (torx.ExecResult, error) {
 	defer func() { _ = sess.Close() }()
 
 	var stdout, stderr bytes.Buffer
@@ -265,11 +301,19 @@ const exitReportTimeout = 2 * time.Second
 // promptly on a signal would look like one still running until its children
 // were killed -- and Shutdown would report a timeout for a clean exit.
 func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (torx.Process, error) {
-	client, err := b.conn(ctx)
+	client, cached, err := b.conn(ctx)
 	if err != nil {
 		return nil, err
 	}
 	ch, reqs, err := client.OpenChannel("session", nil)
+	if err != nil && cached && !isChannelRejection(err) && ctx.Err() == nil {
+		b.evict(client)
+		client, _, err = b.conn(ctx)
+		if err != nil {
+			return nil, err
+		}
+		ch, reqs, err = client.OpenChannel("session", nil)
+	}
 	if err != nil {
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream session", err)
 	}
@@ -287,7 +331,7 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (torx.Process, error
 		_ = outR.Close()
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream", err)
 	}
-	s := &sshStream{backend: b, ch: ch, pr: pr, exited: make(chan struct{}), done: make(chan struct{})}
+	s := &sshStream{backend: b, client: client, ch: ch, pr: pr, exited: make(chan struct{}), done: make(chan struct{})}
 	// Watch the session's requests from the start: the exit report is one of
 	// them, and crypto/ssh delivers them on a bounded queue that stalls the
 	// whole connection if nobody drains it.
@@ -324,12 +368,23 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (torx.Process, error
 	stopWatch()
 	_ = outR.SetReadDeadline(time.Time{})
 	if err != nil {
+		if ctx.Err() == nil {
+			// Give any trailing stderr diagnostic from the failed wrapper a
+			// brief window to arrive before closing the channel.
+			select {
+			case <-errPipe.done:
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
 		_ = ch.Close()
 		_ = outR.Close()
 		_ = pw.Close()
 		_ = pr.Close()
 		if ctx.Err() != nil {
 			return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, ctx.Err())
+		}
+		if diag := errPipe.snippet(512); diag != "" {
+			err = fmt.Errorf("%w (stderr: %s)", err, diag)
 		}
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, err)
 	}
@@ -350,6 +405,7 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (torx.Process, error
 // way, through the shared teardown.
 type sshStream struct {
 	backend   *backend
+	client    *cryptossh.Client // the SSH connection this stream started on
 	ch        cryptossh.Channel
 	pr        *os.File
 	pgid      int
@@ -435,10 +491,17 @@ func exitSignal(payload []byte) os.Signal {
 	return nil
 }
 
+// maxEarlyStderr caps how much pre-marker stderr stderrPipe buffers in memory
+// while readPGID waits on stdout. Bytes beyond this cap are still drained from
+// the SSH channel (so the shared flow-control window never stalls) and
+// discarded.
+const maxEarlyStderr = 4 << 20
+
 // stderrPipe drains the channel's stderr from the moment exec starts so early
 // stderr cannot fill the shared SSH channel flow-control window while readPGID
-// waits on stdout. Bytes arriving before attach are buffered in memory, then
-// flushed in order once attach hands over the combined output pipe.
+// waits on stdout. Bytes arriving before attach are buffered in memory up to
+// maxEarlyStderr, then flushed in order once attach hands over the combined
+// output pipe.
 type stderrPipe struct {
 	mu        sync.Mutex
 	buf       bytes.Buffer
@@ -465,7 +528,9 @@ func startStderrDrain(r io.Reader) *stderrPipe {
 					_, _ = io.Copy(pw, r)
 					return
 				}
-				sp.buf.Write(chunk[:n])
+				if rem := maxEarlyStderr - sp.buf.Len(); rem > 0 {
+					sp.buf.Write(chunk[:min(n, rem)])
+				}
 				sp.mu.Unlock()
 			}
 			if err != nil {
@@ -474,6 +539,19 @@ func startStderrDrain(r io.Reader) *stderrPipe {
 		}
 	}()
 	return sp
+}
+
+// snippet returns up to maxBytes of trimmed pre-marker stderr captured so far,
+// for surfacing shell startup errors when readPGID fails.
+func (sp *stderrPipe) snippet(maxBytes int) string {
+	sp.mu.Lock()
+	raw := bytes.TrimSpace(sp.buf.Bytes())
+	if len(raw) > maxBytes {
+		raw = raw[:maxBytes]
+	}
+	out := string(raw)
+	sp.mu.Unlock()
+	return out
 }
 
 func (sp *stderrPipe) attach(pw *os.File) {
@@ -522,7 +600,7 @@ func (s *sshStream) Signal(ctx context.Context, sig os.Signal) error {
 		return torx.Wrap(torx.ErrBackend, "ssh: signal", os.ErrProcessDone)
 	default:
 	}
-	return s.backend.Signal(ctx, s.pgid, sig)
+	return signalOn(ctx, s.client, s.pgid, sig)
 }
 
 // Wait blocks until the node reports the command's exit or ctx is done. sshd
@@ -607,7 +685,7 @@ func (s *sshStream) teardown() error {
 		// must not hang it forever.
 		ctx, cancel := context.WithTimeout(context.Background(), killGroupTimeout)
 		defer cancel()
-		s.killErr = s.backend.killGroup(ctx, s.pgid)
+		s.killErr = killGroupOn(ctx, s.client, s.pgid)
 		if s.killErr == nil {
 			wctx, wcancel := context.WithTimeout(ctx, exitReportTimeout)
 			select {
@@ -623,25 +701,19 @@ func (s *sshStream) teardown() error {
 	return s.killErr
 }
 
-// killGroup SIGKILLs a remote process group over a fresh session and reports
-// whether the kill could be carried out. A transport failure -- an unreachable
-// node, a session that would not open, ctx running out -- is returned so the
-// caller can treat the node as not confirmed clean rather than silently reused.
-// Once the kill actually runs its exit status is not inspected: the group is
-// led by this stream's own command (see wrapForStream), so a non-zero exit
-// means the group is already gone, which is success for teardown. kill(1)
-// cannot distinguish that from other failures by exit code anyway, and its
-// diagnostic text is locale- and implementation-dependent, so relying on
-// either would be less reliable than the transport error the run-or-not
-// signal already provides.
-func (b *backend) killGroup(ctx context.Context, pgid int) error {
+// killGroupOn SIGKILLs a remote process group over a fresh session on client
+// (the connection the stream started on) and reports whether the kill could be
+// carried out. It deliberately does not reconnect if client has dropped: after
+// a node or container restart, pgid may have been reused by an unrelated
+// process, so an unconfirmed kill surfaces as ErrBackend instead.
+func killGroupOn(ctx context.Context, client *cryptossh.Client, pgid int) error {
 	if pgid < 2 {
 		// Never signal group 1 (every process the caller may signal) or 0 (the
 		// caller's own group). readPGID already rejects these, but Close must not
 		// turn a stray id into kill -KILL -1 either.
 		return nil
 	}
-	if _, err := b.Exec(ctx, torx.Command("kill", "-KILL", "-"+strconv.Itoa(pgid))); err != nil {
+	if _, err := execOn(ctx, client, torx.Command("kill", "-KILL", "-"+strconv.Itoa(pgid))); err != nil {
 		return torx.Wrap(torx.ErrBackend, "ssh: kill group", err)
 	}
 	return nil
@@ -733,19 +805,13 @@ func readPGID(r *bufio.Reader) (int, error) {
 // that pid crosses the wire from a node-side file, it is validated before use:
 // kill treats a non-positive operand as a process group or a broadcast, so a
 // stale or hostile pidfile holding 0 or -1 must never become "kill -KILL -1".
-// kill(1) takes the signal by number, so sig must be a syscall.Signal.
+// sig must be a syscall.Signal so signalArg can format its portable POSIX name.
 func (b *backend) Signal(ctx context.Context, pid int, sig os.Signal) error {
-	num, ok := sig.(syscall.Signal)
-	if !ok {
-		return torx.Wrap(torx.ErrBackend, "ssh: signal", fmt.Errorf("unsupported signal %v (%T)", sig, sig))
+	arg, err := validateSignal(pid, sig)
+	if err != nil {
+		return err
 	}
-	if pid < 2 {
-		// 1 is init, 0 is the caller's process group, and negatives target a group
-		// or every process the user may signal. Only a specific process is allowed,
-		// matching the pgid guard in killGroup and readPGID.
-		return torx.Wrap(torx.ErrBackend, "ssh: signal", fmt.Errorf("refusing to signal unsafe pid %d", pid))
-	}
-	res, err := b.Exec(ctx, torx.Command("kill", "-"+signalArg(num), strconv.Itoa(pid)))
+	res, err := b.Exec(ctx, torx.Command("kill", "-"+arg, strconv.Itoa(pid)))
 	if err != nil {
 		return err
 	}
@@ -753,6 +819,35 @@ func (b *backend) Signal(ctx context.Context, pid int, sig os.Signal) error {
 		return torx.Wrap(torx.ErrBackend, "ssh: signal", err)
 	}
 	return nil
+}
+
+func signalOn(ctx context.Context, client *cryptossh.Client, pid int, sig os.Signal) error {
+	arg, err := validateSignal(pid, sig)
+	if err != nil {
+		return err
+	}
+	res, err := execOn(ctx, client, torx.Command("kill", "-"+arg, strconv.Itoa(pid)))
+	if err != nil {
+		return err
+	}
+	if err := res.ExitError("kill"); err != nil {
+		return torx.Wrap(torx.ErrBackend, "ssh: signal", err)
+	}
+	return nil
+}
+
+func validateSignal(pid int, sig os.Signal) (string, error) {
+	num, ok := sig.(syscall.Signal)
+	if !ok {
+		return "", torx.Wrap(torx.ErrBackend, "ssh: signal", fmt.Errorf("unsupported signal %v (%T)", sig, sig))
+	}
+	if pid < 2 {
+		// 1 is init, 0 is the caller's process group, and negatives target a group
+		// or every process the user may signal. Only a specific process is allowed,
+		// matching the pgid guard in killGroupOn and readPGID.
+		return "", torx.Wrap(torx.ErrBackend, "ssh: signal", fmt.Errorf("refusing to signal unsafe pid %d", pid))
+	}
+	return signalArg(num), nil
 }
 
 // signalArg formats sig for POSIX kill(1): signal 0 (liveness probe) as "0",

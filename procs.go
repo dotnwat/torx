@@ -264,6 +264,19 @@ func (p *Procs) startSlot(ctx context.Context, s *procSlot, cmd Cmd, isNew bool)
 	// one of its own, which ctx ends only while the launch is under way.
 	life := newLifeContext(ctx)
 	stop := context.AfterFunc(ctx, func() { life.end(ctx.Err()) })
+	settled := false
+	defer func() {
+		if settled {
+			return
+		}
+		stop()
+		life.release()
+		p.mu.Lock()
+		// A backend panic may have started a process before unwinding, so
+		// settle with an unstopped error rather than wedging StopNode.
+		s.settleLocked(fmt.Errorf("torx: launch of %s panicked", s.name))
+		p.mu.Unlock()
+	}()
 	tp, err := p.svc.StartCapturedAs(life, s.node, s.name, cmd)
 	var unstopped error
 	if !stop() {
@@ -291,9 +304,10 @@ func (p *Procs) startSlot(ctx context.Context, s *procSlot, cmd Cmd, isNew bool)
 		p.mu.Lock()
 		// A Launch that failed leaves no slot, unless it left a process it
 		// could not kill or StopNode has already taken the slot.
-		if isNew && unstopped == nil && !s.closing {
+		if isNew && unstopped == nil && !s.closing && p.slots[s.name] == s {
 			delete(p.slots, s.name)
 		}
+		settled = true
 		s.settleLocked(unstopped)
 		p.mu.Unlock()
 		return err
@@ -310,6 +324,7 @@ func (p *Procs) startSlot(ctx context.Context, s *procSlot, cmd Cmd, isNew bool)
 			err = errors.Join(err, unstopped)
 		}
 		p.mu.Lock()
+		settled = true
 		s.settleLocked(unstopped)
 		p.mu.Unlock()
 		return err
@@ -318,6 +333,7 @@ func (p *Procs) startSlot(ctx context.Context, s *procSlot, cmd Cmd, isNew bool)
 	s.launches++
 	launch := s.launches
 	s.proc, s.paused, s.taken = tp, false, make(chan struct{})
+	settled = true
 	s.settleLocked(nil)
 	p.mu.Unlock()
 	go p.watch(s, tp, launch, life.release)
@@ -400,11 +416,20 @@ func (p *Procs) Crash(ctx context.Context, name string) error {
 	}
 	s.takeLocked()
 	p.mu.Unlock()
+	settled := false
+	defer func() {
+		if !settled {
+			p.mu.Lock()
+			s.settleLocked(fmt.Errorf("torx: crashing %s panicked", name))
+			p.mu.Unlock()
+		}
+	}()
 	var unstopped error
 	if err := tp.Close(); err != nil {
 		unstopped = fmt.Errorf("torx: crashing %s: %w", name, err)
 	}
 	p.mu.Lock()
+	settled = true
 	s.settleLocked(unstopped)
 	p.mu.Unlock()
 	return unstopped
@@ -422,15 +447,30 @@ func (p *Procs) Crash(ctx context.Context, name string) error {
 // failed: only then may it still run, and its slot refuses a Restart.
 func (p *Procs) Terminate(ctx context.Context, name string, policy StopPolicy) (clean bool, err error) {
 	p.mu.Lock()
-	s, tp, err := p.running(name)
+	s, _, err := p.running(name)
 	if err != nil {
 		p.mu.Unlock()
 		return false, err
 	}
+	return p.terminateLocked(ctx, s, policy)
+}
+
+// terminateLocked stops the running process in s. Caller holds p.mu and
+// s.proc != nil; terminateLocked releases p.mu.
+func (p *Procs) terminateLocked(ctx context.Context, s *procSlot, policy StopPolicy) (clean bool, err error) {
+	tp := s.proc
 	paused := s.paused
 	inFlight := s.pausing
 	s.takeLocked()
 	p.mu.Unlock()
+	settled := false
+	defer func() {
+		if !settled {
+			p.mu.Lock()
+			s.settleLocked(fmt.Errorf("torx: stopping %s panicked", s.name))
+			p.mu.Unlock()
+		}
+	}()
 	if inFlight != nil && policy.Grace > 0 {
 		// Wait for an in-flight Pause/Resume to finish before sending SIGCONT,
 		// so a delayed SIGSTOP cannot land after SIGCONT and freeze the
@@ -452,9 +492,10 @@ func (p *Procs) Terminate(ctx context.Context, name string, policy StopPolicy) (
 	timedOut := errors.Is(err, ErrShutdownTimeout)
 	var unstopped error
 	if stopping.err != nil {
-		unstopped = fmt.Errorf("torx: stopping %s: %w", name, stopping.err)
+		unstopped = fmt.Errorf("torx: stopping %s: %w", s.name, stopping.err)
 	}
 	p.mu.Lock()
+	settled = true
 	s.settleLocked(unstopped)
 	p.mu.Unlock()
 	if timedOut {
@@ -533,6 +574,17 @@ func (p *Procs) setPaused(ctx context.Context, name string, paused bool) error {
 		p.mu.Unlock()
 		break
 	}
+	cleaned := false
+	defer func() {
+		if !cleaned {
+			p.mu.Lock()
+			if s.pausing == done {
+				s.pausing = nil
+			}
+			close(done)
+			p.mu.Unlock()
+		}
+	}()
 	err := tp.Signal(ctx, sig)
 	p.mu.Lock()
 	if err == nil && s.proc == tp {
@@ -541,6 +593,7 @@ func (p *Procs) setPaused(ctx context.Context, name string, paused bool) error {
 	if s.pausing == done {
 		s.pausing = nil
 	}
+	cleaned = true
 	close(done)
 	p.mu.Unlock()
 	if err != nil {
@@ -669,9 +722,12 @@ func (p *Procs) StopNode(ctx context.Context, n *Node, policy StopPolicy) error 
 	p.mu.Unlock()
 	var errs []error
 	for _, s := range mine {
-		_, err := p.Terminate(ctx, s.name, policy)
-		if errors.Is(err, ErrNotRunning) {
-			err = nil
+		p.mu.Lock()
+		var err error
+		if s.proc != nil {
+			_, err = p.terminateLocked(ctx, s, policy)
+		} else {
+			p.mu.Unlock()
 		}
 		// A launch may be settling still -- in the grace period of a
 		// Terminate begun elsewhere, or having exited -- and its kill may
@@ -688,7 +744,9 @@ func (p *Procs) StopNode(ctx context.Context, n *Node, policy StopPolicy) error 
 		}
 		p.mu.Lock()
 		unstopped := s.unstopped
-		delete(p.slots, s.name)
+		if p.slots[s.name] == s {
+			delete(p.slots, s.name)
+		}
 		p.mu.Unlock()
 		// A kill that failed is said once: the slot keeps it with the
 		// process's name, and when it was this stop's kill, the stop's own
