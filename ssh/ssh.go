@@ -278,7 +278,16 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (torx.Process, error
 		_ = ch.Close()
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream", err)
 	}
-	s := &sshStream{backend: b, ch: ch, exited: make(chan struct{}), done: make(chan struct{})}
+	// Allocate the combined output pipe before launching the remote command so
+	// an EMFILE failure cannot leave an already-started remote process leaked.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		_ = ch.Close()
+		_ = outW.Close()
+		_ = outR.Close()
+		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream", err)
+	}
+	s := &sshStream{backend: b, ch: ch, pr: pr, exited: make(chan struct{}), done: make(chan struct{})}
 	// Watch the session's requests from the start: the exit report is one of
 	// them, and crypto/ssh delivers them on a bounded queue that stalls the
 	// whole connection if nobody drains it.
@@ -287,16 +296,21 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (torx.Process, error
 		_ = ch.Close()
 		_ = outW.Close()
 		_ = outR.Close()
+		_ = pw.Close()
+		_ = pr.Close()
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, err)
 	}
 	// Copy only stdout into outW while reading the PGID marker so early stderr
 	// from the remote command (e.g. a failed cd or startup logs) cannot race
-	// ahead of the TORX_PGID line and corrupt the handshake. This must start
-	// before readPGID so an early remote exit closes outW and unblocks with EOF.
+	// ahead of the TORX_PGID line and corrupt the handshake. Drain stderr into
+	// a separate buffer from the start too: stdout and stderr share the SSH
+	// channel's flow-control window, so leaving stderr unread during readPGID
+	// would deadlock if early stderr filled the window before the marker.
 	go func() {
 		_, _ = io.Copy(outW, s.ch)
 		_ = outW.Close()
 	}()
+	errPipe := startStderrDrain(s.ch.Stderr())
 	// Read the group id off the first line before handing back the stream, so
 	// Close knows what to kill. Bound that read by ctx -- a deadline or a plain
 	// cancellation -- with a watcher that trips an immediate read deadline once ctx
@@ -312,20 +326,15 @@ func (b *backend) Stream(ctx context.Context, cmd torx.Cmd) (torx.Process, error
 	if err != nil {
 		_ = ch.Close()
 		_ = outR.Close()
+		_ = pw.Close()
+		_ = pr.Close()
 		if ctx.Err() != nil {
 			return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, ctx.Err())
 		}
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream "+cmd.Path, err)
 	}
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		_ = ch.Close()
-		_ = outR.Close()
-		return nil, torx.Wrap(torx.ErrBackend, "ssh: stream", err)
-	}
-	s.pr = pr
 	s.pgid = pgid
-	go s.copyOutput(pw, br, outR)
+	go s.copyOutput(pw, br, outR, errPipe)
 	// Match the LocalBackend, whose command dies with the context that started it:
 	// once Stream returns, nothing else watches ctx, so without this a cancelled
 	// run would leave the command running on the node. The watcher and Close share
@@ -426,18 +435,73 @@ func exitSignal(payload []byte) os.Signal {
 	return nil
 }
 
+// stderrPipe drains the channel's stderr from the moment exec starts so early
+// stderr cannot fill the shared SSH channel flow-control window while readPGID
+// waits on stdout. Bytes arriving before attach are buffered in memory, then
+// flushed in order once attach hands over the combined output pipe.
+type stderrPipe struct {
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	pw        *os.File
+	streaming bool
+	done      chan struct{}
+}
+
+func startStderrDrain(r io.Reader) *stderrPipe {
+	sp := &stderrPipe{done: make(chan struct{})}
+	go func() {
+		defer close(sp.done)
+		var chunk [32 << 10]byte
+		for {
+			n, err := r.Read(chunk[:])
+			if n > 0 {
+				sp.mu.Lock()
+				if sp.streaming {
+					pw := sp.pw
+					sp.mu.Unlock()
+					if _, werr := pw.Write(chunk[:n]); werr != nil {
+						return
+					}
+					_, _ = io.Copy(pw, r)
+					return
+				}
+				sp.buf.Write(chunk[:n])
+				sp.mu.Unlock()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return sp
+}
+
+func (sp *stderrPipe) attach(pw *os.File) {
+	sp.mu.Lock()
+	sp.pw = pw
+	sp.streaming = true
+	// Flush buffered bytes under sp.mu so the drainer cannot write newer
+	// stderr bytes to pw ahead of them.
+	if sp.buf.Len() > 0 {
+		_, _ = io.Copy(pw, &sp.buf)
+		sp.buf.Reset()
+	}
+	sp.mu.Unlock()
+	<-sp.done
+}
+
 // copyOutput merges the remainder of the command's stdout (already buffered in
-// stdout plus outR) and its stderr into pw, interleaved as they arrive, and
-// closes pw once both have ended -- when the node has closed the channel, or
-// the connection has dropped.
-func (s *sshStream) copyOutput(pw *os.File, stdout io.Reader, outR *os.File) {
+// stdout plus outR) and its stderr (starting with any bytes buffered during
+// readPGID) into pw, interleaved as they arrive, and closes pw once both have
+// ended -- when the node has closed the channel, or the connection has dropped.
+func (s *sshStream) copyOutput(pw *os.File, stdout io.Reader, outR *os.File, errPipe *stderrPipe) {
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		_, _ = io.Copy(pw, stdout)
 		_ = outR.Close()
 	})
 	wg.Go(func() {
-		_, _ = io.Copy(pw, s.ch.Stderr())
+		errPipe.attach(pw)
 	})
 	wg.Wait()
 	_ = pw.Close()

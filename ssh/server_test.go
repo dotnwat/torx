@@ -81,6 +81,11 @@ type testServer struct {
 	// delayed, so the kill returns while the report is still pending.
 	exitDelay time.Duration
 
+	// earlyStderr, when non-empty, is written to the session's stderr before
+	// starting a streamed command, simulating login-shell or wrapper stderr
+	// arriving before the PGID marker.
+	earlyStderr []byte
+
 	mu    sync.Mutex
 	conns map[*cryptossh.ServerConn]struct{}
 }
@@ -318,6 +323,9 @@ func (s *testServer) serveSession(ch cryptossh.Channel, reqs <-chan *cryptossh.R
 func (s *testServer) serveExec(ch cryptossh.Channel, line string) {
 	streamed := strings.Contains(line, pgidMarker)
 	if streamed {
+		if len(s.earlyStderr) > 0 {
+			_, _ = ch.Stderr().Write(s.earlyStderr)
+		}
 		line = shapeStream(line, s.forkDepth)
 	}
 	cmd := exec.Command("sh", "-c", line)

@@ -1092,7 +1092,9 @@ func TestProcsCrashWakesQueuedPauseResume(t *testing.T) {
 	}
 
 	close(sigGate)
-	_ = <-p1
+	if err := <-p1; !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("p1 after Crash = %v, want os.ErrProcessDone", err)
+	}
 	if err := p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}); err != nil {
 		t.Fatal(err)
 	}

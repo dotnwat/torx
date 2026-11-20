@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -238,6 +239,33 @@ func TestStreamEarlyStderrDoesNotCorruptPGID(t *testing.T) {
 		if !strings.Contains(string(out), "early-err") || !strings.Contains(string(out), "ok") {
 			t.Fatalf("iter %d: output = %q, want both early-err and ok", i, out)
 		}
+	}
+}
+
+// TestStreamLargeEarlyStderrDoesNotDeadlock verifies that >2 MiB of stderr
+// arriving before the TORX_PGID marker (exceeding the SSH channel window) is
+// drained during readPGID without deadlocking and still delivered to the
+// caller after the handshake.
+func TestStreamLargeEarlyStderrDoesNotDeadlock(t *testing.T) {
+	payload := bytes.Repeat([]byte("e"), 3<<20)
+	b := dialBackendWith(t, func(s *testServer) { s.earlyStderr = payload })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := b.Stream(ctx, torx.Command("echo", "after-stderr"))
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	out, err := io.ReadAll(stream)
+	_ = stream.Close()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Contains(out, []byte("after-stderr")) {
+		t.Errorf("output missing stdout line (len=%d)", len(out))
+	}
+	if got := bytes.Count(out, []byte("e")); got < len(payload) {
+		t.Errorf("output has %d early stderr bytes, want at least %d", got, len(payload))
 	}
 }
 
