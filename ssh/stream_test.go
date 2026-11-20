@@ -190,6 +190,36 @@ func TestStreamHonorsDirAndEnv(t *testing.T) {
 	}
 }
 
+// TestStreamFailedDirDoesNotFallThrough is the regression for streamPrologue
+// missing "; exit $?" after eval "$c": when cd into Cmd.Dir failed, the shell
+// fell through to the setsid/perl isolation branches, printing a second
+// TORX_PGID marker into the command's output and exiting 0 if the fallback did.
+func TestStreamFailedDirDoesNotFallThrough(t *testing.T) {
+	b := dialBackend(t)
+	absent := filepath.Join(t.TempDir(), "does-not-exist")
+	stream, err := b.Stream(context.Background(), torx.Cmd{Path: "true", Dir: absent})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	defer stream.Close()
+	out, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	if strings.Contains(string(out), pgidMarker) {
+		t.Errorf("stream output contains duplicate pgid marker %q: %q", pgidMarker, out)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	code, err := stream.Wait(ctx)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if code == 0 {
+		t.Errorf("Wait exit code = 0 for missing Cmd.Dir, want non-zero")
+	}
+}
+
 // TestStreamForwardsStdin is the regression for Stream silently dropping
 // Cmd.Stdin: Exec and the LocalBackend honor it, so StartCaptured's contract
 // requires Stream to as well. cat echoes its stdin, which the wrapper feeds to

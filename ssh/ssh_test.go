@@ -140,6 +140,142 @@ func TestRmAbsentPathSucceeds(t *testing.T) {
 	}
 }
 
+// TestRmDoesNotFollowDirectorySymlink verifies that Rm unlinks directory
+// symlinks without recursing into their targets, matching os.RemoveAll and
+// rm -rf. pkg/sftp's RemoveAll uses Stat and would wipe the target directory.
+func TestRmDoesNotFollowDirectorySymlink(t *testing.T) {
+	b := dialBackend(t)
+	ctx := context.Background()
+	root := t.TempDir()
+
+	target := filepath.Join(root, "target")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	precious := filepath.Join(target, "keep.txt")
+	if err := os.WriteFile(precious, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Direct removal of a symlink to a directory.
+	directLink := filepath.Join(root, "direct-link")
+	if err := os.Symlink(target, directLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Rm(ctx, directLink); err != nil {
+		t.Fatalf("Rm(directLink): %v", err)
+	}
+	if _, err := os.Lstat(directLink); !os.IsNotExist(err) {
+		t.Errorf("directLink still exists after Rm: %v", err)
+	}
+	if got, err := os.ReadFile(precious); err != nil || string(got) != "keep" {
+		t.Fatalf("target file damaged by Rm(directLink): %q, %v", got, err)
+	}
+
+	// Recursive removal of a tree containing a symlink to a directory.
+	tree := filepath.Join(root, "tree")
+	if err := os.MkdirAll(tree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nestedLink := filepath.Join(tree, "nested-link")
+	if err := os.Symlink(target, nestedLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Rm(ctx, tree); err != nil {
+		t.Fatalf("Rm(tree): %v", err)
+	}
+	if _, err := os.Lstat(tree); !os.IsNotExist(err) {
+		t.Errorf("tree still exists after Rm: %v", err)
+	}
+	if got, err := os.ReadFile(precious); err != nil || string(got) != "keep" {
+		t.Fatalf("target file damaged by Rm(tree): %q, %v", got, err)
+	}
+}
+
+// TestRmRemovesDanglingSymlink verifies that Rm removes a broken symlink
+// instead of treating Stat's ENOENT as an absent path.
+func TestRmRemovesDanglingSymlink(t *testing.T) {
+	b := dialBackend(t)
+	ctx := context.Background()
+	root := t.TempDir()
+
+	dangling := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(root, "nowhere"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Rm(ctx, dangling); err != nil {
+		t.Fatalf("Rm(dangling): %v", err)
+	}
+	if _, err := os.Lstat(dangling); !os.IsNotExist(err) {
+		t.Errorf("dangling symlink still exists after Rm: %v", err)
+	}
+}
+
+func TestSignalArg(t *testing.T) {
+	cases := []struct {
+		sig  syscall.Signal
+		want string
+	}{
+		{0, "0"},
+		{syscall.SIGTERM, "TERM"},
+		{syscall.SIGKILL, "KILL"},
+		{syscall.SIGSTOP, "STOP"},
+		{syscall.SIGCONT, "CONT"},
+		{syscall.SIGUSR1, "USR1"},
+		{syscall.SIGQUIT, "QUIT"},
+	}
+	for _, tc := range cases {
+		if got := signalArg(tc.sig); got != tc.want {
+			t.Errorf("signalArg(%v) = %q, want %q", tc.sig, got, tc.want)
+		}
+	}
+}
+
+// TestReconnectsAfterConnectionDrop verifies that when the underlying SSH
+// connection drops (e.g. during a network fault or sshd restart), the dead
+// SSH and SFTP clients are evicted so subsequent operations redial cleanly.
+func TestReconnectsAfterConnectionDrop(t *testing.T) {
+	s := newTestServer(t)
+	be, err := build(s.descriptor(t))
+	if err != nil {
+		t.Fatalf("build backend: %v", err)
+	}
+	b := be.(*backend)
+	t.Cleanup(b.close)
+	ctx := context.Background()
+
+	// Establish both the SSH connection and the SFTP subsystem.
+	if _, err := b.Exec(ctx, torx.Command("true")); err != nil {
+		t.Fatalf("initial Exec: %v", err)
+	}
+	dir := t.TempDir()
+	if _, err := b.Exists(ctx, dir); err != nil {
+		t.Fatalf("initial Exists: %v", err)
+	}
+
+	// Drop the server side of the SSH connection while leaving the listener up.
+	s.dropConns()
+
+	// Wait for the client's Wait goroutine to observe the close and evict the
+	// dead client, then confirm both Exec and SFTP work again on a fresh dial.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		b.mu.Lock()
+		evicted := b.client == nil && b.sftp == nil
+		b.mu.Unlock()
+		if evicted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := b.Exec(ctx, torx.Command("true")); err != nil {
+		t.Fatalf("Exec after reconnect: %v", err)
+	}
+	if ok, err := b.Exists(ctx, dir); err != nil || !ok {
+		t.Fatalf("Exists after reconnect = (%v, %v), want (true, nil)", ok, err)
+	}
+}
+
 func TestSignal(t *testing.T) {
 	b := dialBackend(t)
 	// kill -0 against a live pid (this test process) succeeds; the point is that

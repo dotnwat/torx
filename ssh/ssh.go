@@ -117,7 +117,28 @@ func (b *backend) conn(ctx context.Context) (*cryptossh.Client, error) {
 		return b.client, nil
 	}
 	b.client = client
+	go func() {
+		_ = client.Wait()
+		b.evict(client)
+	}()
 	return client, nil
+}
+
+// evict drops client (and any SFTP client layered over it) from the cache once
+// the underlying SSH connection ends, so the next operation dials a fresh
+// connection instead of failing forever against a dead one.
+func (b *backend) evict(client *cryptossh.Client) {
+	b.mu.Lock()
+	var sc *sftp.Client
+	if b.client == client {
+		b.client = nil
+		sc = b.sftp
+		b.sftp = nil
+	}
+	b.mu.Unlock()
+	if sc != nil {
+		_ = sc.Close()
+	}
 }
 
 // dial opens a new SSH connection to the node. The TCP dial and the handshake
@@ -138,12 +159,17 @@ func (b *backend) dial(ctx context.Context) (*cryptossh.Client, error) {
 	}
 	stopWatch := context.AfterFunc(ctx, func() { _ = netConn.Close() })
 	sshConn, chans, reqs, err := cryptossh.NewClientConn(netConn, b.addr, b.clientCfg)
-	stopWatch()
+	if !stopWatch() {
+		// ctx ended during the handshake, so the watcher closed (or is closing)
+		// netConn; never return a client backed by a dying connection.
+		if sshConn != nil {
+			_ = sshConn.Close()
+		}
+		_ = netConn.Close()
+		return nil, torx.Wrap(torx.ErrBackend, "ssh: handshake "+b.addr, ctx.Err())
+	}
 	if err != nil {
 		_ = netConn.Close()
-		if ctx.Err() != nil {
-			return nil, torx.Wrap(torx.ErrBackend, "ssh: handshake "+b.addr, ctx.Err())
-		}
 		return nil, torx.Wrap(torx.ErrBackend, "ssh: handshake "+b.addr, err)
 	}
 	_ = netConn.SetDeadline(time.Time{})
@@ -578,7 +604,7 @@ func (b *backend) killGroup(ctx context.Context, pgid int) error {
 const streamPrologue = `if [ -r /proc/$$/stat ]; then s=$(cat /proc/$$/stat); s=${s##*\) }; set -- $s; pgid=$3; ` +
 	`else pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d " "); fi; ` +
 	`if [ -z "$pgid" ]; then echo "torx: cannot determine the process group of pid $$: the node has neither /proc nor ps"; exit 1; fi; ` +
-	`if [ "$pgid" = "$$" ]; then echo ` + pgidMarker + `$$; eval "$c"; fi; ` +
+	`if [ "$pgid" = "$$" ]; then echo ` + pgidMarker + `$$; eval "$c"; exit $?; fi; ` +
 	`if command -v setsid >/dev/null 2>&1; then exec setsid sh -c "echo ` + pgidMarker + `\$\$; $c"; fi; ` +
 	`if command -v perl >/dev/null 2>&1; then exec perl -e 'setpgrp(0,0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' -- sh -c "echo ` + pgidMarker + `\$\$; $c"; fi; ` +
 	`echo "torx: pid $$ shares process group $pgid with the sshd or a wrapper above it and cannot start one of its own:` +
@@ -642,7 +668,7 @@ func (b *backend) Signal(ctx context.Context, pid int, sig os.Signal) error {
 		// matching the pgid guard in killGroup and readPGID.
 		return torx.Wrap(torx.ErrBackend, "ssh: signal", fmt.Errorf("refusing to signal unsafe pid %d", pid))
 	}
-	res, err := b.Exec(ctx, torx.Command("kill", "-"+strconv.Itoa(int(num)), strconv.Itoa(pid)))
+	res, err := b.Exec(ctx, torx.Command("kill", "-"+signalArg(num), strconv.Itoa(pid)))
 	if err != nil {
 		return err
 	}
@@ -650,6 +676,20 @@ func (b *backend) Signal(ctx context.Context, pid int, sig os.Signal) error {
 		return torx.Wrap(torx.ErrBackend, "ssh: signal", err)
 	}
 	return nil
+}
+
+// signalArg formats sig for POSIX kill(1): signal 0 (liveness probe) as "0",
+// named signals by their portable POSIX name without the "SIG" prefix so a
+// signal sent across OSes (e.g. macOS to Linux) does not map to a different
+// number on the node, and any unnamed signal numerically.
+func signalArg(sig syscall.Signal) string {
+	if sig == 0 {
+		return "0"
+	}
+	if name := unix.SignalName(sig); name != "" {
+		return strings.TrimPrefix(name, "SIG")
+	}
+	return strconv.Itoa(int(sig))
 }
 
 // runToCompletion starts line on sess and waits for it, cancelling via a remote

@@ -80,6 +80,9 @@ type testServer struct {
 	// discarded with the channel. Exec sessions, the kill among them, are not
 	// delayed, so the kill returns while the report is still pending.
 	exitDelay time.Duration
+
+	mu    sync.Mutex
+	conns map[*cryptossh.ServerConn]struct{}
 }
 
 // newTestServer starts a server on the loopback and returns a handle whose
@@ -211,13 +214,36 @@ func (s *testServer) serve() {
 	}
 }
 
+func (s *testServer) dropConns() {
+	s.mu.Lock()
+	conns := make([]*cryptossh.ServerConn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
+	s.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+}
+
 func (s *testServer) handleConn(conn net.Conn) {
 	sshConn, chans, reqs, err := cryptossh.NewServerConn(conn, s.sc)
 	if err != nil {
 		_ = conn.Close()
 		return
 	}
-	defer func() { _ = sshConn.Close() }()
+	s.mu.Lock()
+	if s.conns == nil {
+		s.conns = map[*cryptossh.ServerConn]struct{}{}
+	}
+	s.conns[sshConn] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.conns, sshConn)
+		s.mu.Unlock()
+		_ = sshConn.Close()
+	}()
 	go cryptossh.DiscardRequests(reqs)
 	for nc := range chans {
 		if nc.ChannelType() != "session" {

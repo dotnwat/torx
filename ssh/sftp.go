@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 
 	"github.com/pkg/sftp"
 
@@ -57,13 +58,23 @@ func (b *backend) sftpClient(ctx context.Context) (*sftp.Client, error) {
 			return nil, torx.Wrap(torx.ErrBackend, "ssh: sftp client", r.err)
 		}
 		b.mu.Lock()
-		defer b.mu.Unlock()
+		if b.client != client {
+			// The SSH connection this SFTP client was opened on was evicted or
+			// replaced while we negotiated; never cache an SFTP client from a
+			// dead connection.
+			b.mu.Unlock()
+			_ = r.sc.Close()
+			return nil, torx.Wrap(torx.ErrBackend, "ssh: sftp client", errors.New("ssh connection closed"))
+		}
 		if b.sftp != nil {
 			// Another caller created one while we negotiated; keep theirs, drop ours.
+			sc := b.sftp
+			b.mu.Unlock()
 			_ = r.sc.Close()
-			return b.sftp, nil
+			return sc, nil
 		}
 		b.sftp = r.sc
+		b.mu.Unlock()
 		return r.sc, nil
 	}
 }
@@ -199,17 +210,47 @@ func (b *backend) Mkdir(ctx context.Context, path string) error {
 }
 
 // Rm removes a path on the node, recursively and without error if absent
-// (rm -rf).
-func (b *backend) Rm(ctx context.Context, path string) error {
+// (rm -rf). It inspects entries with Lstat rather than Stat so that a symlink
+// to a directory is unlinked without deleting the target directory's contents,
+// and a dangling symlink is removed rather than treated as absent.
+func (b *backend) Rm(ctx context.Context, p string) error {
 	return b.sftpDo(ctx, "rm", func(sc *sftp.Client) error {
-		// pkg/sftp's RemoveAll opens with a Stat and surfaces its error, so an
-		// absent path fails with ErrNotExist. A missing path is already in the
-		// desired state, not a failure -- absorb it to honor the rm -rf contract,
-		// as os.RemoveAll (and thus LocalBackend.Rm) already does. Without this,
-		// a service's pre-clean of not-yet-created data fails its first launch.
-		if err := sc.RemoveAll(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return sftpRemoveAll(sc, p)
+	})
+}
+
+func sftpRemoveAll(sc *sftp.Client, p string) error {
+	fi, err := sc.Lstat(p)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if !fi.IsDir() {
+		if err := sc.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 		return nil
-	})
+	}
+	entries, err := sc.ReadDir(p)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if name == "." || name == ".." {
+			continue
+		}
+		if err := sftpRemoveAll(sc, path.Join(p, name)); err != nil {
+			return err
+		}
+	}
+	if err := sc.RemoveDirectory(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
