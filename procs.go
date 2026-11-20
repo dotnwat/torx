@@ -133,19 +133,14 @@ func NewProcs(svc *ServiceBase) *Procs {
 // name must be a valid StartCapturedAs name.
 func (p *Procs) Launch(ctx context.Context, name string, n *Node, cmd Cmd) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if _, ok := p.slots[name]; ok {
+		p.mu.Unlock()
 		return fmt.Errorf("torx: process %s exists", name)
 	}
-	s := &procSlot{name: name, node: n, cmd: cmd}
-	err := p.startLocked(ctx, s)
-	// A launch that failed leaves no slot, unless it left a process it
-	// could not kill: that one may still run, so the name stays taken, and
-	// StopNode has its error to return.
-	if err == nil || s.unstopped != nil {
-		p.slots[name] = s
-	}
-	return err
+	s := &procSlot{name: name, node: n, cmd: cmd, settling: make(chan struct{})}
+	p.slots[name] = s
+	p.mu.Unlock()
+	return p.startSlot(ctx, s, cmd, true)
 }
 
 // Restart starts process name again, with the command it was last
@@ -156,8 +151,10 @@ func (p *Procs) Restart(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	defer p.mu.Unlock()
-	return p.startLocked(ctx, s)
+	cmd := s.cmd
+	s.settling = make(chan struct{})
+	p.mu.Unlock()
+	return p.startSlot(ctx, s, cmd, false)
 }
 
 // Relaunch starts process name again, on the same node, with cmd. It must
@@ -167,14 +164,9 @@ func (p *Procs) Relaunch(ctx context.Context, name string, cmd Cmd) error {
 	if err != nil {
 		return err
 	}
-	defer p.mu.Unlock()
-	old := s.cmd
-	s.cmd = cmd
-	if err := p.startLocked(ctx, s); err != nil {
-		s.cmd = old
-		return err
-	}
-	return nil
+	s.settling = make(chan struct{})
+	p.mu.Unlock()
+	return p.startSlot(ctx, s, cmd, false)
 }
 
 // lockStopped returns process name's slot once it can start again, with
@@ -251,12 +243,16 @@ func (c *lifeContext) end(err error) {
 // release ends the context of a process that is gone, or never was.
 func (c *lifeContext) release() { c.end(context.Canceled) }
 
-func (p *Procs) startLocked(ctx context.Context, s *procSlot) error {
+// startSlot launches cmd for s without holding p.mu, so a slow launch on one
+// node (a frozen cgroup, a partitioned ssh peer) does not block operations on
+// other slots. The caller has reserved s with a non-nil s.settling channel.
+func (p *Procs) startSlot(ctx context.Context, s *procSlot, cmd Cmd, isNew bool) error {
 	// The process dies with the context it was streamed under, so it gets
 	// one of its own, which ctx ends only while the launch is under way.
 	life := newLifeContext(ctx)
 	stop := context.AfterFunc(ctx, func() { life.end(ctx.Err()) })
-	tp, err := p.svc.StartCapturedAs(life, s.node, s.name, s.cmd)
+	tp, err := p.svc.StartCapturedAs(life, s.node, s.name, cmd)
+	var unstopped error
 	if !stop() {
 		// ctx ended while the launch was under way, and the launch's
 		// error is how ctx ended.
@@ -268,8 +264,8 @@ func (p *Procs) startLocked(ctx context.Context, s *procSlot) error {
 			// run, as after any kill that failed.
 			err = cause
 			if cerr := tp.Close(); cerr != nil {
-				s.unstopped = fmt.Errorf("torx: calling off the launch of %s: %w", s.name, cerr)
-				err = errors.Join(err, s.unstopped)
+				unstopped = fmt.Errorf("torx: calling off the launch of %s: %w", s.name, cerr)
+				err = errors.Join(err, unstopped)
 			}
 		case !errors.Is(err, cause):
 			// The backend's error says what it saw, which is not a cause
@@ -279,11 +275,39 @@ func (p *Procs) startLocked(ctx context.Context, s *procSlot) error {
 	}
 	if err != nil {
 		life.release()
+		p.mu.Lock()
+		// A Launch that failed leaves no slot, unless it left a process it
+		// could not kill or StopNode has already taken the slot.
+		if isNew && unstopped == nil && !s.closing {
+			delete(p.slots, s.name)
+		}
+		s.settleLocked(unstopped)
+		p.mu.Unlock()
 		return err
 	}
+	p.mu.Lock()
+	if s.closing {
+		// StopNode claimed the slot while StartCapturedAs was in flight:
+		// kill the process rather than leaving it running behind StopNode.
+		p.mu.Unlock()
+		life.release()
+		err = fmt.Errorf("torx: process %s is being stopped with its node", s.name)
+		if cerr := tp.Close(); cerr != nil {
+			unstopped = fmt.Errorf("torx: stopping %s: %w", s.name, cerr)
+			err = errors.Join(err, unstopped)
+		}
+		p.mu.Lock()
+		s.settleLocked(unstopped)
+		p.mu.Unlock()
+		return err
+	}
+	s.cmd = cmd
 	s.launches++
+	launch := s.launches
 	s.proc, s.paused = tp, false
-	go p.watch(s, tp, s.launches, life.release)
+	s.settleLocked(nil)
+	p.mu.Unlock()
+	go p.watch(s, tp, launch, life.release)
 	return nil
 }
 
@@ -356,17 +380,21 @@ func (p *Procs) running(name string) (*procSlot, Process, error) {
 // a process that dies without a chance to clean up.
 func (p *Procs) Crash(ctx context.Context, name string) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	s, tp, err := p.running(name)
 	if err != nil {
+		p.mu.Unlock()
 		return err
 	}
-	s.proc, s.paused = nil, false
+	s.takeLocked()
+	p.mu.Unlock()
+	var unstopped error
 	if err := tp.Close(); err != nil {
-		s.unstopped = fmt.Errorf("torx: crashing %s: %w", name, err)
-		return s.unstopped
+		unstopped = fmt.Errorf("torx: crashing %s: %w", name, err)
 	}
-	return nil
+	p.mu.Lock()
+	s.settleLocked(unstopped)
+	p.mu.Unlock()
+	return unstopped
 }
 
 // Terminate stops process name as policy says (Stop): a paused process is
@@ -436,14 +464,16 @@ func (p *Procs) Resume(ctx context.Context, name string) error {
 
 func (p *Procs) setPaused(ctx context.Context, name string, paused bool) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	s, tp, err := p.running(name)
 	if err != nil {
+		p.mu.Unlock()
 		return err
 	}
 	if s.paused == paused {
+		p.mu.Unlock()
 		return nil
 	}
+	p.mu.Unlock()
 	sig := syscall.SIGCONT
 	if paused {
 		sig = syscall.SIGSTOP
@@ -451,7 +481,11 @@ func (p *Procs) setPaused(ctx context.Context, name string, paused bool) error {
 	if err := tp.Signal(ctx, sig); err != nil {
 		return fmt.Errorf("torx: %v to %s: %w", sig, name, err)
 	}
-	s.paused = paused
+	p.mu.Lock()
+	if s.proc == tp {
+		s.paused = paused
+	}
+	p.mu.Unlock()
 	return nil
 }
 

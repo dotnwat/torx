@@ -227,12 +227,39 @@ type lossyBackend struct {
 	// unreachable makes a launch wait for its context to end and fail
 	// with the context's error, as one on a node out of reach does.
 	unreachable bool
+	// streamGate, if not nil, blocks Stream before launching until closed.
+	streamGate chan struct{}
+	// streamEntered, if not nil, is signaled when Stream blocks on streamGate.
+	streamEntered chan struct{}
 
 	mu    sync.Mutex
 	procs []*lossyProc
 }
 
+func (b *lossyBackend) setStreamGate(gate, entered chan struct{}) {
+	b.mu.Lock()
+	b.streamGate = gate
+	b.streamEntered = entered
+	b.mu.Unlock()
+}
+
 func (b *lossyBackend) Stream(ctx context.Context, cmd Cmd) (Process, error) {
+	b.mu.Lock()
+	gate, entered := b.streamGate, b.streamEntered
+	b.mu.Unlock()
+	if gate != nil {
+		if entered != nil {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+		}
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, Wrap(ErrBackend, "lossy: stream", ctx.Err())
+		}
+	}
 	if b.unreachable {
 		<-ctx.Done()
 		return nil, Wrap(ErrBackend, "lossy: stream", ctx.Err())
@@ -279,6 +306,11 @@ type lossyProc struct {
 	// unkillable makes the kill fail and nothing else: the node can still
 	// see the process, and cannot kill it.
 	unkillable atomic.Bool
+	// closeGate and signalGate, when non-nil, block Close and Signal until closed.
+	closeGate     chan struct{}
+	closeEntered  chan struct{}
+	signalGate    chan struct{}
+	signalEntered chan struct{}
 }
 
 func (p *lossyProc) isLost() bool {
@@ -312,6 +344,15 @@ func (p *lossyProc) Wait(ctx context.Context) (int, error) {
 }
 
 func (p *lossyProc) Close() error {
+	if p.closeGate != nil {
+		if p.closeEntered != nil {
+			select {
+			case p.closeEntered <- struct{}{}:
+			default:
+			}
+		}
+		<-p.closeGate
+	}
 	if p.isLost() {
 		return Wrap(ErrBackend, "lossy: kill", errors.New("the node is out of reach"))
 	}
@@ -319,6 +360,23 @@ func (p *lossyProc) Close() error {
 		return Wrap(ErrBackend, "lossy: kill", errors.New("the kill could not be carried out"))
 	}
 	return p.Process.Close()
+}
+
+func (p *lossyProc) Signal(ctx context.Context, sig os.Signal) error {
+	if p.signalGate != nil {
+		if p.signalEntered != nil {
+			select {
+			case p.signalEntered <- struct{}{}:
+			default:
+			}
+		}
+		select {
+		case <-p.signalGate:
+		case <-ctx.Done():
+			return Wrap(ErrBackend, "lossy: signal", ctx.Err())
+		}
+	}
+	return p.Process.Signal(ctx, sig)
 }
 
 func newLossyProcs(t *testing.T) (*Procs, *Node, *lossyBackend) {
@@ -718,5 +776,108 @@ func TestProcsStopNodeKillFailedOnce(t *testing.T) {
 	}
 	if got := strings.Count(err.Error(), "the kill could not be carried out"); got != 2 {
 		t.Fatalf("StopNode reports %d failed kills of two:\n%v", got, err)
+	}
+}
+
+// TestProcsDoesNotBlockOtherSlotsDuringIO verifies that blocking backend I/O
+// in Launch, Crash, and Pause does not hold p.mu across I/O, so operations on
+// other slots proceed without stalling, and StopNode racing with an in-flight
+// Launch kills the process instead of leaking it.
+func TestProcsDoesNotBlockOtherSlotsDuringIO(t *testing.T) {
+	ctx := context.Background()
+	p, n, b := newLossyProcs(t)
+
+	// 1. Launch on "slow" blocks in Stream; Launch and Running on "fast" proceed.
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	b.setStreamGate(gate, entered)
+	slowLaunch := make(chan error, 1)
+	go func() { slowLaunch <- p.Launch(ctx, "slow", n, sleeper("slow")) }()
+	<-entered
+
+	// Clear the gate for "fast" while "slow" is still parked on gate.
+	b.setStreamGate(nil, nil)
+	if err := p.Launch(ctx, "fast", n, sleeper("fast")); err != nil {
+		t.Fatalf("Launch(fast) while Launch(slow) blocked: %v", err)
+	}
+	if !p.Running("fast") {
+		t.Fatal("fast should be running while slow is launching")
+	}
+	close(gate)
+	if err := <-slowLaunch; err != nil {
+		t.Fatalf("Launch(slow): %v", err)
+	}
+	waitForLog(t, p.svc.CapturePath(n, "slow"), "slow up")
+	waitForLog(t, p.svc.CapturePath(n, "fast"), "fast up")
+
+	// 2. Pause on "slow" blocks in Signal; Pause/Resume on "fast" proceed.
+	slowProc := b.last()
+	// Find which proc is slow vs fast by checking order; slow finished after fast or before.
+	// Safer: gate whichever proc Pause("slow") hits by checking both? No, fast launched
+	// while slow was parked on streamGate, so fast created its proc first, then slow
+	// created its proc second -> b.last() is slow!
+	sigGate := make(chan struct{})
+	sigEntered := make(chan struct{}, 1)
+	slowProc.signalGate = sigGate
+	slowProc.signalEntered = sigEntered
+	slowPause := make(chan error, 1)
+	go func() { slowPause <- p.Pause(ctx, "slow") }()
+	<-sigEntered
+
+	if err := p.Pause(ctx, "fast"); err != nil {
+		t.Fatalf("Pause(fast) while Pause(slow) blocked: %v", err)
+	}
+	if err := p.Resume(ctx, "fast"); err != nil {
+		t.Fatalf("Resume(fast) while Pause(slow) blocked: %v", err)
+	}
+	close(sigGate)
+	if err := <-slowPause; err != nil {
+		t.Fatalf("Pause(slow): %v", err)
+	}
+
+	// 3. Crash on "slow" blocks in Close; Running/Crash on "fast" proceed.
+	closeGate := make(chan struct{})
+	closeEntered := make(chan struct{}, 1)
+	slowProc.closeGate = closeGate
+	slowProc.closeEntered = closeEntered
+	slowCrash := make(chan error, 1)
+	go func() { slowCrash <- p.Crash(ctx, "slow") }()
+	<-closeEntered
+
+	if err := p.Crash(ctx, "fast"); err != nil {
+		t.Fatalf("Crash(fast) while Crash(slow) blocked: %v", err)
+	}
+	close(closeGate)
+	if err := <-slowCrash; err != nil {
+		t.Fatalf("Crash(slow): %v", err)
+	}
+
+	// 4. StopNode racing with an in-flight Launch waits for it and kills the process.
+	raceGate := make(chan struct{})
+	raceEntered := make(chan struct{}, 1)
+	b.setStreamGate(raceGate, raceEntered)
+	racedLaunch := make(chan error, 1)
+	go func() { racedLaunch <- p.Launch(ctx, "raced", n, sleeper("raced")) }()
+	<-raceEntered
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- p.StopNode(ctx, n, StopPolicy{Signal: syscall.SIGTERM, Grace: 5 * time.Second}) }()
+	waitFor(t, "StopNode to mark raced closing", func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.slots["raced"] != nil && p.slots["raced"].closing
+	})
+	close(raceGate)
+	if err := <-racedLaunch; err == nil {
+		t.Fatal("Launch racing with StopNode succeeded")
+	}
+	if err := <-stopped; err != nil {
+		t.Fatalf("StopNode: %v", err)
+	}
+	if b.last().alive() {
+		t.Fatal("Launch racing with StopNode left its process alive")
+	}
+	if len(p.Names()) != 0 {
+		t.Fatalf("StopNode left slots %v", p.Names())
 	}
 }
