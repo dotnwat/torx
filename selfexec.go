@@ -170,7 +170,7 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 		// Whatever the worker left running is a leftover now that it is gone:
 		// kill it before the drains, since a leftover that inherited the
 		// worker's output is what would hold them open.
-		killed, killErr := killTagged(tag)
+		killed, killErr := killTaggedFn(tag)
 		dctx, dcancel := context.WithTimeout(context.Background(), eventDrainGrace)
 		defer dcancel()
 		select {
@@ -221,6 +221,11 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 		result = failResult(variantID(a.JobID, a.Params), a.Params, err)
 		result.Dirty = true
 	}
+	if r.killErr != nil {
+		// Leftover processes could not be confirmed dead, so the node is not
+		// safe to reuse.
+		result.Dirty = true
+	}
 	// The worker's output not kept is a slice of the results tree not
 	// persisted, which the result says, as it says of its own files.
 	note := func(err error) {
@@ -241,13 +246,16 @@ func (l SelfExecLauncher) Launch(ctx context.Context, a Assignment, sink EventSi
 	// The worker wrote result.json before the driver had anything to add
 	// to it, and a worker that died wrote none: write the result as it
 	// stands, so that the variant's directory says what the run does.
-	if dir != "" && (outErr != nil || !haveResult) {
+	if dir != "" && (outErr != nil || !haveResult || r.killErr != nil) {
 		if err := writeResultJSON(dir, result); err != nil {
 			note(err)
 		}
 	}
 	return result, nil
 }
+
+// killTaggedFn is killTagged; overridden in tests to exercise cleanup errors.
+var killTaggedFn = killTagged
 
 // workerOutput carries a worker's standard output and error to worker.log
 // in the variant's directory and to the driver's console. The worker

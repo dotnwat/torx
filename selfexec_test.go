@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -426,6 +427,29 @@ func TestSelfExecLauncherReportsWorkerLogFailure(t *testing.T) {
 	// And so does the result.json the worker wrote before the driver knew.
 	if saved := savedResult(t, runDir, "wtest.stderr"); saved.PersistErr != res.PersistErr {
 		t.Errorf("result.json's PersistErr = %q, want %q", saved.PersistErr, res.PersistErr)
+	}
+}
+
+// A leftover-cleanup failure leaves processes that could not be confirmed dead,
+// so the driver must mark the result Dirty and rewrite result.json even when
+// the worker reported a clean pass.
+func TestSelfExecLauncherMarksDirtyOnKillLeftoversError(t *testing.T) {
+	orig := killTaggedFn
+	killTaggedFn = func(string) (int, error) { return 0, errors.New("pid 42: operation not permitted") }
+	t.Cleanup(func() { killTaggedFn = orig })
+
+	runDir := t.TempDir()
+	launcher := SelfExecLauncher{Env: []string{"TORX_TEST_WORKER=1"}}
+	res, err := launcher.Launch(context.Background(),
+		Assignment{JobID: "wtest.pass", Session: SessionConfig{ResultsDir: runDir}}, discardSink{})
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if !res.Dirty {
+		t.Errorf("result.Dirty = false, want true when leftover kill fails")
+	}
+	if saved := savedResult(t, runDir, "wtest.pass"); !saved.Dirty {
+		t.Errorf("result.json Dirty = false, want true when leftover kill fails")
 	}
 }
 

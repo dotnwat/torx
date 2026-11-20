@@ -109,3 +109,76 @@ func TestHasEnvEntry(t *testing.T) {
 		t.Errorf("killTagged of an unused tag: %v", err)
 	}
 }
+
+func TestKillTaggedWith(t *testing.T) {
+	const tag = "test-tag"
+	writeProc := func(procDir string, pid int, env string) {
+		t.Helper()
+		dir := filepath.Join(procDir, strconv.Itoa(pid))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "environ"), []byte(env), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("counts distinct pids across passes", func(t *testing.T) {
+		procDir := t.TempDir()
+		writeProc(procDir, 100, workerTagEnv+"="+tag+"\x00")
+		calls := 0
+		killed, err := killTaggedWith(procDir, tag, 1, func(pid int) error {
+			calls++
+			if calls == 3 {
+				_ = os.RemoveAll(filepath.Join(procDir, strconv.Itoa(pid)))
+			}
+			return nil
+		}, time.Second, time.Millisecond)
+		if err != nil {
+			t.Fatalf("killTaggedWith: %v", err)
+		}
+		if killed != 1 {
+			t.Errorf("killed = %d, want 1 distinct process (kill called %d times)", killed, calls)
+		}
+	})
+
+	t.Run("EPERM on one pid does not abort killing others", func(t *testing.T) {
+		procDir := t.TempDir()
+		writeProc(procDir, 100, workerTagEnv+"="+tag+"\x00")
+		writeProc(procDir, 200, workerTagEnv+"="+tag+"\x00")
+		var got200 bool
+		start := time.Now()
+		killed, err := killTaggedWith(procDir, tag, 1, func(pid int) error {
+			if pid == 100 {
+				return syscall.EPERM
+			}
+			if pid == 200 {
+				got200 = true
+				_ = os.RemoveAll(filepath.Join(procDir, strconv.Itoa(pid)))
+				return nil
+			}
+			return syscall.ESRCH
+		}, 2*time.Second, time.Millisecond)
+		if !errors.Is(err, syscall.EPERM) {
+			t.Fatalf("err = %v, want EPERM", err)
+		}
+		if !got200 || killed != 1 {
+			t.Errorf("got200=%v killed=%d, want true and 1", got200, killed)
+		}
+		if time.Since(start) > time.Second {
+			t.Errorf("spent %v retrying unkillable pid", time.Since(start))
+		}
+	})
+
+	t.Run("times out when killable pid never disappears", func(t *testing.T) {
+		procDir := t.TempDir()
+		writeProc(procDir, 100, workerTagEnv+"="+tag+"\x00")
+		killed, err := killTaggedWith(procDir, tag, 1, func(int) error { return nil }, 25*time.Millisecond, 5*time.Millisecond)
+		if err == nil {
+			t.Fatal("expected timeout error when process never disappears")
+		}
+		if killed != 1 {
+			t.Errorf("killed = %d, want 1", killed)
+		}
+	})
+}
